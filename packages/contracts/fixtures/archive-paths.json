@@ -1,0 +1,33 @@
+{
+  "unsafe": [
+    "",
+    "/etc/passwd",
+    "\\windows\\system32",
+    "C:\\Windows",
+    "C:/Windows",
+    "../outside",
+    "..\\outside",
+    "a/../../outside",
+    "a/./b",
+    "a//b",
+    "a/",
+    "file.txt:stream",
+    "a\u0000b"
+  ],
+  "cases": [
+    { "emulator": "86box", "path": "86box.cfg", "excluded": false, "watched": false },
+    { "emulator": "86box", "path": "disks/c.img", "excluded": false, "watched": false },
+    { "emulator": "86box", "path": "shot.ppm", "excluded": false, "watched": false },
+    { "emulator": "86box", "path": "screenshots/shot.png", "excluded": true, "watched": true },
+    { "emulator": "86box", "path": "screenshots\\shot.png", "excluded": true, "watched": true },
+    { "emulator": "86box", "path": "Screenshots/shot.png", "excluded": true, "watched": true },
+    { "emulator": "86box", "path": "screenshots/old/shot.png", "excluded": true, "watched": false },
+    { "emulator": "86box", "path": "screenshots", "excluded": false, "watched": false },
+    { "emulator": "86box", "path": "disks/screenshots/a.png", "excluded": false, "watched": false },
+    { "emulator": "qemu", "path": "run-win.cmd", "excluded": false, "watched": false },
+    { "emulator": "qemu", "path": "shot.ppm", "excluded": true, "watched": true },
+    { "emulator": "qemu", "path": "SHOT.PPM", "excluded": true, "watched": true },
+    { "emulator": "qemu", "path": "disks/shot.ppm", "excluded": false, "watched": false },
+    { "emulator": "qemu", "path": "screenshots/shot.png", "excluded": false, "watched": false }
+  ]
+}

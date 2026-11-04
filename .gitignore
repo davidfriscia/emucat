@@ -1,0 +1,24 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Rust
+agent/target/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+agent/agent.toml
+agent/*.local.toml
+
+# Runtime data
+var/
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

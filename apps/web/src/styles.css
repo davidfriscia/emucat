@@ -1,0 +1,101 @@
+:root {
+  --emucat-mark-head: #0d9488;
+  --emucat-mark-screen: #042f2e;
+  --emucat-mark-eye: #5eead4;
+}
+
+[data-bs-theme='light'] {
+  --bs-primary: #0f766e;
+  --bs-primary-rgb: 15, 118, 110;
+  --bs-link-color: #0f766e;
+  --bs-link-color-rgb: 15, 118, 110;
+  --bs-link-hover-color: #115e59;
+  --bs-link-hover-color-rgb: 17, 94, 89;
+}
+
+[data-bs-theme='dark'] {
+  --bs-primary: #2dd4bf;
+  --bs-primary-rgb: 45, 212, 191;
+  --bs-link-color: #5eead4;
+  --bs-link-color-rgb: 94, 234, 212;
+  --bs-link-hover-color: #99f6e4;
+  --bs-link-hover-color-rgb: 153, 246, 228;
+}
+
+.btn-primary {
+  --bs-btn-color: #fff;
+  --bs-btn-bg: #0f766e;
+  --bs-btn-border-color: #0f766e;
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: #115e59;
+  --bs-btn-hover-border-color: #115e59;
+  --bs-btn-active-color: #fff;
+  --bs-btn-active-bg: #134e4a;
+  --bs-btn-active-border-color: #134e4a;
+}
+
+.form-check-input:checked {
+  background-color: #0f766e;
+  border-color: #0f766e;
+}
+
+.brand-mark-head {
+  fill: var(--emucat-mark-head);
+}
+
+.brand-mark-screen {
+  fill: var(--emucat-mark-screen);
+}
+
+.brand-mark-eye {
+  fill: var(--emucat-mark-eye);
+}
+
+.brand-wordmark {
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.api-status {
+  white-space: nowrap;
+}
+
+.api-status-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+}
+
+.empty-state {
+  border-style: dashed !important;
+}
+
+.empty-state-text {
+  max-width: 34rem;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 1rem;
+}
+
+.settings-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.settings-facts dt {
+  font-weight: 500;
+}
+
+.settings-facts dd {
+  margin: 0;
+}
+
+/* The default outline-secondary text is too faint against the dark navigation bar. */
+.theme-button {
+  --bs-btn-color: var(--bs-body-color);
+}

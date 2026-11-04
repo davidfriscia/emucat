@@ -1,0 +1,40 @@
+# Example EmuCat agent configuration. Copy to the location shown by `emucat-agent info`
+# or pass it with `--config`, then replace the placeholder paths.
+#
+# Environment variables override this file:
+#   EMUCAT_AGENT_CONFIG                path to this file
+#   EMUCAT_AGENT_API_URL               [server] api_url
+#   EMUCAT_AGENT_86BOX_BASE_PATH       [emulators.86box] base_path
+#   EMUCAT_AGENT_86BOX_EXECUTABLE      [emulators.86box] executable
+#   EMUCAT_AGENT_QEMU_BASE_PATH        [emulators.qemu] base_path
+#   EMUCAT_AGENT_QEMU_EXECUTABLE       [emulators.qemu] executable
+#   EMUCAT_AGENT_STATE_DIR             [state] dir
+#   EMUCAT_AGENT_LOG_LEVEL             [logging] level
+#   EMUCAT_AGENT_LOG_FORMAT            [logging] format
+#
+# This file holds no secrets. Agent credentials will come from pairing in a future version.
+
+[server]
+# The agent only ever makes outbound connections to this URL.
+api_url = "http://127.0.0.1:4000"
+
+# Each VM lives in BASE_PATH/VM_NAME. Configure at least one emulator, with both values.
+# Use single quotes for Windows paths so that backslashes are taken literally.
+[emulators.86box]
+base_path = 'C:\path\to\86box-vms'
+executable = 'C:\path\to\86Box.exe'
+
+[emulators.qemu]
+base_path = 'C:\path\to\qemu-vms'
+executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
+
+[state]
+# Where the agent will keep its own data. Defaults to a per-user location; see `emucat-agent info`.
+# Must not be inside an emulator base path.
+# dir = 'C:\path\to\emucat-agent-state'
+
+[logging]
+# An EnvFilter expression: error, warn, info, debug, trace, or per-module directives.
+level = "info"
+# text or json
+format = "text"
