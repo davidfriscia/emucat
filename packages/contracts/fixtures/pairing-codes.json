@@ -1,0 +1,21 @@
+{
+  "valid": [
+    { "input": "ABCD2345", "canonical": "ABCD2345", "formatted": "ABCD-2345" },
+    { "input": "ABCD-2345", "canonical": "ABCD2345", "formatted": "ABCD-2345" },
+    { "input": "abcd-2345", "canonical": "ABCD2345", "formatted": "ABCD-2345" },
+    { "input": " abcd 2345 ", "canonical": "ABCD2345", "formatted": "ABCD-2345" },
+    { "input": "O0OO-IL1i", "canonical": "00001111", "formatted": "0000-1111" },
+    { "input": "ZZZZ-ZZZZ", "canonical": "ZZZZZZZZ", "formatted": "ZZZZ-ZZZZ" }
+  ],
+  "invalid": [
+    "",
+    "-",
+    "ABCD234",
+    "ABCD23456",
+    "ABCD-U345",
+    "ABCD_2345",
+    "ABCD/2345",
+    "ÀBCD2345",
+    "ABCD234\u0000"
+  ]
+}

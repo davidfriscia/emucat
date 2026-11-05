@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use crate::emulators::EmulatorType;
+use crate::pairing::sanitize_agent_name;
 
 pub const CONFIG_PATH_ENV: &str = "EMUCAT_AGENT_CONFIG";
 
@@ -34,6 +35,8 @@ pub struct EmulatorConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub api_url: Url,
+    /// The name to pair under. Defaults to the computer name.
+    pub agent_name: Option<String>,
     pub emulators: BTreeMap<EmulatorType, EmulatorConfig>,
     pub state_dir: Option<PathBuf>,
     pub log_level: String,
@@ -77,6 +80,8 @@ struct FileConfig {
     #[serde(default)]
     server: ServerSection,
     #[serde(default)]
+    agent: AgentSection,
+    #[serde(default)]
     emulators: EmulatorsSection,
     #[serde(default)]
     state: StateSection,
@@ -88,6 +93,12 @@ struct FileConfig {
 #[serde(deny_unknown_fields)]
 struct ServerSection {
     api_url: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSection {
+    name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -296,9 +307,19 @@ impl Config {
             field: "logging.level",
             message: error.to_string(),
         })?;
+        let agent_name = env("EMUCAT_AGENT_NAME")
+            .or(file.agent.name)
+            .map(|name| {
+                sanitize_agent_name(&name).ok_or(ConfigError::Invalid {
+                    field: "agent.name",
+                    message: "must not be empty".to_owned(),
+                })
+            })
+            .transpose()?;
 
         Ok(Self {
             api_url: parse_api_url(&api_url)?,
+            agent_name,
             emulators,
             state_dir: env("EMUCAT_AGENT_STATE_DIR")
                 .map(PathBuf::from)

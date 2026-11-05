@@ -70,6 +70,9 @@ jobs:
             agent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('agent/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+      - if: runner.os == 'Linux'
+        # native-tls needs the OpenSSL headers. See decision 0009.
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked

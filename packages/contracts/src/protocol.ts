@@ -1,14 +1,34 @@
 import { z } from 'zod';
+import { agentVersionSchema } from './agents.js';
+import {
+  discoveryErrorPayloadSchema,
+  discoveryRequestPayloadSchema,
+  discoveryResultPayloadSchema,
+} from './discovery.js';
+import { architectureSchema, platformSchema } from './platform.js';
 import { timestampSchema } from './version.js';
+
+export * from './platform.js';
 
 export const PROTOCOL_VERSION = 1;
 export const AGENT_WS_PATH = '/api/v1/agent/ws';
 export const AGENT_MAX_MESSAGE_BYTES = 64 * 1024;
 
-/** Application-defined WebSocket close codes (the 4000-4999 range is reserved for this). */
+/**
+ * Application-defined WebSocket close codes (the 4000-4999 range is reserved for this). The agent
+ * reconnects after any close except `agentRevoked`, `superseded` and `unsupportedProtocolVersion`.
+ */
 export const WS_CLOSE_CODES = {
   invalidMessage: 4400,
+  /** The credential was revoked. It will not work again. */
+  agentRevoked: 4401,
   unsupportedProtocolVersion: 4406,
+  /** No `agent.hello`, or no traffic at all, within the allowed time. */
+  timedOut: 4408,
+  /** A newer connection with the same identity replaced this one. */
+  superseded: 4409,
+  /** The peer sent far more messages than the protocol calls for. */
+  tooManyMessages: 4429,
 } as const;
 
 /**
@@ -25,13 +45,8 @@ export const envelopeSchema = z.object({
 });
 export type Envelope = z.infer<typeof envelopeSchema>;
 
-export const PLATFORMS = ['windows', 'macos', 'linux'] as const;
-export const platformSchema = z.enum(PLATFORMS);
-export const ARCHITECTURES = ['x86_64', 'aarch64'] as const;
-export const architectureSchema = z.enum(ARCHITECTURES);
-
 export const agentHelloPayloadSchema = z.object({
-  agentVersion: z.string().min(1).max(64),
+  agentVersion: agentVersionSchema,
   platform: platformSchema,
   architecture: architectureSchema,
 });
@@ -51,16 +66,29 @@ export type ServerErrorPayload = z.infer<typeof serverErrorPayloadSchema>;
 
 const emptyPayloadSchema = z.object({}).strict();
 
-/** Messages an agent may send. There are deliberately no control commands in this version. */
+/** Messages an agent may send. None of them can make the server act on anything but its own report. */
 export const agentMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({ type: z.literal('agent.hello'), payload: agentHelloPayloadSchema }),
   envelopeSchema.extend({ type: z.literal('agent.heartbeat'), payload: emptyPayloadSchema }),
+  envelopeSchema.extend({
+    type: z.literal('agent.discovery_result'),
+    payload: discoveryResultPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.discovery_error'),
+    payload: discoveryErrorPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
+/** Messages a server may send. `server.discovery_request` is the only command, and it is read-only. */
 export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({ type: z.literal('server.welcome'), payload: serverWelcomePayloadSchema }),
   envelopeSchema.extend({ type: z.literal('server.heartbeat_ack'), payload: emptyPayloadSchema }),
   envelopeSchema.extend({ type: z.literal('server.error'), payload: serverErrorPayloadSchema }),
+  envelopeSchema.extend({
+    type: z.literal('server.discovery_request'),
+    payload: discoveryRequestPayloadSchema,
+  }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

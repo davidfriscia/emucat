@@ -287,9 +287,9 @@ export function RegistrationNote() {
   return (
     <div className="alert alert-secondary small" role="note">
       <strong>Adding virtual machines.</strong> A VM joins the catalog when a connected EmuCat agent
-      discovers it on your computer and you confirm its registration. That arrives in a later
-      milestone, along with agent pairing. Until then, this page manages VMs that are already
-      registered.
+      discovers it on your computer and you confirm its registration. Agents can discover VMs now,
+      on the Agents page, but registering them arrives in a later milestone. Until then, this page
+      manages VMs that are already registered.
     </div>
   );
 }

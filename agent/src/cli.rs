@@ -14,9 +14,9 @@ use crate::protocol::PROTOCOL_VERSION;
     version,
     about = "Headless local agent for EmuCat",
     long_about = "Headless local agent for EmuCat.\n\n\
-        Connects outbound to an EmuCat server and manages local 86Box and QEMU virtual machines. \
-        In this version it validates its configuration and waits for a shutdown signal: it opens \
-        no connections, launches no emulators and does not change VM directories."
+        Connects outbound to an EmuCat server, and reports the 86Box and QEMU virtual machines in \
+        its configured directories when asked. It has no listener, launches no emulators and does \
+        not change VM directories. Pair it once with `pair`, then keep it running with `run`."
 )]
 pub struct Cli {
     /// Configuration file [env: EMUCAT_AGENT_CONFIG]
@@ -37,8 +37,21 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Validate the configuration, then run until stopped (default)
+    /// Connect to the server and stay connected until stopped (default)
     Run,
+    /// Pair this agent with the server. An administrator approves it in the web app
+    Pair {
+        /// Name shown to the administrator. Defaults to [agent] name, then the computer name
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Replace an existing credential, once a new one has been issued
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the local credential. Does not touch the server or any VM
+    Unpair,
+    /// Scan the configured VM directories, read-only, and print the report. Needs no server
+    Discover,
     /// Validate the configuration and exit
     CheckConfig,
     /// Print version, protocol, platform and default paths

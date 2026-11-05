@@ -15,19 +15,24 @@ and [`catalog.ts`](../packages/contracts/src/catalog.ts). The agent's WebSocket 
 }
 ```
 
-| Status | Code                                                   | Meaning                                        |
-| ------ | ------------------------------------------------------ | ---------------------------------------------- |
-| 400    | `validation_failed`                                    | Bad body, query or path. `details` says what.  |
-| 401    | `unauthenticated`                                      | No live session                                |
-| 401    | `invalid_credentials`                                  | Wrong sign-in, always with the same message    |
-| 403    | `csrf_rejected`, `cross_origin_rejected`               | See [authentication](authentication.md#csrf)   |
-| 403    | `forbidden`                                            | Signed in, but not an administrator            |
-| 403    | `invalid_setup_token`, `invalid_current_password`      |                                                |
-| 404    | `vm_not_found`, `media_not_found`, `session_not_found` | A private item looks the same as a missing one |
-| 404    | `not_found`                                            | No such route                                  |
-| 409    | `setup_completed`                                      | Setup has already happened                     |
-| 429    | `rate_limited`                                         | See the `Retry-After` header                   |
-| 500    | `internal_error`                                       | Details are in the server log only             |
+| Status | Code                                                        | Meaning                                        |
+| ------ | ----------------------------------------------------------- | ---------------------------------------------- |
+| 400    | `validation_failed`                                         | Bad body, query or path. `details` says what.  |
+| 401    | `unauthenticated`                                           | No live session                                |
+| 401    | `invalid_credentials`                                       | Wrong sign-in, always with the same message    |
+| 403    | `csrf_rejected`, `cross_origin_rejected`                    | See [authentication](authentication.md#csrf)   |
+| 403    | `forbidden`                                                 | Signed in, but not an administrator            |
+| 403    | `invalid_setup_token`, `invalid_current_password`           |                                                |
+| 401    | `invalid_pairing_secret`                                    | Polling with an unknown secret                 |
+| 404    | `vm_not_found`, `media_not_found`, `session_not_found`      | A private item looks the same as a missing one |
+| 404    | `agent_not_found`, `pairing_not_found`                      |                                                |
+| 404    | `pairing_code_invalid`                                      | Wrong, malformed and unknown codes alike       |
+| 409    | `pairing_already_decided`, `agent_offline`, `agent_revoked` |                                                |
+| 410    | `pairing_expired`                                           |                                                |
+| 404    | `not_found`                                                 | No such route                                  |
+| 409    | `setup_completed`                                           | Setup has already happened                     |
+| 429    | `rate_limited`, `pairing_capacity`                          | See the `Retry-After` header                   |
+| 500    | `internal_error`                                            | Details are in the server log only             |
 
 **Unknown fields are rejected** in every request body and query string.
 
@@ -94,7 +99,52 @@ Requires a session with the `admin` role. Responses are `Cache-Control: no-store
 Media mutations return the VM's updated media list.
 
 **There is no route that creates a VM**, and none that changes `emulator_type` or `vm_name`. A VM enters the
-catalog only through agent discovery followed by user confirmation, which a later milestone adds.
+catalog only through agent discovery followed by user confirmation. Discovery exists, and the confirmation
+arrives in Milestone 3.
+
+## Agent pairing
+
+Used by an agent with no credential yet. See the [protocol](protocol.md#pairing) for the flow. Responses are
+`Cache-Control: no-store`.
+
+| Method and path                | Auth           | Purpose                                                                                                                                      |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /agent/pairing/requests` | None           | `{ name, platform, architecture, agentVersion, protocolVersion }`. 201 with `{ pairingCode, pollingSecret, expiresAt, pollIntervalSeconds }` |
+| `POST /agent/pairing/poll`     | Polling secret | `{ status }`, plus `agentId` and `credential` once, on approval                                                                              |
+
+## Agents
+
+Requires a session with the `admin` role, and the CSRF token on `POST`. Responses are `Cache-Control: no-store`,
+and contain no credential, polling secret, code or digest.
+
+| Method and path                                         | Purpose                                                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `GET /admin/agents`                                     | Every agent: details, `online`, `pairingStatus`, `lastSeenAt`             |
+| `GET /admin/agents/:agentId`                            | One agent                                                                 |
+| `POST /admin/agents/:agentId/revoke`                    | Revokes and disconnects it. Safe to repeat                                |
+| `POST /admin/agents/:agentId/discovery`                 | Starts a scan, or returns the running one. 202. 409 if offline or revoked |
+| `GET /admin/agents/:agentId/discovery`                  | `{ operation }`: the latest scan since the API started, or `null`         |
+| `GET /admin/agent-pairing/requests`                     | Requests waiting for a decision                                           |
+| `GET /admin/agent-pairing/requests/:requestId`          | One request, in any state, to follow its progress                         |
+| `POST /admin/agent-pairing/lookup`                      | `{ code }`: finds a request, for review                                   |
+| `POST /admin/agent-pairing/requests/:requestId/approve` | `{ code }`: approves it. The code is required                             |
+| `POST /admin/agent-pairing/requests/:requestId/reject`  | Rejects it. No code needed: this grants nothing                           |
+
+A code is sent in a body so that it never appears in a URL. An `operation` has `status` (`running`, `completed` or
+`failed`), `failure`, `hostPlatform`, `emulators`, `skipped`, and `vms` of `{ emulatorType, vmName, markers,
+hostCompatible, registered }`. See [the agent guide](agent.md#discovery).
+
+**Limits**, in the API process. Successes do not count, except for new requests and polls per request.
+
+| Attempt                   | Limit                                            |
+| ------------------------- | ------------------------------------------------ |
+| New pairing requests      | 20 per address per 15 minutes                    |
+| Requests waiting at once  | 100 in total                                     |
+| Wrong polling secrets     | 30 per address per 15 minutes                    |
+| Polls of one request      | 120 per minute                                   |
+| Wrong codes, on any route | 10 per session and 30 per address per 15 minutes |
+
+**Discovery creates nothing.** No route here writes to `virtual_machines` or `vm_versions`.
 
 ## Browser pages
 
@@ -105,6 +155,8 @@ catalog only through agent discovery followed by user confirmation, which a late
 | `/login`, `/setup`                 | Public        | Sign in, first-run setup  |
 | `/admin`                           | Administrator | Dashboard                 |
 | `/admin/catalog`                   | Administrator | Catalog management        |
+| `/admin/agents`                    | Administrator | Agents, pairing           |
+| `/admin/agents/:agentId`           | Administrator | One agent, discovery      |
 | `/admin/vms/:emulatorType/:vmName` | Administrator | VM metadata editor        |
 | `…/media`                          | Administrator | Media management          |
 | `/account`, `/settings`            | Signed in     | Password, sessions, theme |

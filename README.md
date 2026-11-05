@@ -3,11 +3,12 @@
 Self-hosted web catalog and local launcher for [86Box](https://86box.net/) and
 [QEMU](https://www.qemu.org/) virtual machines.
 
-**Status: Milestone 1 (identity, catalog and branding).** There is a first-administrator setup, local
-sign-in with persistent sessions, a public catalog, and an administration area for the metadata and media of
-registered VMs. VM registration, archive transfers, launching, snapshots, media upload and pairing are **not**
-implemented yet, so **there is currently no way to add a VM to the catalog**: it stays empty until the agent
-milestones arrive. See [known limitations](#known-limitations).
+**Status: Milestone 2 (agent connectivity and discovery).** There is a first-administrator setup, local
+sign-in with persistent sessions, a public catalog, and an administration area. A native agent pairs with the
+server, stays connected over an authenticated WebSocket, and reports the VMs it finds in its configured
+directories. VM registration, archive transfers, launching, snapshots and media upload are **not** implemented yet,
+so **discovered VMs cannot be added to the catalog yet**: it stays empty until Milestone 3. See
+[known limitations](#known-limitations).
 
 | Part                                       | Technology                                       |
 | ------------------------------------------ | ------------------------------------------------ |
@@ -18,7 +19,7 @@ milestones arrive. See [known limitations](#known-limitations).
 | [`compose.yaml`](compose.yaml)             | MariaDB for local development                    |
 
 Read [architecture](docs/architecture.md), the [domain model](docs/domain-model.md), the
-[protocol](docs/protocol.md), the [REST API](docs/api.md), [authentication](docs/authentication.md), the
+[agent guide](docs/agent.md), the [protocol](docs/protocol.md), the [REST API](docs/api.md), [authentication](docs/authentication.md), the
 [brand guidelines](docs/brand.md) and the [decision records](docs/decisions).
 
 ## Prerequisites
@@ -81,6 +82,7 @@ Run from the repository root.
 | `pnpm lint`        | ESLint, Prettier check, `cargo fmt --check`, Clippy with warnings as errors. |
 | `pnpm format`      | Formats everything with Prettier and rustfmt.                                |
 | `pnpm test`        | Runs all tests. MariaDB must be running.                                     |
+| `pnpm test:e2e`    | Builds the agent, and runs the real agent against the real API. Windows.     |
 | `pnpm build`       | Production builds of contracts, API and web, plus the Release agent.         |
 | `pnpm build:agent` | Builds only the Release agent.                                               |
 | `pnpm dev`         | Starts contracts watcher, API and web together.                              |
@@ -112,6 +114,10 @@ and drop them afterwards. They never touch the development database. If MariaDB 
 **fail** with a message saying so, rather than being skipped. Run `pnpm build:contracts` before a
 single-package API or web run, if the contracts have changed.
 
+`pnpm test:e2e` starts the compiled agent as a real process and takes it through pairing, DPAPI storage, presence,
+discovery, a server restart and revocation, using temporary VM directories. It needs MariaDB, and runs on Windows
+only, so CI does not run it.
+
 The TypeScript and Rust domain code is tested against the same files in
 [`packages/contracts/fixtures`](packages/contracts/fixtures), so they cannot drift apart unnoticed.
 
@@ -125,21 +131,32 @@ cargo build --release
 .\target\release\emucat-agent.exe info
 ```
 
-Copy [`agent/agent.example.toml`](agent/agent.example.toml), fill in your paths, and check it:
+Copy [`agent/agent.example.toml`](agent/agent.example.toml), fill in your paths, and then:
 
 ```powershell
 .\target\release\emucat-agent.exe check-config --config agent.toml
-.\target\release\emucat-agent.exe run --config agent.toml   # Ctrl+C to stop
+.\target\release\emucat-agent.exe pair --config agent.toml   # prints a code for the Agents page
+.\target\release\emucat-agent.exe run --config agent.toml    # Ctrl+C to stop
 ```
 
-So far `run` validates the configuration, reports the platform, and waits for a shutdown
-signal. It opens no connections, has no listener, launches no emulator and changes nothing in VM
-directories.
+`discover` scans the configured directories and prints the report, with no server involved. The agent only connects
+out and has no listener. It launches no emulator and changes nothing in VM directories. Its credential is protected
+with DPAPI. The [agent guide](docs/agent.md) covers configuration, pairing, credential recovery, discovery and
+troubleshooting.
+
+After upgrading from an earlier milestone, run `pnpm db:migrate`.
 
 ## Known limitations
 
-- **No way to add a VM.** Registration arrives with agent pairing. Until then the catalog stays empty on a real
-  installation. The catalog and media features are tested against fixture rows in throwaway databases.
+- **No way to add a VM.** Discovery shows what an agent finds, but registering it arrives in Milestone 3. Until then
+  the catalog stays empty on a real installation. The catalog and media features are tested against fixture rows in
+  throwaway databases.
+- **One API process.** Agent presence and discovery results are in memory, so several instances would not work
+  together. See [decision 0010](docs/decisions/0010-agent-connections-and-discovery.md).
+- **Windows agents only for pairing.** Elsewhere the agent builds, and `discover` works, but there is no credential
+  store yet, so it refuses to pair. It does not install itself as a service, and has no tray icon.
+- **QEMU VMs need the documented scripts.** A VM whose launch script is named otherwise, such as `run.bat`, is
+  reported as having no marker. See [the agent guide](docs/agent.md#what-counts-as-a-vm).
 - **No media upload.** The administration pages manage media rows that already exist. Nothing creates them yet.
 - **Single role.** Only administrators exist in practice, and there is no user management.
 - **No password recovery** other than editing the database. See

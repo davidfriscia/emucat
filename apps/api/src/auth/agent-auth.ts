@@ -13,8 +13,8 @@ export function hashToken(token: string): Buffer {
 }
 
 /**
- * Looks up a token by digest. Pairing does not exist yet, so no agent can hold a credential and
- * every connection attempt is rejected: the endpoint fails closed until pairing is implemented.
+ * Looks up a token by digest. Revocation removes the digest, and is also checked here, so a revoked
+ * agent cannot authenticate by either route. An unknown token and a revoked one look the same.
  */
 export function databaseAgentAuthenticator(pool: Pool): AgentAuthenticator {
   return async (token) => {

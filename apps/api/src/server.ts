@@ -1,3 +1,6 @@
+import { AgentHub } from './agents/hub.js';
+import { DEFAULT_PAIRING_POLICY } from './agents/pairing.js';
+import { databaseAgentPresence } from './agents/repository.js';
 import { databaseAgentAuthenticator } from './auth/agent-auth.js';
 import { createPasswordHasher } from './auth/passwords.js';
 import { RateLimiter } from './auth/rate-limiter.js';
@@ -8,6 +11,7 @@ import { loadMigrations } from './db/migrate.js';
 import { createPool } from './db/pool.js';
 import { loadDotEnv } from './env.js';
 import { databaseReadiness } from './readiness.js';
+import { DEFAULT_PAIRING_RATE_LIMITS } from './routes/agent-pairing.js';
 import { announceSetupToken, DEFAULT_AUTH_RATE_LIMITS } from './routes/auth.js';
 import type { BrowserDependencies } from './routes/browser.js';
 import { fileMediaStorage } from './storage/media-storage.js';
@@ -40,6 +44,8 @@ async function main(): Promise<void> {
     },
     cookie: { secure: config.cookieSecure, maxAgeSeconds: config.sessionAbsoluteTtlSeconds },
     publicOrigin: config.publicOrigin,
+    pairing: DEFAULT_PAIRING_POLICY,
+    pairingRateLimits: DEFAULT_PAIRING_RATE_LIMITS,
   };
 
   const app = await buildApp({
@@ -48,6 +54,7 @@ async function main(): Promise<void> {
       app.log.warn({ err: error }, 'Readiness check failed');
     }),
     authenticateAgent: databaseAgentAuthenticator(pool),
+    agentHub: new AgentHub({ presence: databaseAgentPresence(pool) }),
     trustProxy: config.trustProxy,
     browser,
   });

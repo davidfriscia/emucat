@@ -16,16 +16,27 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
+fastrand = "2.5"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# The operating system's TLS and trust store: SChannel on Windows. See decision 0009.
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
-tokio = { version = "1.54", features = ["macros", "rt", "signal"] }
+tokio = { version = "1.54", features = ["macros", "net", "rt", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 toml = "1.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2.5"
 uuid = { version = "1.29", features = ["serde", "v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+] }
 
 [dev-dependencies]
 tempfile = "3.27"

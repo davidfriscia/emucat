@@ -1,19 +1,8 @@
-import { randomUUID } from 'node:crypto';
-import {
-  AGENT_WS_PATH,
-  API_PREFIX,
-  agentMessageSchema,
-  envelopeSchema,
-  PROTOCOL_VERSION,
-  WS_CLOSE_CODES,
-  type ServerMessage,
-} from '@emucat/contracts';
-import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from 'fastify';
-import type { WebSocket } from 'ws';
+import { AGENT_WS_PATH, API_PREFIX } from '@emucat/contracts';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { AgentHub } from '../agents/hub.js';
 import { parseBearerToken, type AgentAuthenticator } from '../auth/agent-auth.js';
 import { errorBody } from '../errors.js';
-
-const HEARTBEAT_INTERVAL_SECONDS = 30;
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -21,85 +10,15 @@ declare module 'fastify' {
   }
 }
 
-type ServerMessageBody = Pick<ServerMessage, 'type' | 'payload'>;
-
-function send(socket: WebSocket, message: ServerMessageBody, correlationId?: string): void {
-  socket.send(
-    JSON.stringify({
-      protocolVersion: PROTOCOL_VERSION,
-      id: randomUUID(),
-      ...(correlationId ? { correlationId } : {}),
-      sentAt: new Date().toISOString(),
-      ...message,
-    }),
-  );
-}
-
-function sendError(socket: WebSocket, code: string, message: string, correlationId?: string): void {
-  send(socket, { type: 'server.error', payload: { code, message } }, correlationId);
-}
-
-function parseJson(raw: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-}
-
-function handleMessage(
-  socket: WebSocket,
-  raw: string,
-  agentId: string,
-  log: FastifyBaseLogger,
-): void {
-  const envelope = envelopeSchema.safeParse(parseJson(raw));
-  if (!envelope.success) {
-    sendError(socket, 'invalid_message', 'Message is not a valid envelope');
-    socket.close(WS_CLOSE_CODES.invalidMessage, 'invalid message');
-    return;
-  }
-  const { id, protocolVersion, type } = envelope.data;
-
-  if (protocolVersion !== PROTOCOL_VERSION) {
-    sendError(socket, 'unsupported_protocol_version', `Server speaks ${PROTOCOL_VERSION}`, id);
-    socket.close(WS_CLOSE_CODES.unsupportedProtocolVersion, 'unsupported protocol version');
-    return;
-  }
-
-  const message = agentMessageSchema.safeParse(envelope.data);
-  if (!message.success) {
-    // Unknown types are refused rather than ignored. Nothing here can trigger a control action.
-    log.warn({ agentId, type }, 'Rejected agent message');
-    sendError(socket, 'unsupported_message', 'Unsupported or malformed message', id);
-    return;
-  }
-
-  switch (message.data.type) {
-    case 'agent.hello':
-      log.info({ agentId, ...message.data.payload }, 'Agent said hello');
-      send(
-        socket,
-        {
-          type: 'server.welcome',
-          payload: { agentId, heartbeatIntervalSeconds: HEARTBEAT_INTERVAL_SECONDS },
-        },
-        id,
-      );
-      break;
-    case 'agent.heartbeat':
-      send(socket, { type: 'server.heartbeat_ack', payload: {} }, id);
-      break;
-  }
-}
-
 /**
- * Agent connection skeleton. Authentication happens in `preValidation`, before the WebSocket
- * handshake, so an unauthenticated client gets a plain 401 and never has an open socket.
+ * The agent connection. Authentication happens in `preValidation`, before the WebSocket handshake, so
+ * an unauthenticated client gets a plain 401 and never has an open socket. Everything after the
+ * handshake is the hub's.
  */
 export function registerAgentWebSocket(
   app: FastifyInstance,
   authenticate: AgentAuthenticator,
+  hub: AgentHub,
 ): void {
   app.decorateRequest('agent', null);
 
@@ -128,19 +47,7 @@ export function registerAgentWebSocket(
         socket.close(1008, 'unauthenticated');
         return;
       }
-      request.log.info({ agentId }, 'Agent connected');
-      socket.on('message', (data, isBinary) => {
-        if (isBinary) {
-          sendError(socket, 'invalid_message', 'Binary messages are not supported');
-          socket.close(WS_CLOSE_CODES.invalidMessage, 'binary message');
-          return;
-        }
-        handleMessage(socket, data.toString(), agentId, request.log);
-      });
-      socket.on('close', (code) => request.log.info({ agentId, code }, 'Agent disconnected'));
-      socket.on('error', (error) =>
-        request.log.warn({ agentId, err: error }, 'Agent socket error'),
-      );
+      hub.attach(socket, agentId, request.log);
     },
   );
 }

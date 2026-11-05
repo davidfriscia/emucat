@@ -48,7 +48,11 @@
     "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f65",
     "sentAt": "2026-01-31T15:30:00Z",
     "type": "agent.hello",
-    "payload": { "agentVersion": "0.1.0", "platform": "windows", "architecture": "x86_64" }
+    "payload": {
+      "agentVersion": "0.1.0",
+      "platform": "windows",
+      "architecture": "x86_64"
+    }
   },
   "agentHeartbeat": {
     "protocolVersion": 1,
@@ -73,6 +77,89 @@
     "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f68",
     "sentAt": "2026-01-31T15:30:01Z",
     "type": "server.error",
-    "payload": { "code": "unsupported_message", "message": "Unsupported message type" }
+    "payload": {
+      "code": "unsupported_message",
+      "message": "Unsupported message type"
+    }
+  },
+  "serverHeartbeatAck": {
+    "protocolVersion": 1,
+    "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f69",
+    "correlationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f66",
+    "sentAt": "2026-01-31T15:30:01Z",
+    "type": "server.heartbeat_ack",
+    "payload": {}
+  },
+  "serverDiscoveryRequest": {
+    "protocolVersion": 1,
+    "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6a",
+    "sentAt": "2026-01-31T15:30:02Z",
+    "type": "server.discovery_request",
+    "payload": {
+      "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6b"
+    }
+  },
+  "agentDiscoveryResult": {
+    "protocolVersion": 1,
+    "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6c",
+    "correlationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6a",
+    "sentAt": "2026-01-31T15:30:03Z",
+    "type": "agent.discovery_result",
+    "payload": {
+      "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6b",
+      "hostPlatform": "windows",
+      "emulators": [
+        {
+          "emulatorType": "86box",
+          "status": "ok",
+          "truncated": false
+        },
+        {
+          "emulatorType": "qemu",
+          "status": "base_path_missing",
+          "truncated": false
+        }
+      ],
+      "vms": [
+        {
+          "emulatorType": "86box",
+          "vmName": "DOS 6.22",
+          "markers": ["86box.cfg"],
+          "hostCompatible": null
+        },
+        {
+          "emulatorType": "qemu",
+          "vmName": "Win98",
+          "markers": ["run-win.cmd", "run-linux.sh"],
+          "hostCompatible": true
+        }
+      ],
+      "skipped": [
+        {
+          "emulatorType": "86box",
+          "name": "bad.",
+          "reason": "invalid_name",
+          "nameError": "invalid_boundary"
+        },
+        {
+          "emulatorType": "qemu",
+          "name": "empty",
+          "reason": "missing_marker",
+          "nameError": null
+        }
+      ]
+    }
+  },
+  "agentDiscoveryError": {
+    "protocolVersion": 1,
+    "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6d",
+    "correlationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6a",
+    "sentAt": "2026-01-31T15:30:03Z",
+    "type": "agent.discovery_error",
+    "payload": {
+      "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6b",
+      "code": "busy",
+      "message": "A scan is already running"
+    }
   }
 }

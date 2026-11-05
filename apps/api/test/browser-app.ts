@@ -4,11 +4,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
 import type { Pool } from 'mysql2/promise';
+import { AgentHub, type AgentHubOptions } from '../src/agents/hub.js';
+import { DEFAULT_PAIRING_POLICY } from '../src/agents/pairing.js';
+import { databaseAgentPresence } from '../src/agents/repository.js';
 import { buildApp, type AppDependencies } from '../src/app.js';
+import { databaseAgentAuthenticator } from '../src/auth/agent-auth.js';
 import { createPasswordHasher } from '../src/auth/passwords.js';
 import { RateLimiter } from '../src/auth/rate-limiter.js';
 import { createSetupToken } from '../src/auth/setup.js';
 import { migrate } from '../src/db/migrate.js';
+import { DEFAULT_PAIRING_RATE_LIMITS } from '../src/routes/agent-pairing.js';
 import { DEFAULT_AUTH_RATE_LIMITS } from '../src/routes/auth.js';
 import type { BrowserDependencies } from '../src/routes/browser.js';
 import { fileMediaStorage } from '../src/storage/media-storage.js';
@@ -34,6 +39,7 @@ export interface BrowserTestContext {
 export async function startBrowserApp(
   overrides: Partial<BrowserDependencies> = {},
   appOverrides: Partial<AppDependencies> = {},
+  hubOptions: Partial<AgentHubOptions> = {},
 ): Promise<BrowserTestContext> {
   const database = await createTestDatabase();
   await migrate(database.options);
@@ -49,6 +55,8 @@ export async function startBrowserApp(
     rateLimits: DEFAULT_AUTH_RATE_LIMITS,
     session: { idleTtlSeconds: 3600, absoluteTtlSeconds: 7200 },
     cookie: { secure: false, maxAgeSeconds: 7200 },
+    pairing: DEFAULT_PAIRING_POLICY,
+    pairingRateLimits: DEFAULT_PAIRING_RATE_LIMITS,
     ...overrides,
   });
   const dependencies = baseDependencies();
@@ -56,7 +64,8 @@ export async function startBrowserApp(
   const build = async (browser: BrowserDependencies) => {
     const instance = await buildApp({
       readiness: async () => ({ database: 'ok', migrations: 'ok' }),
-      authenticateAgent: async () => null,
+      authenticateAgent: databaseAgentAuthenticator(pool),
+      agentHub: new AgentHub({ presence: databaseAgentPresence(pool), ...hubOptions }),
       browser,
       ...appOverrides,
     });

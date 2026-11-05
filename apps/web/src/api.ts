@@ -4,10 +4,16 @@ import {
   adminSummaryResponseSchema,
   adminVmApiPath,
   adminVmDetailSchema,
+  agentListResponseSchema,
+  agentSummarySchema,
   API_PREFIX,
   authenticatedSessionSchema,
   CSRF_HEADER,
+  discoveryOperationSchema,
+  discoveryStateResponseSchema,
   infoResponseSchema,
+  pairingRequestListResponseSchema,
+  pairingRequestReviewSchema,
   publicCatalogResponseSchema,
   publicVmApiPath,
   publicVmDetailSchema,
@@ -20,10 +26,16 @@ import {
   type AdminMediaListResponse,
   type AdminSummaryResponse,
   type AdminVmDetail,
+  type AgentListResponse,
+  type AgentSummary,
   type AuthenticatedSession,
+  type DiscoveryOperation,
+  type DiscoveryStateResponse,
   type EmulatorType,
   type InfoResponse,
   type MediaVisibility,
+  type PairingRequestListResponse,
+  type PairingRequestReview,
   type PublicCatalogResponse,
   type PublicVmDetail,
   type RevokedSessionsResponse,
@@ -328,5 +340,80 @@ export function deleteMedia(vm: VmIdentity, mediaId: string): Promise<AdminMedia
     {
       method: 'DELETE',
     },
+  );
+}
+
+// Agents
+
+export function fetchAgents(signal?: AbortSignal): Promise<AgentListResponse> {
+  return requestJson('/admin/agents', agentListResponseSchema, { signal });
+}
+
+export function fetchAgent(agentId: string, signal?: AbortSignal): Promise<AgentSummary> {
+  return requestJson(`/admin/agents/${encodeURIComponent(agentId)}`, agentSummarySchema, {
+    signal,
+  });
+}
+
+export function revokeAgent(agentId: string): Promise<AgentSummary> {
+  return requestJson(`/admin/agents/${encodeURIComponent(agentId)}/revoke`, agentSummarySchema, {
+    method: 'POST',
+  });
+}
+
+export function fetchPendingPairingRequests(
+  signal?: AbortSignal,
+): Promise<PairingRequestListResponse> {
+  return requestJson('/admin/agent-pairing/requests', pairingRequestListResponseSchema, { signal });
+}
+
+export function fetchPairingRequest(
+  requestId: string,
+  signal?: AbortSignal,
+): Promise<PairingRequestReview> {
+  return requestJson(`/admin/agent-pairing/requests/${requestId}`, pairingRequestReviewSchema, {
+    signal,
+  });
+}
+
+export function lookUpPairing(code: string): Promise<PairingRequestReview> {
+  return requestJson('/admin/agent-pairing/lookup', pairingRequestReviewSchema, {
+    method: 'POST',
+    body: { code },
+  });
+}
+
+export function approvePairing(requestId: string, code: string): Promise<PairingRequestReview> {
+  return requestJson(
+    `/admin/agent-pairing/requests/${requestId}/approve`,
+    pairingRequestReviewSchema,
+    { method: 'POST', body: { code } },
+  );
+}
+
+export function rejectPairing(requestId: string): Promise<PairingRequestReview> {
+  return requestJson(
+    `/admin/agent-pairing/requests/${requestId}/reject`,
+    pairingRequestReviewSchema,
+    { method: 'POST' },
+  );
+}
+
+export function fetchDiscovery(
+  agentId: string,
+  signal?: AbortSignal,
+): Promise<DiscoveryStateResponse> {
+  return requestJson(
+    `/admin/agents/${encodeURIComponent(agentId)}/discovery`,
+    discoveryStateResponseSchema,
+    { signal },
+  );
+}
+
+export function startDiscovery(agentId: string): Promise<DiscoveryOperation> {
+  return requestJson(
+    `/admin/agents/${encodeURIComponent(agentId)}/discovery`,
+    discoveryOperationSchema,
+    { method: 'POST' },
   );
 }

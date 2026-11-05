@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import websocket from '@fastify/websocket';
 import { AGENT_MAX_MESSAGE_BYTES, API_PREFIX } from '@emucat/contracts';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import { AgentHub, NO_PRESENCE } from './agents/hub.js';
 import type { AgentAuthenticator } from './auth/agent-auth.js';
 import { registerErrorHandling } from './errors.js';
 import type { ReadinessCheck } from './readiness.js';
@@ -18,6 +19,8 @@ export interface AppDependencies {
   extraRoutes?: (app: FastifyInstance) => void;
   /** Authentication and catalog routes for the web application. */
   browser?: BrowserDependencies;
+  /** Connected agents. Defaults to a hub with no persistence, for tests of the protocol alone. */
+  agentHub?: AgentHub;
   /** Reverse proxies whose `X-Forwarded-For` is believed. Empty means none. */
   trustProxy?: string[];
 }
@@ -33,6 +36,9 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
   app.setValidatorCompiler(zodValidatorCompiler);
   registerErrorHandling(app);
 
+  const hub = dependencies.agentHub ?? new AgentHub({ presence: NO_PRESENCE });
+  app.addHook('preClose', () => hub.shutdown());
+
   await app.register(websocket, {
     options: { maxPayload: AGENT_MAX_MESSAGE_BYTES },
   });
@@ -40,11 +46,11 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
   await app.register(
     async (api) => {
       registerSystemRoutes(api, dependencies.readiness);
-      registerAgentWebSocket(api, dependencies.authenticateAgent);
+      registerAgentWebSocket(api, dependencies.authenticateAgent, hub);
       dependencies.extraRoutes?.(api);
       if (dependencies.browser) {
         const { browser } = dependencies;
-        await api.register(async (scope) => registerBrowserRoutes(scope, browser));
+        await api.register(async (scope) => registerBrowserRoutes(scope, browser, hub));
       }
     },
     { prefix: API_PREFIX },

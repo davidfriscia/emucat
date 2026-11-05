@@ -10,6 +10,7 @@
     "start": "node dist/server.js",
     "check": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "vitest run --config e2e/vitest.config.ts",
     "db:migrate": "tsx src/db/migrate-cli.ts"
   },
   "dependencies": {

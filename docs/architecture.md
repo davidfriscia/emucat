@@ -40,7 +40,13 @@ WebSocket endpoint.
 | `src/auth/`                    | Passwords, sessions, setup, guards, agent tokens, rate limiting |
 | `src/catalog/repository.ts`    | All catalog SQL                                                 |
 | `src/storage/`                 | Reads and removes media files, safely                           |
-| `src/routes/agent-ws.ts`       | Authenticated agent WebSocket skeleton                          |
+| `src/routes/agent-ws.ts`       | Authenticates agents, and hands sockets to the hub              |
+| `src/routes/agent-pairing.ts`  | What an agent uses before it has a credential                   |
+| `src/routes/admin-agents.ts`   | Agents, pairing decisions, revocation, starting discovery       |
+| `src/agents/hub.ts`            | Every connected agent, protocol handling, presence              |
+| `src/agents/discovery.ts`      | Tracks scans in memory, and decides which answers count         |
+| `src/agents/pairing.ts`        | The pairing state machine and all its SQL                       |
+| `src/agents/repository.ts`     | SQL for agents, and presence in the database                    |
 | `src/db/`                      | Connection pool and migration runner                            |
 | `migrations/`                  | Forward-only SQL migrations                                     |
 
@@ -63,8 +69,11 @@ builds and tests on Linux so that portability stays honest.
 | -------------- | ----------------------------------------------- | ------------------------ |
 | `config`       | File, environment, validation                   |                          |
 | `protocol`     | Envelope and message types                      | More messages            |
-| `connectivity` | Derives the WebSocket address                   | Connection, reconnection |
-| `emulators`    | Types, names, identity, root markers            | Discovery, launching     |
+| `connectivity` | The WebSocket, heartbeats, reconnection         | More commands            |
+| `pairing`      | Device-style pairing                            | Credential rotation      |
+| `credentials`  | The credential store interface, and DPAPI       | Keychain, Secret Service |
+| `discovery`    | Read-only scanning of the base paths            |                          |
+| `emulators`    | Types, names, identity, root markers            | Launching                |
 | `filesystem`   | Safe paths                                      | Directory operations     |
 | `archives`     | Version rules, exclusions, repository interface | Creation, transfer       |
 | `media`        | Watched paths, visibility                       | Watcher, upload          |
@@ -85,8 +94,10 @@ builds and tests on Linux so that portability stays honest.
   [decision 0008](decisions/0008-public-reads-and-media-lifecycle.md).
 - **The database enforces invariants.** Identity, version shape, one master and one main image are
   constraints, not just application code. See [decision 0004](decisions/0004-schema-invariants.md).
-- **Fail closed.** The agent endpoint rejects every connection until pairing exists to issue
-  credentials.
+- **Fail closed.** Without a live credential that a person approved, the agent endpoint opens no socket. See
+  [decision 0009](decisions/0009-agent-pairing-and-credentials.md).
+- **One API process.** Agent presence and discovery results are in memory, as rate limits are. See
+  [decision 0010](decisions/0010-agent-connections-and-discovery.md).
 - **No default credentials.** The first administrator comes from an explicit, one-time setup. See
   [decision 0007](decisions/0007-local-authentication.md).
 
@@ -132,4 +143,5 @@ pnpm test
 pnpm build
 .\agent\target\release\emucat-agent.exe --version
 .\agent\target\release\emucat-agent.exe --help
+pnpm test:e2e                  # the real agent against the real API, on Windows
 ```

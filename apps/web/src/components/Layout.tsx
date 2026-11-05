@@ -25,7 +25,7 @@ export function Layout() {
 
   return (
     <div className="d-flex flex-column min-vh-100">
-      <nav className="navbar navbar-expand-lg border-bottom bg-body-tertiary">
+      <nav className="navbar navbar-expand-xl border-bottom bg-body-tertiary">
         <div className="container">
           <Link to="/" className="navbar-brand" onClick={closeMenu}>
             <BrandLogo />
@@ -62,6 +62,11 @@ export function Layout() {
                       Manage
                     </NavLink>
                   </li>
+                  <li className="nav-item">
+                    <NavLink to="/admin/agents" className={navLinkClass} onClick={closeMenu}>
+                      Agents
+                    </NavLink>
+                  </li>
                 </>
               ) : null}
               {session ? (
@@ -72,7 +77,7 @@ export function Layout() {
                 </li>
               ) : null}
             </ul>
-            <div className="d-flex flex-wrap align-items-center gap-3 py-2 py-lg-0">
+            <div className="d-flex flex-wrap align-items-center gap-3 py-2 py-xl-0">
               <ApiStatusBadge />
               <ThemeButton />
               {session ? (

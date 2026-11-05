@@ -3,6 +3,8 @@ import { AuthProvider } from './auth';
 import { RequireAdmin, RequireSession } from './components/Guards';
 import { Layout } from './components/Layout';
 import { AccountPage } from './pages/AccountPage';
+import { AgentDetailPage } from './pages/admin/AgentDetailPage';
+import { AgentsPage } from './pages/admin/AgentsPage';
 import { CatalogManagementPage } from './pages/admin/CatalogManagementPage';
 import { DashboardPage } from './pages/admin/DashboardPage';
 import { VmEditorPage } from './pages/admin/VmEditorPage';
@@ -31,6 +33,8 @@ export function App() {
               <Route path="admin" element={<RequireAdmin />}>
                 <Route index element={<DashboardPage />} />
                 <Route path="catalog" element={<CatalogManagementPage />} />
+                <Route path="agents" element={<AgentsPage />} />
+                <Route path="agents/:agentId" element={<AgentDetailPage />} />
                 <Route path="vms/:emulatorType/:vmName" element={<VmEditorPage />} />
                 <Route path="vms/:emulatorType/:vmName/media" element={<VmMediaPage />} />
               </Route>

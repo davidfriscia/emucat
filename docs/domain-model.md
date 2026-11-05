@@ -23,6 +23,10 @@ candidate when its root contains, as a regular file:
 | `86box`  | `86box.cfg`                                                 |
 | `qemu`   | At least one of `run-win.cmd`, `run-mac.sh`, `run-linux.sh` |
 
+Discovery reports candidates without registering them. A discovered VM is an observation, held in memory, and is
+not a catalog entry. A QEMU VM is _compatible_ with a host if it has that host's script: `run-win.cmd` on Windows,
+`run-mac.sh` on macOS, `run-linux.sh` on Linux. See [the agent guide](agent.md#discovery).
+
 ### VM names
 
 A name must work as a directory on Windows, macOS and Linux, and in remote object keys.
@@ -65,6 +69,15 @@ master ──▶ snapshot A ──▶ snapshot C
 
 A snapshot name is `VM_NAME_YYYYMMDDhhmm` in UTC. Two snapshots within the same minute share a name, so
 nothing may use it as a key. Archive keys are derived from the ID so that they can never collide.
+
+## Agents
+
+An agent is created when it collects its credential after an administrator approved its pairing request. See the
+[protocol](protocol.md#pairing). Revoking keeps the row, because catalog history refers to it, and removes the
+credential's digest. Re-pairing makes a new agent, so a revoked identity never returns.
+
+Online or offline is not stored. It is whether this API process holds a live connection on which the agent has said
+hello. `last_connected_at` and `last_seen_at` are stored.
 
 ## Local agent state
 
@@ -133,18 +146,19 @@ connection details but no secrets: `secret_ref` only names where a secret lives.
 
 ## Database tables
 
-| Table               | Holds                                    | Key                                  |
-| ------------------- | ---------------------------------------- | ------------------------------------ |
-| `users`             | Accounts. None are seeded.               | `id`                                 |
-| `user_sessions`     | Browser sessions, as token digests       | `id`                                 |
-| `agents`            | Paired agents, as credential digests     | `id`                                 |
-| `repositories`      | Archive storage locations                | `id`                                 |
-| `virtual_machines`  | Registered VMs                           | `(emulator_type, vm_name)`           |
-| `vm_versions`       | Masters and snapshots                    | `id`                                 |
-| `agent_vm_state`    | Each agent's view of its local copy      | `(agent_id, emulator_type, vm_name)` |
-| `vm_sessions`       | Runs of a VM on an agent                 | `id`                                 |
-| `vm_media`          | Media metadata                           | `id`                                 |
-| `system_bootstrap`  | That first-run setup has happened        | `id`, always 1                       |
-| `schema_migrations` | Migration history, managed by the runner | `version`                            |
+| Table                    | Holds                                    | Key                                  |
+| ------------------------ | ---------------------------------------- | ------------------------------------ |
+| `users`                  | Accounts. None are seeded.               | `id`                                 |
+| `user_sessions`          | Browser sessions, as token digests       | `id`                                 |
+| `agents`                 | Paired agents, as credential digests     | `id`                                 |
+| `repositories`           | Archive storage locations                | `id`                                 |
+| `virtual_machines`       | Registered VMs                           | `(emulator_type, vm_name)`           |
+| `vm_versions`            | Masters and snapshots                    | `id`                                 |
+| `agent_vm_state`         | Each agent's view of its local copy      | `(agent_id, emulator_type, vm_name)` |
+| `vm_sessions`            | Runs of a VM on an agent                 | `id`                                 |
+| `vm_media`               | Media metadata                           | `id`                                 |
+| `agent_pairing_requests` | Pairing requests, as digests             | `id`                                 |
+| `system_bootstrap`       | That first-run setup has happened        | `id`, always 1                       |
+| `schema_migrations`      | Migration history, managed by the runner | `version`                            |
 
 The view `public_catalog_card_media` is the public read path for card images.
