@@ -3,9 +3,11 @@
 Self-hosted web catalog and local launcher for [86Box](https://86box.net/) and
 [QEMU](https://www.qemu.org/) virtual machines.
 
-**Status: Milestone 0 (foundation).** This repository contains the project structure, shared domain
-contracts, database schema, API skeleton, web shell and agent skeleton. VM registration, archive
-transfers, launching, snapshots, media processing and pairing are **not** implemented yet.
+**Status: Milestone 1 (identity, catalog and branding).** There is a first-administrator setup, local
+sign-in with persistent sessions, a public catalog, and an administration area for the metadata and media of
+registered VMs. VM registration, archive transfers, launching, snapshots, media upload and pairing are **not**
+implemented yet, so **there is currently no way to add a VM to the catalog**: it stays empty until the agent
+milestones arrive. See [known limitations](#known-limitations).
 
 | Part                                       | Technology                                       |
 | ------------------------------------------ | ------------------------------------------------ |
@@ -16,7 +18,8 @@ transfers, launching, snapshots, media processing and pairing are **not** implem
 | [`compose.yaml`](compose.yaml)             | MariaDB for local development                    |
 
 Read [architecture](docs/architecture.md), the [domain model](docs/domain-model.md), the
-[protocol](docs/protocol.md) and the [decision records](docs/decisions).
+[protocol](docs/protocol.md), the [REST API](docs/api.md), [authentication](docs/authentication.md), the
+[brand guidelines](docs/brand.md) and the [decision records](docs/decisions).
 
 ## Prerequisites
 
@@ -39,12 +42,18 @@ pnpm dev                       # starts the API and web app
 ```
 
 Then open <http://127.0.0.1:5173>. The status indicator in the navigation bar should say
-**API online**.
+**API online**, and the catalog is empty.
+
+### First-time setup
+
+There are no default credentials. Go to **Sign in**, which takes you to the setup page, and enter the one-time
+token the API printed to its log in the terminal, along with the administrator you want to create. Details are in
+[authentication](docs/authentication.md#setting-up-the-first-administrator). `pnpm db:reset` starts over.
 
 | Service           | Address                 | Notes                                      |
 | ----------------- | ----------------------- | ------------------------------------------ |
 | Web (development) | `http://127.0.0.1:5173` | Proxies `/api` to the API                  |
-| API               | `http://127.0.0.1:4000` | `/api/v1/health`, `/ready`, `/info`        |
+| API               | `http://127.0.0.1:4000` | See the [API reference](docs/api.md)       |
 | MariaDB           | `127.0.0.1:3307`        | Host port 3307 to avoid clashing with 3306 |
 
 All of these can be changed in `.env`. See [`.env.example`](.env.example).
@@ -123,9 +132,21 @@ Copy [`agent/agent.example.toml`](agent/agent.example.toml), fill in your paths,
 .\target\release\emucat-agent.exe run --config agent.toml   # Ctrl+C to stop
 ```
 
-In this milestone `run` validates the configuration, reports the platform, and waits for a shutdown
+So far `run` validates the configuration, reports the platform, and waits for a shutdown
 signal. It opens no connections, has no listener, launches no emulator and changes nothing in VM
 directories.
+
+## Known limitations
+
+- **No way to add a VM.** Registration arrives with agent pairing. Until then the catalog stays empty on a real
+  installation. The catalog and media features are tested against fixture rows in throwaway databases.
+- **No media upload.** The administration pages manage media rows that already exist. Nothing creates them yet.
+- **Single role.** Only administrators exist in practice, and there is no user management.
+- **No password recovery** other than editing the database. See
+  [authentication](docs/authentication.md#if-you-lose-the-password).
+- **Rate limits are per API process.** See [decision 0007](docs/decisions/0007-local-authentication.md).
+- **The artwork has not had a designer's review**, and there are no raster icons. See
+  [brand guidelines](docs/brand.md#outstanding-work).
 
 ## License
 

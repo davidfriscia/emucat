@@ -1,10 +1,16 @@
 import { databaseAgentAuthenticator } from './auth/agent-auth.js';
+import { createPasswordHasher } from './auth/passwords.js';
+import { RateLimiter } from './auth/rate-limiter.js';
+import { createSetupToken, isSetupRequired } from './auth/setup.js';
 import { buildApp } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config.js';
 import { loadMigrations } from './db/migrate.js';
 import { createPool } from './db/pool.js';
 import { loadDotEnv } from './env.js';
 import { databaseReadiness } from './readiness.js';
+import { announceSetupToken, DEFAULT_AUTH_RATE_LIMITS } from './routes/auth.js';
+import type { BrowserDependencies } from './routes/browser.js';
+import { fileMediaStorage } from './storage/media-storage.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
@@ -21,6 +27,20 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const pool = createPool(config.database);
   const migrations = await loadMigrations();
+  const browser: BrowserDependencies = {
+    pool,
+    storage: fileMediaStorage(config.storagePath),
+    passwords: createPasswordHasher(),
+    setupToken: createSetupToken(config.setupToken),
+    limiter: new RateLimiter(),
+    rateLimits: DEFAULT_AUTH_RATE_LIMITS,
+    session: {
+      idleTtlSeconds: config.sessionIdleTtlSeconds,
+      absoluteTtlSeconds: config.sessionAbsoluteTtlSeconds,
+    },
+    cookie: { secure: config.cookieSecure, maxAgeSeconds: config.sessionAbsoluteTtlSeconds },
+    publicOrigin: config.publicOrigin,
+  };
 
   const app = await buildApp({
     logger: loggerOptions(config),
@@ -28,7 +48,12 @@ async function main(): Promise<void> {
       app.log.warn({ err: error }, 'Readiness check failed');
     }),
     authenticateAgent: databaseAgentAuthenticator(pool),
+    trustProxy: config.trustProxy,
+    browser,
   });
+  // The status route also announces the token, in case the database is not up yet at this point.
+  const pending = await isSetupRequired(pool).catch(() => false);
+  if (pending) announceSetupToken({ log: app.log }, browser);
   app.addHook('onClose', async () => {
     await pool.end();
   });

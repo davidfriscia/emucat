@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <path fill="var(--emucat-cat-body, #0f766e)" stroke="var(--emucat-cat-body, #0f766e)" stroke-width="5" stroke-linejoin="round" d="M10 9 25 19H39L54 9V38C54 49 44 57 32 57 20 57 10 49 10 38Z"/>
+  <rect fill="var(--emucat-cat-screen, #042f2e)" x="17" y="25" width="30" height="20" rx="5"/>
+  <rect fill="var(--emucat-cat-phosphor, #5eead4)" x="23" y="30" width="5" height="7" rx="1"/>
+  <rect fill="var(--emucat-cat-phosphor, #5eead4)" x="36" y="30" width="5" height="7" rx="1"/>
+  <path fill="var(--emucat-cat-led, #f59e0b)" d="M29.5 39.5h5L32 42.5z"/>
+</svg>

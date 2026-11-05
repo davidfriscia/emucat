@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 184 64" role="img" aria-label="EmuCat">
+  <path fill="#2dd4bf" stroke="#2dd4bf" stroke-width="5" stroke-linejoin="round" d="M10 9 25 19H39L54 9V38C54 49 44 57 32 57 20 57 10 49 10 38Z"/>
+  <rect fill="#042f2e" x="17" y="25" width="30" height="20" rx="5"/>
+  <rect fill="#99f6e4" x="23" y="30" width="5" height="7" rx="1"/>
+  <rect fill="#99f6e4" x="36" y="30" width="5" height="7" rx="1"/>
+  <path fill="#fbbf24" d="M29.5 39.5h5L32 42.5z"/>
+  <g transform="translate(76 18)" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+    <path stroke="#f0fdfa" d="M12 4H3V24H12M3 14H10.5M17 24V10M17 15C17 11.5 19 10 21.25 10 23.5 10 25.5 11.5 25.5 15V24M25.5 15C25.5 11.5 27.5 10 29.75 10 32 10 34 11.5 34 15V24M39.5 10V19C39.5 22.5 41.5 24 44 24 46.5 24 48.5 22.5 48.5 19M48.5 10V24"/>
+    <path stroke="#2dd4bf" d="M68 8.5C66.5 5.5 64 4 61.5 4 57 4 54 8.5 54 14 54 19.5 57 24 61.5 24 64 24 66.5 22.5 68 19.5M84 10V24M84 17C84 13 81.5 10 78.5 10 75.5 10 73 13 73 17 73 21 75.5 24 78.5 24 81.5 24 84 21 84 17M92.5 4V19.5C92.5 23 94 24 97.5 24M89 10H97"/>
+  </g>
+</svg>

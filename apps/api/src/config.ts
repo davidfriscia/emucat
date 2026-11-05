@@ -5,6 +5,11 @@ import { REPOSITORY_ROOT } from './env.js';
 
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
+/** An empty line in `.env` means the same as leaving the variable out. */
+function emptyAsUndefined<T extends z.ZodType>(schema: T) {
+  return z.preprocess((value) => (value === '' ? undefined : value), schema);
+}
+
 const envSchema = z.object({
   API_HOST: z.string().min(1).default('127.0.0.1'),
   API_PORT: z.coerce.number().int().min(0).max(65535).default(4000),
@@ -19,6 +24,17 @@ const envSchema = z.object({
   STORAGE_PATH: z.string().min(1).default('var/storage'),
   ARCHIVE_REPOSITORY_KIND: z.string().regex(REPOSITORY_KIND_PATTERN).default('none'),
   ARCHIVE_REPOSITORY_URI: z.string().default(''),
+  NODE_ENV: z.string().optional(),
+  // Defaults to true when NODE_ENV is production.
+  COOKIE_SECURE: emptyAsUndefined(booleanFlag.optional()),
+  SESSION_IDLE_TTL_HOURS: z.coerce.number().int().min(1).max(8760).default(168),
+  SESSION_ABSOLUTE_TTL_HOURS: z.coerce.number().int().min(1).max(8760).default(720),
+  // Left empty, a random token is generated and logged while setup is pending.
+  SETUP_TOKEN: emptyAsUndefined(z.string().min(32).max(512).optional()),
+  // The browser's origin, for when a proxy rewrites the Host header.
+  PUBLIC_ORIGIN: emptyAsUndefined(z.url().optional()),
+  // Comma-separated addresses or CIDR ranges of proxies whose X-Forwarded-For is believed.
+  TRUST_PROXY: z.string().default(''),
 });
 
 export interface Config {
@@ -35,6 +51,12 @@ export interface Config {
   };
   storagePath: string;
   archiveRepository: { kind: string; uri: string };
+  cookieSecure: boolean;
+  sessionIdleTtlSeconds: number;
+  sessionAbsoluteTtlSeconds: number;
+  setupToken: string | undefined;
+  publicOrigin: string | undefined;
+  trustProxy: string[];
 }
 
 export class ConfigError extends Error {
@@ -70,5 +92,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       kind: values.ARCHIVE_REPOSITORY_KIND,
       uri: values.ARCHIVE_REPOSITORY_URI,
     },
+    cookieSecure: values.COOKIE_SECURE ?? values.NODE_ENV === 'production',
+    sessionIdleTtlSeconds: values.SESSION_IDLE_TTL_HOURS * 3600,
+    sessionAbsoluteTtlSeconds: values.SESSION_ABSOLUTE_TTL_HOURS * 3600,
+    setupToken: values.SETUP_TOKEN,
+    publicOrigin: values.PUBLIC_ORIGIN && new URL(values.PUBLIC_ORIGIN).origin,
+    trustProxy: values.TRUST_PROXY.split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
   };
 }

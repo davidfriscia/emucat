@@ -14,7 +14,9 @@
   },
   "dependencies": {
     "@emucat/contracts": "workspace:*",
+    "@fastify/cookie": "^11.1.5",
     "@fastify/websocket": "^11.3.6",
+    "@node-rs/argon2": "^2.2.2",
     "fastify": "^5.12.8",
     "mysql2": "^3.24.6",
     "pino-pretty": "^13.2.0",

@@ -27,6 +27,7 @@ export function SettingsPage() {
 
   return (
     <>
+      <title>Settings · EmuCat</title>
       <h1 className="h3 mb-4">Settings</h1>
       <div className="settings-grid">
         <section className="card">

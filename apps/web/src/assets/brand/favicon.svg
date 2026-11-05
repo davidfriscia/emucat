@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <style>
+    .body { fill: #0f766e; stroke: #0f766e; }
+    @media (prefers-color-scheme: dark) {
+      .body { fill: #2dd4bf; stroke: #2dd4bf; }
+    }
+  </style>
+  <path class="body" stroke-width="5" stroke-linejoin="round" d="M10 9 25 19H39L54 9V38C54 49 44 57 32 57 20 57 10 49 10 38Z"/>
+  <rect fill="#042f2e" x="16" y="24" width="32" height="22" rx="5"/>
+  <rect fill="#5eead4" x="22" y="29" width="6" height="9" rx="1"/>
+  <rect fill="#5eead4" x="36" y="29" width="6" height="9" rx="1"/>
+</svg>

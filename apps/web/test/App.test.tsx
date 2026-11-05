@@ -1,9 +1,7 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { App } from '../src/App';
+import { mockApi, renderAt, resetApiState, signedInAsAdmin } from './mock-api';
 
-const READY = { status: 'ready', checks: { database: 'ok', migrations: 'ok' } };
 const NOT_READY = { status: 'not_ready', checks: { database: 'failed', migrations: 'skipped' } };
 const INFO = {
   name: 'EmuCat',
@@ -13,26 +11,8 @@ const INFO = {
   emulatorTypes: ['86box', 'qemu'],
 };
 
-function respondWith(routes: Record<string, unknown>) {
-  const mock = vi.fn(async (url: string) => {
-    const key = Object.keys(routes).find((route) => url.endsWith(route));
-    if (!key) throw new TypeError('Failed to fetch');
-    return new Response(JSON.stringify(routes[key]));
-  });
-  vi.stubGlobal('fetch', mock);
-  return mock;
-}
-
-function renderAt(path: string) {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <App />
-    </MemoryRouter>,
-  );
-}
-
 beforeEach(() => {
-  respondWith({ '/ready': READY, '/info': INFO });
+  mockApi({ 'GET /info': INFO });
 });
 
 afterEach(() => {
@@ -42,22 +22,23 @@ afterEach(() => {
     addEventListener: () => undefined,
     removeEventListener: () => undefined,
   }));
+  resetApiState();
 });
 
 describe('application shell', () => {
-  it('shows the brand and the main navigation', async () => {
+  it('shows the brand and the public navigation', async () => {
     renderAt('/');
     expect(screen.getByText('EmuCat')).toBeTruthy();
     const nav = screen.getByRole('navigation');
     expect(within(nav).getByRole('link', { name: 'Catalog' })).toBeTruthy();
-    expect(within(nav).getByRole('link', { name: 'Settings' })).toBeTruthy();
-    expect(within(nav).getByRole('link', { name: 'Sign in' })).toBeTruthy();
+    expect(await within(nav).findByRole('link', { name: 'Sign in' })).toBeTruthy();
     await screen.findByText('API online');
   });
 
   it('navigates between pages', async () => {
+    mockApi({ ...signedInAsAdmin, 'GET /info': INFO });
     renderAt('/');
-    fireEvent.click(screen.getByRole('link', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('link', { name: 'Settings' }));
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
     await screen.findByText('API online');
   });
@@ -85,13 +66,13 @@ describe('API status', () => {
   });
 
   it('reports degraded when the API is up but not ready', async () => {
-    respondWith({ '/ready': NOT_READY });
+    mockApi({ 'GET /ready': NOT_READY });
     renderAt('/');
     expect(await screen.findByText('API degraded')).toBeTruthy();
   });
 
   it('reports offline when the API cannot be reached', async () => {
-    respondWith({});
+    mockApi({}, { defaults: false });
     renderAt('/');
     expect(await screen.findByText('API offline')).toBeTruthy();
   });
@@ -106,42 +87,25 @@ describe('API status', () => {
   });
 });
 
-describe('catalog', () => {
-  it('shows an honest empty state and does not request VM data', async () => {
-    const fetchMock = respondWith({ '/ready': READY });
-    renderAt('/');
-    expect(screen.getByRole('heading', { name: 'No virtual machines yet' })).toBeTruthy();
-    expect(screen.getByText(/not available in this version/)).toBeTruthy();
-    await screen.findByText('API online');
-    const urls = fetchMock.mock.calls.map(([url]) => url);
-    expect(urls.every((url) => url.endsWith('/ready'))).toBe(true);
-  });
-});
-
-describe('login placeholder', () => {
-  it('does not pretend to authenticate', async () => {
-    renderAt('/login');
-    expect(screen.getByText(/Sign-in is not available yet/)).toBeTruthy();
-    expect(document.querySelector('input, form')).toBeNull();
-    await screen.findByText('API online');
-  });
-});
-
 describe('settings', () => {
+  beforeEach(() => {
+    mockApi({ ...signedInAsAdmin, 'GET /info': INFO });
+  });
+
   it('shows information from the server', async () => {
     renderAt('/settings');
     expect(await screen.findByText('1.2.3')).toBeTruthy();
   });
 
   it('says so when the server information is unavailable', async () => {
-    respondWith({});
+    mockApi(signedInAsAdmin);
     renderAt('/settings');
     expect(await screen.findByText('Server information is unavailable.')).toBeTruthy();
   });
 
   it('changes the theme', async () => {
     renderAt('/settings');
-    fireEvent.click(screen.getByRole('radio', { name: 'Dark' }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Dark' }));
     expect(document.documentElement.getAttribute('data-bs-theme')).toBe('dark');
     await screen.findByText('1.2.3');
   });
@@ -150,6 +114,22 @@ describe('settings', () => {
 describe('theme', () => {
   it('follows the system preference by default', async () => {
     renderAt('/');
+    expect(document.documentElement.getAttribute('data-bs-theme')).toBe('light');
+    await screen.findByText('API online');
+  });
+
+  it('follows a dark system preference, including when it changes', async () => {
+    const listeners: (() => void)[] = [];
+    const media = {
+      matches: true,
+      addEventListener: (_: string, listener: () => void) => listeners.push(listener),
+      removeEventListener: () => undefined,
+    };
+    vi.stubGlobal('matchMedia', () => media);
+    renderAt('/');
+    expect(document.documentElement.getAttribute('data-bs-theme')).toBe('dark');
+    media.matches = false;
+    listeners.forEach((listener) => listener());
     expect(document.documentElement.getAttribute('data-bs-theme')).toBe('light');
     await screen.findByText('API online');
   });

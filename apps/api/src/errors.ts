@@ -2,6 +2,19 @@ import type { ErrorResponse } from '@emucat/contracts';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
 
+/** An expected failure, with a stable code for clients. Goes through the common error handler. */
+export class ApiError extends Error {
+  override readonly name = 'ApiError';
+
+  constructor(
+    readonly statusCode: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export function errorBody(
   request: FastifyRequest,
   code: string,

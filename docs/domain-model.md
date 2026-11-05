@@ -13,6 +13,7 @@ A VM is identified by `(emulator_type, vm_name)`.
   per emulator on each agent.
 - The same name under different emulators is two different VMs.
 - Identity never changes. Renaming a directory makes it a different VM.
+- `display_name` is the catalog title, and can be changed freely. Without one, the title is `vm_name`.
 
 A VM enters the catalog only through agent discovery followed by user registration. A directory is a
 candidate when its root contains, as a regular file:
@@ -114,6 +115,11 @@ Rules:
 - **Public cards** show the main item only while it is published. Otherwise they show a placeholder.
 - **No fallback.** Deleting or privatizing the main item results in the placeholder. Another published
   item is never promoted, because that would expose something nobody chose to show on the card.
+- **Private media can be selected as main.** The public still sees the placeholder until it is published.
+- **Deleting an item removes its files too.** See
+  [decision 0008](decisions/0008-public-reads-and-media-lifecycle.md).
+
+A VM's detail page may show its other published items in a gallery, but they never take the main image's place.
 
 `resolvePublicCardImage` implements this in code, and the `public_catalog_card_media` view implements
 it in SQL.
@@ -138,6 +144,7 @@ connection details but no secrets: `secret_ref` only names where a secret lives.
 | `agent_vm_state`    | Each agent's view of its local copy      | `(agent_id, emulator_type, vm_name)` |
 | `vm_sessions`       | Runs of a VM on an agent                 | `id`                                 |
 | `vm_media`          | Media metadata                           | `id`                                 |
+| `system_bootstrap`  | That first-run setup has happened        | `id`, always 1                       |
 | `schema_migrations` | Migration history, managed by the runner | `version`                            |
 
 The view `public_catalog_card_media` is the public read path for card images.

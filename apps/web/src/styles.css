@@ -1,10 +1,18 @@
-:root {
-  --emucat-mark-head: #0d9488;
-  --emucat-mark-screen: #042f2e;
-  --emucat-mark-eye: #5eead4;
-}
-
+/* Brand colors. See docs/brand.md. The artwork in assets/brand reads these same variables. */
+:root,
 [data-bs-theme='light'] {
+  --emucat-cat-body: #0f766e;
+  --emucat-cat-shade: #115e59;
+  --emucat-cat-screen: #042f2e;
+  --emucat-cat-phosphor: #5eead4;
+  --emucat-cat-led: #f59e0b;
+  --emucat-word-primary: #134e4a;
+  --emucat-word-accent: #0f766e;
+  --emucat-scanline: rgb(15 118 110 / 7%);
+  --emucat-placeholder-from: #f0fdfa;
+  --emucat-placeholder-to: #ccfbf1;
+  --emucat-pale-mark: 0.55;
+
   --bs-primary: #0f766e;
   --bs-primary-rgb: 15, 118, 110;
   --bs-link-color: #0f766e;
@@ -14,6 +22,18 @@
 }
 
 [data-bs-theme='dark'] {
+  --emucat-cat-body: #2dd4bf;
+  --emucat-cat-shade: #14b8a6;
+  --emucat-cat-screen: #042f2e;
+  --emucat-cat-phosphor: #99f6e4;
+  --emucat-cat-led: #fbbf24;
+  --emucat-word-primary: #f0fdfa;
+  --emucat-word-accent: #2dd4bf;
+  --emucat-scanline: rgb(94 234 212 / 5%);
+  --emucat-placeholder-from: #10252a;
+  --emucat-placeholder-to: #0b1a1e;
+  --emucat-pale-mark: 0.7;
+
   --bs-primary: #2dd4bf;
   --bs-primary-rgb: 45, 212, 191;
   --bs-link-color: #5eead4;
@@ -32,6 +52,22 @@
   --bs-btn-active-color: #fff;
   --bs-btn-active-bg: #134e4a;
   --bs-btn-active-border-color: #134e4a;
+  --bs-btn-disabled-color: #fff;
+  --bs-btn-disabled-bg: #0f766e;
+  --bs-btn-disabled-border-color: #0f766e;
+}
+
+.btn-outline-primary {
+  --bs-btn-color: var(--bs-link-color);
+  --bs-btn-border-color: var(--bs-primary);
+  --bs-btn-hover-color: #fff;
+  --bs-btn-hover-bg: #0f766e;
+  --bs-btn-hover-border-color: #0f766e;
+  --bs-btn-active-color: #fff;
+  --bs-btn-active-bg: #115e59;
+  --bs-btn-active-border-color: #115e59;
+  --bs-btn-disabled-color: var(--bs-link-color);
+  --bs-btn-disabled-border-color: var(--bs-primary);
 }
 
 .form-check-input:checked {
@@ -39,24 +75,60 @@
   border-color: #0f766e;
 }
 
-.brand-mark-head {
-  fill: var(--emucat-mark-head);
+.form-control:focus,
+.form-select:focus,
+.form-check-input:focus {
+  border-color: var(--bs-primary);
+  box-shadow: 0 0 0 0.2rem rgb(var(--bs-primary-rgb) / 25%);
 }
 
-.brand-mark-screen {
-  fill: var(--emucat-mark-screen);
+.pagination {
+  --bs-pagination-color: var(--bs-link-color);
+  --bs-pagination-hover-color: var(--bs-link-hover-color);
+  --bs-pagination-focus-color: var(--bs-link-hover-color);
+  --bs-pagination-focus-box-shadow: 0 0 0 0.2rem rgb(var(--bs-primary-rgb) / 25%);
+  --bs-pagination-active-bg: #0f766e;
+  --bs-pagination-active-border-color: #0f766e;
 }
 
-.brand-mark-eye {
-  fill: var(--emucat-mark-eye);
+.nav-pills {
+  --bs-nav-pills-link-active-bg: #0f766e;
+  --bs-nav-link-color: var(--bs-link-color);
+  --bs-nav-link-hover-color: var(--bs-link-hover-color);
+}
+
+/* Brand artwork */
+.brand-sized {
+  display: inline-block;
+  line-height: 0;
+  flex: none;
+}
+
+.brand-svg,
+.brand-svg svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand-wordmark {
-  font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  width: 5.25rem;
+  height: 1.47rem;
 }
 
+.brand-mascot .mascot-idle,
+.brand-mascot .mascot-sleeping,
+.brand-mascot .mascot-puzzled {
+  display: none;
+}
+
+.brand-mascot[data-mood='idle'] .mascot-idle,
+.brand-mascot[data-mood='sleeping'] .mascot-sleeping,
+.brand-mascot[data-mood='puzzled'] .mascot-puzzled {
+  display: inline;
+}
+
+/* Status */
 .api-status {
   white-space: nowrap;
 }
@@ -67,12 +139,123 @@
   height: 0.5rem;
 }
 
-.empty-state {
+/* The default outline-secondary text is too faint against the dark navigation bar. */
+.theme-button {
+  --bs-btn-color: var(--bs-body-color);
+}
+
+/* Empty, loading and error states share one layout. */
+.state-panel {
   border-style: dashed !important;
 }
 
-.empty-state-text {
+.state-panel-text {
   max-width: 34rem;
+}
+
+/* Catalog */
+.vm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+  gap: 1rem;
+}
+
+.vm-card {
+  overflow: hidden;
+  transition:
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.vm-card:hover,
+.vm-card:focus-within {
+  border-color: var(--bs-primary);
+  box-shadow: 0 0.25rem 0.75rem rgb(var(--bs-primary-rgb) / 15%);
+}
+
+.vm-card-title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* The whole card is the link target, while the title stays the accessible name. */
+.vm-card-title a::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+
+.vm-card-summary {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/* Every VM image shares this 4:3 frame, the shape of the screens it shows. */
+.vm-image {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: var(--bs-tertiary-bg);
+}
+
+.vm-image-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background:
+    repeating-linear-gradient(to bottom, var(--emucat-scanline) 0 1px, transparent 1px 4px),
+    linear-gradient(145deg, var(--emucat-placeholder-from), var(--emucat-placeholder-to));
+}
+
+.vm-image-placeholder .brand-sized {
+  opacity: var(--emucat-pale-mark);
+}
+
+.emulator-badge {
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  font-weight: 500;
+}
+
+.vm-identity {
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.vm-description {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.vm-detail-media {
+  max-width: 48rem;
+}
+
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 10rem), 1fr));
+  gap: 0.75rem;
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+  gap: 1rem;
+}
+
+.media-filename {
+  overflow-wrap: anywhere;
+}
+
+/* Forms and settings */
+.narrow-page {
+  max-width: 28rem;
+  margin-inline: auto;
 }
 
 .settings-grid {
@@ -93,9 +276,22 @@
 
 .settings-facts dd {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
-/* The default outline-secondary text is too faint against the dark navigation bar. */
-.theme-button {
-  --bs-btn-color: var(--bs-body-color);
+.stat-value {
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+/* Long names must never force the page to scroll sideways on a phone. */
+main {
+  min-width: 0;
+}
+
+h1,
+h2,
+.card-title {
+  overflow-wrap: anywhere;
 }

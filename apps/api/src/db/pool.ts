@@ -1,4 +1,4 @@
-import mysql, { type Pool, type PoolOptions } from 'mysql2/promise';
+import mysql, { type Pool, type PoolConnection, type PoolOptions } from 'mysql2/promise';
 import type { Config } from '../config.js';
 
 export function connectionOptions(database: Config['database']): PoolOptions {
@@ -13,6 +13,25 @@ export function connectionOptions(database: Config['database']): PoolOptions {
     charset: 'utf8mb4',
     connectTimeout: 5_000,
   };
+}
+
+/** Runs `work` in a transaction on one connection: commits if it resolves, rolls back if it throws. */
+export async function withTransaction<T>(
+  pool: Pool,
+  work: (connection: PoolConnection) => Promise<T>,
+): Promise<T> {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const result = await work(connection);
+    await connection.commit();
+    return result;
+  } catch (error) {
+    await connection.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 export function createPool(database: Config['database']): Pool {

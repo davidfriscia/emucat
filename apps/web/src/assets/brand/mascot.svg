@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <g fill="none" stroke="var(--emucat-cat-shade, #115e59)" stroke-linecap="round">
+    <path stroke-width="9" d="M82 101C100 104 112 92 104 75"/>
+    <path stroke-width="2.5" d="M9 40 21 43M8 50 21 50M9 60 21 57M111 40 99 43M112 50 99 50M111 60 99 57"/>
+  </g>
+  <path fill="var(--emucat-cat-body, #0f766e)" d="M35 108C32 84 42 62 60 62 78 62 88 84 85 108 85 111 83 113 80 113H40C37 113 35 111 35 108Z"/>
+  <rect fill="var(--emucat-cat-screen, #042f2e)" x="47" y="84" width="26" height="4" rx="2"/>
+  <rect fill="var(--emucat-cat-led, #f59e0b)" x="47" y="92" width="6" height="2.5" rx="1.25"/>
+  <rect fill="var(--emucat-cat-shade, #115e59)" x="42" y="104" width="15" height="9" rx="4.5"/>
+  <rect fill="var(--emucat-cat-shade, #115e59)" x="63" y="104" width="15" height="9" rx="4.5"/>
+  <g transform="translate(20 0) scale(1.25)">
+    <path fill="var(--emucat-cat-body, #0f766e)" stroke="var(--emucat-cat-body, #0f766e)" stroke-width="4" stroke-linejoin="round" d="M10 9 25 19H39L54 9V38C54 49 44 57 32 57 20 57 10 49 10 38Z"/>
+    <rect fill="var(--emucat-cat-screen, #042f2e)" x="17" y="25" width="30" height="20" rx="5"/>
+    <g class="mascot-idle" fill="var(--emucat-cat-phosphor, #5eead4)">
+      <rect x="23" y="30" width="5" height="7" rx="1"/>
+      <rect x="36" y="30" width="5" height="7" rx="1"/>
+    </g>
+    <g class="mascot-sleeping" display="none" fill="none" stroke="var(--emucat-cat-phosphor, #5eead4)" stroke-width="1.8" stroke-linecap="round">
+      <path d="M22.5 33c1.5 2.4 4.5 2.4 6 0M35.5 33c1.5 2.4 4.5 2.4 6 0"/>
+    </g>
+    <g class="mascot-puzzled" display="none" fill="var(--emucat-cat-phosphor, #5eead4)">
+      <rect x="23" y="30" width="5" height="7" rx="1"/>
+      <rect x="35.5" y="33" width="6" height="2" rx="1"/>
+    </g>
+    <path fill="var(--emucat-cat-led, #f59e0b)" d="M29.5 39.5h5L32 42.5z"/>
+  </g>
+  <path class="mascot-sleeping" display="none" fill="none" stroke="var(--emucat-cat-shade, #115e59)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M92 4H100L92 12H100M104 15H110L104 21H110"/>
+</svg>

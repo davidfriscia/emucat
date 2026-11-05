@@ -1,5 +1,7 @@
 export * from './api.js';
 export * from './archive-paths.js';
+export * from './auth.js';
+export * from './catalog.js';
 export * from './emulator.js';
 export * from './media.js';
 export * from './operations.js';

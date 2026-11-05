@@ -74,16 +74,11 @@ The endpoint is authenticated, and fails closed. A bearer token is hashed with S
 credential, so **every connection is currently rejected**. The tests exercise the authenticated path
 with an injected authenticator and with rows inserted directly into a test database.
 
-## Planned: user authentication
+## User authentication
 
-Not implemented. The login page is a placeholder and there are no users or default credentials.
-
-1. A first administrator is created by an explicit setup step, not by a seeded account.
-2. Passwords are stored in `users.password_hash` using a memory-hard algorithm (Argon2id).
-3. Logging in creates a random session token. The browser receives it in a `Secure`, `HttpOnly`,
-   `SameSite` cookie. The database stores only its SHA-256 digest in `user_sessions.token_hash`.
-4. Sessions expire, can be revoked, and are checked on every request. State-changing requests are
-   protected against CSRF.
+Browser sessions are not part of this protocol. They are described in [authentication](authentication.md) and
+the [REST API](api.md). Agent credentials and browser sessions are entirely separate: an agent never holds a
+session cookie, and a user's session cannot open this endpoint.
 
 ## Planned: agent pairing
 
