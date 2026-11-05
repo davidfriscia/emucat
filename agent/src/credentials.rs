@@ -208,11 +208,14 @@ mod dpapi {
     use super::{CredentialError, Protector};
 
     /// Binds a blob to this use, so that another program's DPAPI data cannot be swapped in.
-    const ENTROPY: &[u8] = b"emucat-agent-credential-v1";
+    pub const CREDENTIAL_ENTROPY: &[u8] = b"emucat-agent-credential-v1";
+    pub const PASSPHRASE_ENTROPY: &[u8] = b"emucat-agent-ssh-key-passphrase-v1";
 
     /// Scoped to the current user: without `CRYPTPROTECT_LOCAL_MACHINE`, another account on this
     /// computer cannot decrypt the data. No flag asks for UI, so this cannot block a headless agent.
-    pub struct Dpapi;
+    pub struct Dpapi {
+        pub entropy: &'static [u8],
+    }
 
     fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
         CRYPT_INTEGER_BLOB {
@@ -237,7 +240,7 @@ mod dpapi {
     impl Protector for Dpapi {
         fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, CredentialError> {
             let input = blob(plaintext);
-            let entropy = blob(ENTROPY);
+            let entropy = blob(self.entropy);
             let mut output = CRYPT_INTEGER_BLOB {
                 cbData: 0,
                 pbData: ptr::null_mut(),
@@ -268,7 +271,7 @@ mod dpapi {
 
         fn unprotect(&self, protected: &[u8]) -> Result<Vec<u8>, CredentialError> {
             let input = blob(protected);
-            let entropy = blob(ENTROPY);
+            let entropy = blob(self.entropy);
             let mut output = CRYPT_INTEGER_BLOB {
                 cbData: 0,
                 pbData: ptr::null_mut(),
@@ -301,7 +304,9 @@ mod dpapi {
 pub fn platform_store(state_dir: &Path) -> Box<dyn CredentialStore> {
     Box::new(ProtectedFileStore {
         path: state_dir.join(CREDENTIAL_FILE),
-        protector: dpapi::Dpapi,
+        protector: dpapi::Dpapi {
+            entropy: dpapi::CREDENTIAL_ENTROPY,
+        },
     })
 }
 
@@ -309,6 +314,82 @@ pub fn platform_store(state_dir: &Path) -> Box<dyn CredentialStore> {
 #[cfg(not(windows))]
 pub fn platform_store(_state_dir: &Path) -> Box<dyn CredentialStore> {
     Box::new(UnsupportedCredentialStore)
+}
+
+/// The file holding the passphrase of a repository's SSH key. The key itself stays where the
+/// administrator put it, and the server never sees either.
+#[cfg(windows)]
+fn passphrase_path(state_dir: &Path, repository: Uuid) -> PathBuf {
+    state_dir.join(format!("repository-{repository}.passphrase.dpapi"))
+}
+
+/// Stores the passphrase of a repository's SSH key, protected with DPAPI.
+#[cfg(windows)]
+pub fn save_repository_passphrase(
+    state_dir: &Path,
+    repository: Uuid,
+    passphrase: &Secret,
+) -> Result<(), CredentialError> {
+    use dpapi::{Dpapi, PASSPHRASE_ENTROPY};
+    let protected = Dpapi {
+        entropy: PASSPHRASE_ENTROPY,
+    }
+    .protect(passphrase.expose().as_bytes())?;
+    let path = passphrase_path(state_dir, repository);
+    let failed = |source| CredentialError::Io {
+        path: path.display().to_string(),
+        source,
+    };
+    std::fs::create_dir_all(state_dir).map_err(failed)?;
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, protected).map_err(failed)?;
+    std::fs::rename(&temporary, &path).map_err(failed)
+}
+
+/// The passphrase of a repository's SSH key, if one has been stored.
+#[cfg(windows)]
+pub fn load_repository_passphrase(
+    state_dir: &Path,
+    repository: Uuid,
+) -> Result<Option<Secret>, CredentialError> {
+    use dpapi::{Dpapi, PASSPHRASE_ENTROPY};
+    let path = passphrase_path(state_dir, repository);
+    let protected = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CredentialError::Io {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+    };
+    let plaintext = Dpapi {
+        entropy: PASSPHRASE_ENTROPY,
+    }
+    .unprotect(&protected)?;
+    String::from_utf8(plaintext)
+        .map(|text| Some(Secret::new(text)))
+        .map_err(|_| CredentialError::Unreadable("its contents are not valid".to_owned()))
+}
+
+/// Without a secure store, a passphrase cannot be kept. Use a key file protected by the filesystem.
+#[cfg(not(windows))]
+pub fn save_repository_passphrase(
+    _state_dir: &Path,
+    _repository: Uuid,
+    _passphrase: &Secret,
+) -> Result<(), CredentialError> {
+    Err(unsupported())
+}
+
+/// There is no store for passphrases on this platform, so there is never one to find.
+#[cfg(not(windows))]
+pub fn load_repository_passphrase(
+    _state_dir: &Path,
+    _repository: Uuid,
+) -> Result<Option<Secret>, CredentialError> {
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -410,6 +491,35 @@ mod tests {
             let needle = b"very_secret";
             assert!(!file.windows(needle.len()).any(|part| part == needle));
             assert!(!file.windows(6).any(|part| part == b"emucat"));
+        }
+
+        #[test]
+        fn a_passphrase_round_trips_without_plaintext_and_cannot_be_read_as_a_credential() {
+            let directory = tempfile::tempdir().unwrap();
+            let repository = Uuid::from_u128(9);
+            assert_eq!(
+                load_repository_passphrase(directory.path(), repository).unwrap(),
+                None
+            );
+            save_repository_passphrase(
+                directory.path(),
+                repository,
+                &Secret::new("correct horse battery"),
+            )
+            .unwrap();
+            assert_eq!(
+                load_repository_passphrase(directory.path(), repository).unwrap(),
+                Some(Secret::new("correct horse battery"))
+            );
+            let path = passphrase_path(directory.path(), repository);
+            let file = std::fs::read(&path).unwrap();
+            assert!(!file.windows(7).any(|part| part == b"correct"));
+            // Different entropy: the same file does not decrypt under the credential's purpose.
+            std::fs::copy(&path, directory.path().join(CREDENTIAL_FILE)).unwrap();
+            assert!(matches!(
+                platform_store(directory.path()).load(),
+                Err(CredentialError::Unreadable(_))
+            ));
         }
 
         #[test]

@@ -1,7 +1,7 @@
 //! The agent's connection to the server. It only ever connects out and never listens.
 //!
 //! [`run`] keeps one authenticated WebSocket open: it says hello, sends heartbeats, answers discovery
-//! requests, and reconnects with exponential backoff and jitter whenever the connection is lost. It
+//! requests, passes registration messages to [`AgentOperations`], and reconnects with exponential backoff and jitter whenever the connection is lost. It
 //! stops for good only when asked to, or when the server has said something that reconnecting cannot
 //! fix: a revoked credential, a newer connection with this identity, or another protocol version.
 
@@ -31,6 +31,7 @@ use crate::protocol::{
     AGENT_MAX_MESSAGE_BYTES, AgentHello, Decoded, DiscoveryError, DiscoveryErrorCode,
     DiscoveryResult, Empty, Envelope, Message, close_codes, decode,
 };
+use crate::registration::AgentOperations;
 
 pub const AGENT_WS_PATH: &str = "/api/v1/agent/ws";
 
@@ -157,6 +158,8 @@ pub struct ConnectionSettings {
     pub connect_timeout: Duration,
     pub welcome_timeout: Duration,
     pub backoff: Backoff,
+    /// Registration and repository work. Without it, this agent only discovers.
+    pub operations: Option<Arc<AgentOperations>>,
 }
 
 impl ConnectionSettings {
@@ -177,6 +180,7 @@ impl ConnectionSettings {
             connect_timeout: Duration::from_secs(15),
             welcome_timeout: Duration::from_secs(15),
             backoff: Backoff::default(),
+            operations: None,
         }
     }
 }
@@ -193,7 +197,14 @@ pub async fn run(
     loop {
         let started = Instant::now();
         match run_session(&settings, &mut recent_operations, shutdown.as_mut()).await {
-            SessionEnd::Final(end) => return end,
+            SessionEnd::Final(end) => {
+                // Whatever is running ends now, and the journals say how far it got. This also means
+                // that a revoked agent stops touching anything at once.
+                if let Some(operations) = &settings.operations {
+                    operations.shutdown();
+                }
+                return end;
+            }
             SessionEnd::Lost(reason) => {
                 if started.elapsed() >= backoff.stable_after {
                     backoff.reset();
@@ -202,7 +213,12 @@ pub async fn run(
                 tracing::warn!(%reason, delay_ms = delay.as_millis() as u64, "Connection lost; reconnecting");
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
-                    () = shutdown.as_mut() => return ConnectionEnd::Shutdown,
+                    () = shutdown.as_mut() => {
+                        if let Some(operations) = &settings.operations {
+                            operations.shutdown();
+                        }
+                        return ConnectionEnd::Shutdown;
+                    }
                 }
             }
         }
@@ -245,6 +261,27 @@ fn text(envelope: &Envelope) -> Result<Frame, String> {
     serde_json::to_string(envelope)
         .map(Frame::text)
         .map_err(|error| error.to_string())
+}
+
+/// What running work has to say, or nothing at all for an agent without operations.
+async fn next_outbound(
+    outbound: &mut Option<tokio::sync::MutexGuard<'_, mpsc::Receiver<Message>>>,
+) -> Option<Message> {
+    match outbound {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn send_all<S>(sink: &mut S, messages: Vec<Message>) -> Result<(), String>
+where
+    S: futures_util::Sink<Frame, Error = tungstenite::Error> + Unpin,
+{
+    for message in messages {
+        let frame = text(&Envelope::new(message))?;
+        sink.send(frame).await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 async fn run_session<F: Future<Output = ()>>(
@@ -302,6 +339,16 @@ async fn run_session<F: Future<Output = ()>>(
     let (scan_sender, mut scan_receiver) = mpsc::channel::<ScanOutcome>(1);
     let mut scanning = false;
 
+    // Progress queued while nobody was listening is out of date. Everything that matters is in a
+    // journal, and is sent again after the welcome.
+    let mut outbound = match &settings.operations {
+        Some(operations) => Some(operations.outbound().await),
+        None => None,
+    };
+    if let Some(receiver) = &mut outbound {
+        while receiver.try_recv().is_ok() {}
+    }
+
     let welcome_deadline = Instant::now() + settings.welcome_timeout;
     let mut welcomed = false;
     let mut interval = Duration::from_secs(3600);
@@ -328,6 +375,11 @@ async fn run_session<F: Future<Output = ()>>(
             () = welcome_wait, if !welcomed => {
                 return SessionEnd::Lost("no welcome from the server".to_owned());
             }
+            Some(message) = next_outbound(&mut outbound), if welcomed => {
+                if let Err(error) = send_all(&mut sink, vec![message]).await {
+                    return SessionEnd::Lost(error);
+                }
+            }
             _ = heartbeat.tick(), if welcomed => {
                 // Two intervals and an allowance without an answer means this connection is dead,
                 // even if the operating system has not noticed yet.
@@ -348,6 +400,11 @@ async fn run_session<F: Future<Output = ()>>(
                     Err(error) => return SessionEnd::Lost(error),
                 }
                 unanswered_since.get_or_insert_with(Instant::now);
+                if let Some(operations) = &settings.operations {
+                    if let Err(error) = send_all(&mut sink, operations.pending_reports()).await {
+                        return SessionEnd::Lost(error);
+                    }
+                }
             }
             Some(outcome) = scan_receiver.recv() => {
                 scanning = false;
@@ -411,6 +468,13 @@ async fn run_session<F: Future<Output = ()>>(
                     }
                     Decoded::InvalidPayload { message_type, operation_id } => {
                         tracing::warn!(%message_type, "Refused an invalid message from the server");
+                        if let (true, Some(operation_id), Some(operations)) = (
+                            message_type == "server.registration_request",
+                            operation_id,
+                            &settings.operations,
+                        ) {
+                            operations.refuse_invalid(operation_id);
+                        }
                         if let (true, Some(operation_id)) =
                             (message_type == "server.discovery_request", operation_id)
                         {
@@ -442,6 +506,11 @@ async fn run_session<F: Future<Output = ()>>(
                             );
                             last_ack = Instant::now();
                             tracing::info!(agent_id = %welcome.agent_id, "Connected to the server");
+                            if let Some(operations) = &settings.operations {
+                                if let Err(error) = send_all(&mut sink, operations.sync_messages()).await {
+                                    return SessionEnd::Lost(error);
+                                }
+                            }
                         }
                         Message::ServerHeartbeatAck(_) => {
                             last_ack = Instant::now();
@@ -481,6 +550,15 @@ async fn run_session<F: Future<Output = ()>>(
                                 tracing::info!(%operation_id, "Discovery requested");
                                 scanning = true;
                                 start_scan(settings, operation_id, envelope.id, scan_sender.clone());
+                            }
+                        }
+                        message @ (Message::ServerRegistrationRequest(_)
+                        | Message::ServerRegistrationCancel(_)
+                        | Message::ServerRegistrationAck(_)
+                        | Message::ServerRepositoryHealthRequest(_)) => {
+                            match &settings.operations {
+                                Some(operations) if welcomed => operations.handle(message),
+                                _ => tracing::warn!("Ignored a repository command"),
                             }
                         }
                         other => {

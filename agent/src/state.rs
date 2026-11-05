@@ -1,5 +1,9 @@
-//! Local state the agent will track for each VM. Persistence and the operations themselves are not
-//! implemented yet.
+//! Local state the agent tracks for each VM. Registration records which version a local copy came
+//! from; the other operations are not implemented yet.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -83,6 +87,54 @@ pub struct AgentVmState {
     pub last_verified_at: Option<OffsetDateTime>,
     pub last_verified_sha256: Option<String>,
     pub pending_operations: Vec<PendingOperation>,
+}
+
+const LOCAL_STATE_FILE: &str = "vm-state.json";
+
+/// Records that a local VM is the source of a version. The VM was verified as part of creating that
+/// version, and it counts as unverified again from the next connection, as [`AgentVmState`] requires.
+pub fn record_local_source(
+    state_dir: &Path,
+    agent_id: Uuid,
+    emulator_type: EmulatorType,
+    vm_name: &VmName,
+    version_id: Uuid,
+    manifest_sha256: Option<&str>,
+) -> std::io::Result<()> {
+    let path = state_dir.join(LOCAL_STATE_FILE);
+    let mut states: BTreeMap<String, AgentVmState> = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(error),
+    };
+    states.insert(
+        format!("{emulator_type}/{}", vm_name.key()),
+        AgentVmState {
+            agent_id,
+            emulator_type,
+            vm_name: vm_name.clone(),
+            local_source_version_id: Some(VersionId(version_id)),
+            execution_state: ExecutionState::Idle,
+            content_status: ContentStatus::Verified,
+            last_verified_at: Some(OffsetDateTime::now_utc()),
+            last_verified_sha256: manifest_sha256.map(str::to_owned),
+            pending_operations: Vec::new(),
+        },
+    );
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(&states)?)?;
+    fs::rename(&temporary, &path)
+}
+
+/// What [`record_local_source`] recorded, for one VM.
+pub fn read_local_state(
+    state_dir: &Path,
+    emulator_type: EmulatorType,
+    vm_name: &VmName,
+) -> Option<AgentVmState> {
+    let bytes = fs::read(state_dir.join(LOCAL_STATE_FILE)).ok()?;
+    let mut states: BTreeMap<String, AgentVmState> = serde_json::from_slice(&bytes).ok()?;
+    states.remove(&format!("{emulator_type}/{}", vm_name.key()))
 }
 
 impl AgentVmState {

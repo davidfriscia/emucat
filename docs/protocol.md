@@ -6,8 +6,9 @@
 [`fixtures/wire-examples.json`](../packages/contracts/fixtures/wire-examples.json).
 
 For how to run an agent, see [the agent guide](agent.md). The reasoning behind what follows is in
-[decision 0009](decisions/0009-agent-pairing-and-credentials.md) and
-[decision 0010](decisions/0010-agent-connections-and-discovery.md).
+[decision 0009](decisions/0009-agent-pairing-and-credentials.md),
+[decision 0010](decisions/0010-agent-connections-and-discovery.md) and
+[decision 0015](decisions/0015-registration-state-machine.md).
 
 ## Pairing
 
@@ -61,8 +62,8 @@ Re-pairing is always explicit, and creates a **new agent identity**. A revoked i
 ## Transport
 
 The agent opens an outbound WebSocket to `GET /api/v1/agent/ws`, with
-`Authorization: Bearer <credential>`. Only text frames holding JSON are accepted, up to 64 KiB. Large
-transfers such as media will use authenticated HTTP instead.
+`Authorization: Bearer <credential>`. Only text frames holding JSON are accepted, up to 64 KiB. Archives never travel here:
+agents reach a repository directly. Media will use authenticated HTTP.
 
 A token is never placed in a URL, so it cannot end up in access logs. The server checks the credential before the
 handshake, so a client without a valid one gets a plain 401 and never has an open socket.
@@ -91,20 +92,30 @@ handshake, so a client without a valid one gets a plain 401 and never has an ope
 
 ## Messages
 
-| Type                       | From   | Payload                                                      | Response                 |
-| -------------------------- | ------ | ------------------------------------------------------------ | ------------------------ |
-| `agent.hello`              | Agent  | `agentVersion`, `platform`, `architecture`                   | `server.welcome`         |
-| `agent.heartbeat`          | Agent  | Empty                                                        | `server.heartbeat_ack`   |
-| `agent.discovery_result`   | Agent  | `operationId`, `hostPlatform`, `emulators`, `vms`, `skipped` |                          |
-| `agent.discovery_error`    | Agent  | `operationId`, `code`, `message`                             |                          |
-| `server.welcome`           | Server | `agentId`, `heartbeatIntervalSeconds`                        |                          |
-| `server.heartbeat_ack`     | Server | Empty                                                        |                          |
-| `server.error`             | Server | `code`, `message`                                            |                          |
-| `server.discovery_request` | Server | `operationId`                                                | `agent.discovery_result` |
+| Type                               | From   | Payload                                                                                                                                                   | Response                                                 |
+| ---------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `agent.hello`                      | Agent  | `agentVersion`, `platform`, `architecture`                                                                                                                | `server.welcome`                                         |
+| `agent.heartbeat`                  | Agent  | Empty                                                                                                                                                     | `server.heartbeat_ack`                                   |
+| `agent.discovery_result`           | Agent  | `operationId`, `hostPlatform`, `emulators`, `vms`, `skipped`                                                                                              |                                                          |
+| `agent.discovery_error`            | Agent  | `operationId`, `code`, `message`                                                                                                                          |                                                          |
+| `server.welcome`                   | Server | `agentId`, `heartbeatIntervalSeconds`                                                                                                                     |                                                          |
+| `server.heartbeat_ack`             | Server | Empty                                                                                                                                                     |                                                          |
+| `server.error`                     | Server | `code`, `message`                                                                                                                                         |                                                          |
+| `server.discovery_request`         | Server | `operationId`                                                                                                                                             | `agent.discovery_result`                                 |
+| `server.registration_request`      | Server | `operationId`, `emulatorType`, `vmName`, `mode`, `repositoryId`, `versionId`, `archiveKey`                                                                | `agent.registration_progress`, then a result or an error |
+| `server.registration_cancel`       | Server | `operationId`                                                                                                                                             | `agent.registration_error`                               |
+| `server.registration_ack`          | Server | `operationId`, `outcome`, `versionId`, `removeLocal`, `deletePublished`                                                                                   |                                                          |
+| `server.repository_health_request` | Server | `operationId`, `repositoryId`                                                                                                                             | `agent.repository_health_result`                         |
+| `agent.registration_sync`          | Agent  | `operations`: `operationId`, `phase`                                                                                                                      |                                                          |
+| `agent.registration_progress`      | Agent  | `operationId`, `stage`, `doneBytes`, `totalBytes`                                                                                                         |                                                          |
+| `agent.registration_result`        | Agent  | `operationId`, `versionId`, `archiveKey`, `archiveSizeBytes`, `archiveSha256`, `manifestVersion`, `manifestSha256`, `fileCount`, `totalUncompressedBytes` | `server.registration_ack`                                |
+| `agent.registration_error`         | Agent  | `operationId`, `code`, `message`                                                                                                                          | `server.registration_ack`                                |
+| `agent.registration_cleanup`       | Agent  | `operationId`, `versionId`, `localCopy`, `code`, `message`                                                                                                | `server.registration_ack`                                |
+| `agent.repository_health_result`   | Agent  | `operationId`, `repositoryId`, `ok`, `code`, `message`, `configuration`, `hostKeyFingerprint`, `freeBytes`                                                |                                                          |
 
-`server.discovery_request` is **the only command** in this version, and it is read-only. It says only which
-operation this is: it has no path or option, and the agent refuses one with any extra field, so a server cannot
-aim a scan at anything but the configured directories.
+Commands say which identities are involved, and never where anything is. They have no path, host or option, and the agent
+refuses one with any extra field, so a server cannot aim a scan or a transfer at anything but what the agent's own
+configuration names.
 
 ## Connections
 
@@ -191,6 +202,61 @@ and the platform declared in the connection's hello, rather than believed.
 
 Results never touch `virtual_machines` or `vm_versions`. See [what discovery does](agent.md#discovery).
 
+## Registration
+
+```
+ Administrator            Server                       Agent                      Repository
+   │ POST /admin/registrations │                          │                            │
+   │ ────────────────────────▶ │ creates the operation    │                            │
+   │                           │ and issues its version   │                            │
+   │                           │ ── registration_request ▶│ checks the VM              │
+   │                           │ ◀─ registration_progress │ builds ZIP and manifest    │
+   │                           │                          │ ── upload to staging ────▶ │
+   │                           │                          │ ◀─ read back and hash ──── │
+   │                           │                          │ ── publish, no overwrite ▶ │
+   │                           │ ◀── registration_result  │                            │
+   │                           │ commits VM and master,   │                            │
+   │                           │ in one transaction       │                            │
+   │                           │ ── registration_ack ───▶ │ copy: keeps the VM         │
+   │                           │    committed             │ transfer: checks, removes  │
+   │                           │ ◀─ registration_cleanup  │                            │
+   │                           │ ── registration_ack ───▶ │ forgets the operation      │
+   │                           │    closed                │                            │
+```
+
+**The server creates an operation only if** an administrator asked, with the session and CSRF token; the agent is online and
+not revoked; the agent can register; it may use the repository, which is enabled; the VM is not in the catalog; nothing else is
+running for this VM or on this agent; and the VM is in that agent's latest discovery, from its current connection, less than 15
+minutes old, spelled exactly as discovered.
+
+**The agent checks for itself** that the repository is in its own configuration, that the archive key is the one that follows
+from the VM and version, that the VM's directory is an exact immediate child of the base path, not a link, and has a marker, and
+that a transfer would lose no screenshots.
+
+**A report authorizes nothing.** It counts only from the operation's own agent, on its active connection, with the identities the
+server issued. Stages only move forward, and an agent's report can never set a state the server decides.
+
+**Every report is repeated until it is answered,** on each heartbeat and after each welcome, and the server handles a repeat
+idempotently. When the server cannot record something it does not answer, which is how a failed commit recovers.
+
+| `server.registration_ack` | Meaning                                                                                        |
+| ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `committed`               | The master exists. `removeLocal` is true only for a transfer that is still in its cleanup step |
+| `rejected`                | There is no master. `deletePublished` says that nothing refers to the published archive        |
+| `closed`                  | The server has everything. The agent removes its journal                                       |
+
+**After each welcome, the agent sends `agent.registration_sync`,** listing its journals. See
+[decision 0015](decisions/0015-registration-state-machine.md#reports-repeat-until-answered). Being able to send it also says
+that the agent can register, so a server does not send registration requests to an older agent.
+
+Progress reports are thinned out to one per two seconds, and carry only what was measured: no total, no percentage.
+
+### Repository health
+
+The agent runs the check described in [the repository guide](repositories.md#7-test-the-connection), and reports its settings for
+that repository, without anything secret. The server compares them with its own record, and reports a difference. An answer
+counts only for the check in progress, from the agent it was asked of. A check that gets no answer in two minutes fails.
+
 ## Errors
 
 | Situation                            | Result                                                                    |
@@ -213,9 +279,10 @@ A breaking change increments `PROTOCOL_VERSION`, in TypeScript and Rust, along w
 document. The agent can read the server's version from `GET /api/v1/info`, and an unpaired agent with another
 version is refused at the pairing request.
 
-Adding a message that older peers can ignore is not breaking. **Milestone 2 added discovery under version 1 for
-this reason:** an agent ignores message types it does not know, and no agent had ever connected before. A server
-refuses unknown types from an agent, so adding a message an agent sends requires a server that knows it first.
+Adding a message that older peers can ignore is not breaking. **Milestones 2 and 3 added discovery and registration
+under version 1 for this reason:** an agent ignores message types it does not know. A server refuses unknown types from an
+agent, so adding a message an agent sends requires a server that knows it first. A server only registers through an agent that
+has shown it can, with `agent.registration_sync`.
 
 ## User authentication
 
@@ -227,4 +294,4 @@ session cookie, and a user's session cannot open this endpoint.
 
 - Credential rotation over the authenticated channel.
 - More control commands, each validated by the agent against local rules, such as `VmName`, whatever the server
-  sends.
+  sends: launching, stopping, snapshots, downloads.

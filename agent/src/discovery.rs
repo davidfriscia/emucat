@@ -110,12 +110,13 @@ pub struct DiscoveryReport {
     pub skipped: Vec<SkippedEntry>,
 }
 
-/// The launch script a host runs. Mirrors `QEMU_HOST_LAUNCH_SCRIPTS` in `@emucat/contracts`.
-pub const fn qemu_host_launch_script(host: Platform) -> &'static str {
+/// The launch scripts a host can run. Mirrors `QEMU_HOST_LAUNCH_SCRIPTS` in `@emucat/contracts`.
+/// `.bat` and `.cmd` files are Windows scripts, whatever else their name says.
+pub const fn qemu_host_launch_scripts(host: Platform) -> &'static [&'static str] {
     match host {
-        Platform::Windows => "run-win.cmd",
-        Platform::Macos => "run-mac.sh",
-        Platform::Linux => "run-linux.sh",
+        Platform::Windows => &["run.bat", "run.cmd", "run-win.bat", "run-win.cmd"],
+        Platform::Macos => &["run-mac.sh"],
+        Platform::Linux => &["run-linux.sh"],
     }
 }
 
@@ -126,8 +127,10 @@ pub fn host_compatibility(
     host: Platform,
 ) -> Option<bool> {
     (emulator == EmulatorType::Qemu).then(|| {
-        let script = qemu_host_launch_script(host);
-        markers.iter().any(|marker| marker == script)
+        let scripts = qemu_host_launch_scripts(host);
+        markers
+            .iter()
+            .any(|marker| scripts.contains(&marker.as_str()))
     })
 }
 
@@ -147,7 +150,7 @@ pub fn display_name(raw: &str) -> String {
 /// A reparse point of any kind, not only the symlinks and junctions Rust calls symlinks: OneDrive
 /// placeholders and deduplicated files can also lead somewhere other than where they appear to be.
 #[cfg(windows)]
-fn is_link_like(metadata: &Metadata) -> bool {
+pub(crate) fn is_link_like(metadata: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     metadata.file_type().is_symlink()
@@ -155,7 +158,7 @@ fn is_link_like(metadata: &Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_link_like(metadata: &Metadata) -> bool {
+pub(crate) fn is_link_like(metadata: &Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 

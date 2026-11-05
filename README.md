@@ -3,11 +3,12 @@
 Self-hosted web catalog and local launcher for [86Box](https://86box.net/) and
 [QEMU](https://www.qemu.org/) virtual machines.
 
-**Status: Milestone 2 (agent connectivity and discovery).** There is a first-administrator setup, local
-sign-in with persistent sessions, a public catalog, and an administration area. A native agent pairs with the
-server, stays connected over an authenticated WebSocket, and reports the VMs it finds in its configured
-directories. VM registration, archive transfers, launching, snapshots and media upload are **not** implemented yet,
-so **discovered VMs cannot be added to the catalog yet**: it stays empty until Milestone 3. See
+**Status: Milestone 3 (VM registration, immutable ZIP masters, direct SSH repository).** There is a first-administrator
+setup, local sign-in with persistent sessions, a public catalog, and an administration area. A native agent pairs with
+the server, stays connected over an authenticated WebSocket, and reports the VMs it finds. An administrator can register
+one, with **Copy** or **Transfer**: the agent builds a standalone ZIP with a manifest, uploads it directly to an SSH/SFTP
+repository, verifies its SHA-256 there, and publishes it immutably, after which the server records one private master.
+Launching, snapshots, restoring and media upload are **not** implemented yet. See
 [known limitations](#known-limitations).
 
 | Part                                       | Technology                                       |
@@ -19,8 +20,9 @@ so **discovered VMs cannot be added to the catalog yet**: it stays empty until M
 | [`compose.yaml`](compose.yaml)             | MariaDB for local development                    |
 
 Read [architecture](docs/architecture.md), the [domain model](docs/domain-model.md), the
-[agent guide](docs/agent.md), the [protocol](docs/protocol.md), the [REST API](docs/api.md), [authentication](docs/authentication.md), the
-[brand guidelines](docs/brand.md) and the [decision records](docs/decisions).
+[agent guide](docs/agent.md), the [repository guide](docs/repositories.md), the [protocol](docs/protocol.md), the
+[REST API](docs/api.md), [authentication](docs/authentication.md), the [brand guidelines](docs/brand.md) and the
+[decision records](docs/decisions).
 
 ## Prerequisites
 
@@ -82,7 +84,8 @@ Run from the repository root.
 | `pnpm lint`        | ESLint, Prettier check, `cargo fmt --check`, Clippy with warnings as errors. |
 | `pnpm format`      | Formats everything with Prettier and rustfmt.                                |
 | `pnpm test`        | Runs all tests. MariaDB must be running.                                     |
-| `pnpm test:e2e`    | Builds the agent, and runs the real agent against the real API. Windows.     |
+| `pnpm test:e2e`    | Builds the agent, and runs the real agent, API and SFTP server. Windows.     |
+| `pnpm test:sftp`   | Runs the SFTP provider against a real OpenSSH container, and the ZIP64 test. |
 | `pnpm build`       | Production builds of contracts, API and web, plus the Release agent.         |
 | `pnpm build:agent` | Builds only the Release agent.                                               |
 | `pnpm dev`         | Starts contracts watcher, API and web together.                              |
@@ -115,8 +118,13 @@ and drop them afterwards. They never touch the development database. If MariaDB 
 single-package API or web run, if the contracts have changed.
 
 `pnpm test:e2e` starts the compiled agent as a real process and takes it through pairing, DPAPI storage, presence,
-discovery, a server restart and revocation, using temporary VM directories. It needs MariaDB, and runs on Windows
-only, so CI does not run it.
+discovery, a server restart and revocation. It then registers VMs for real, against a real OpenSSH server in a container:
+copy, transfer, blocked transfers, interrupted uploads, restarts of either side, lost acknowledgements, changed host keys
+and revocation. It only ever uses disposable temporary directories. It needs MariaDB, Docker and `ssh-keygen`, and runs
+on Windows only, so CI does not run it.
+
+`pnpm test:sftp` runs the provider's own tests against the same container image, in
+[`infra/docker/sftp-test`](infra/docker/sftp-test). It needs Docker and `ssh-keygen`. `cargo test` needs neither.
 
 The TypeScript and Rust domain code is tested against the same files in
 [`packages/contracts/fixtures`](packages/contracts/fixtures), so they cannot drift apart unnoticed.
@@ -139,24 +147,35 @@ Copy [`agent/agent.example.toml`](agent/agent.example.toml), fill in your paths,
 .\target\release\emucat-agent.exe run --config agent.toml    # Ctrl+C to stop
 ```
 
-`discover` scans the configured directories and prints the report, with no server involved. The agent only connects
-out and has no listener. It launches no emulator and changes nothing in VM directories. Its credential is protected
-with DPAPI. The [agent guide](docs/agent.md) covers configuration, pairing, credential recovery, discovery and
-troubleshooting.
+`discover` scans the configured directories and prints the report, with no server involved. `repository-check` tests a
+configured repository the same way. The agent only connects out and has no listener. It launches no emulator, and it changes a
+VM directory in one case only: a transfer an administrator confirmed, after a verified master is committed. Its credential
+is protected with DPAPI. The [agent guide](docs/agent.md) covers configuration, pairing, credential recovery, discovery,
+registration and troubleshooting, and the [repository guide](docs/repositories.md) covers setting up SSH.
 
 After upgrading from an earlier milestone, run `pnpm db:migrate`.
 
 ## Known limitations
 
-- **No way to add a VM.** Discovery shows what an agent finds, but registering it arrives in Milestone 3. Until then
-  the catalog stays empty on a real installation. The catalog and media features are tested against fixture rows in
-  throwaway databases.
+- **Registered VMs cannot be used yet.** A master is stored and cataloged, but downloading, restoring, launching and
+  snapshots arrive in later milestones. There is no way to delete a registered VM or remove an archive through the app.
+- **Screenshots are not uploaded.** They are excluded from archives, so a **transfer is refused** while a VM has any, and they
+  stay on the agent's disk after a copy. See [decision 0015](docs/decisions/0015-registration-state-machine.md#transfer).
+- **Archiving is not a filesystem snapshot.** Changes during archiving are detected and fail the operation, and Windows also
+  refuses files open for writing, but a VM should be stopped first. See
+  [decision 0014](docs/decisions/0014-archive-and-manifest.md).
+- **The repository needs hard links,** through `hardlink@openssh.com`, for publication that cannot overwrite. A server
+  without them fails closed. See [decision 0013](docs/decisions/0013-ssh-provider.md).
+- **One active SSH repository,** and one registration per agent at a time. No HTTPS provider, replication or migration yet.
+- **An address change must be made twice,** in the web app and in each agent's configuration. A mismatch is reported.
+- **A failed publication can leave an unreferenced archive** in rare crash windows, such as a database reset mid-operation. It
+  is harmless but is not cleaned up automatically.
 - **One API process.** Agent presence and discovery results are in memory, so several instances would not work
   together. See [decision 0010](docs/decisions/0010-agent-connections-and-discovery.md).
 - **Windows agents only for pairing.** Elsewhere the agent builds, and `discover` works, but there is no credential
   store yet, so it refuses to pair. It does not install itself as a service, and has no tray icon.
-- **QEMU VMs need the documented scripts.** A VM whose launch script is named otherwise, such as `run.bat`, is
-  reported as having no marker. See [the agent guide](docs/agent.md#what-counts-as-a-vm).
+- **QEMU VMs need a recognized launcher.** A VM whose only script is named otherwise, such as `run.sh`, is reported as
+  having no marker. See [the agent guide](docs/agent.md#what-counts-as-a-vm).
 - **No media upload.** The administration pages manage media rows that already exist. Nothing creates them yet.
 - **Single role.** Only administrators exist in practice, and there is no user management.
 - **No password recovery** other than editing the database. See

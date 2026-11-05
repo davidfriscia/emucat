@@ -12,6 +12,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
 use url::Url;
+use uuid::Uuid;
 
 use crate::emulators::EmulatorType;
 use crate::pairing::sanitize_agent_name;
@@ -32,6 +33,24 @@ pub struct EmulatorConfig {
     pub executable: PathBuf,
 }
 
+/// How this agent reaches a repository. It is keyed by the repository's UUID in the server's database,
+/// and is the only source of a host, a port or a path: nothing a server or a browser sends can change
+/// them. It names where a private key is, and never holds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub remote_root: String,
+    pub private_key_path: PathBuf,
+    pub host_key_fingerprints: Vec<String>,
+    pub known_hosts_path: Option<PathBuf>,
+    pub connect_timeout_seconds: u64,
+    pub transfer_timeout_seconds: u64,
+    pub connect_retries: u32,
+    pub upload_attempts: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub api_url: Url,
@@ -39,6 +58,9 @@ pub struct Config {
     pub agent_name: Option<String>,
     pub emulators: BTreeMap<EmulatorType, EmulatorConfig>,
     pub state_dir: Option<PathBuf>,
+    /// Where archives are built. Defaults to `staging` in the state directory.
+    pub staging_dir: Option<PathBuf>,
+    pub repositories: BTreeMap<Uuid, RepositoryConfig>,
     pub log_level: String,
     pub log_format: LogFormat,
 }
@@ -87,6 +109,126 @@ struct FileConfig {
     state: StateSection,
     #[serde(default)]
     logging: LoggingSection,
+    #[serde(default)]
+    storage: StorageSection,
+    #[serde(default)]
+    repositories: BTreeMap<String, RepositorySection>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StorageSection {
+    staging_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositorySection {
+    kind: String,
+    host: String,
+    #[serde(default = "default_ssh_port")]
+    port: u16,
+    username: String,
+    remote_root: String,
+    private_key_path: PathBuf,
+    #[serde(default)]
+    host_key_fingerprints: Vec<String>,
+    known_hosts_path: Option<PathBuf>,
+    #[serde(default = "default_connect_timeout")]
+    connect_timeout_seconds: u64,
+    #[serde(default = "default_transfer_timeout")]
+    transfer_timeout_seconds: u64,
+    #[serde(default = "default_connect_retries")]
+    connect_retries: u32,
+    #[serde(default = "default_upload_attempts")]
+    upload_attempts: u32,
+}
+
+const fn default_ssh_port() -> u16 {
+    22
+}
+const fn default_connect_timeout() -> u64 {
+    20
+}
+const fn default_transfer_timeout() -> u64 {
+    60
+}
+const fn default_connect_retries() -> u32 {
+    2
+}
+const fn default_upload_attempts() -> u32 {
+    2
+}
+
+fn resolve_repositories(
+    sections: BTreeMap<String, RepositorySection>,
+) -> Result<BTreeMap<Uuid, RepositoryConfig>, ConfigError> {
+    let invalid = |message: String| ConfigError::Invalid {
+        field: "repositories",
+        message,
+    };
+    let mut repositories = BTreeMap::new();
+    for (id, section) in sections {
+        let uuid =
+            Uuid::parse_str(&id).map_err(|_| invalid(format!("{id} is not a repository UUID")))?;
+        if section.kind != "sftp" {
+            return Err(invalid(format!(
+                "{id}: \"{}\" is not a supported kind. Use \"sftp\"",
+                section.kind
+            )));
+        }
+        if section.host.is_empty() || section.username.is_empty() {
+            return Err(invalid(format!("{id}: host and username are required")));
+        }
+        if section.remote_root.is_empty()
+            || section.remote_root.contains('\\')
+            || section
+                .remote_root
+                .split('/')
+                .any(|segment| segment == "..")
+        {
+            return Err(invalid(format!(
+                "{id}: remote_root must be a path on the server, with no \"..\""
+            )));
+        }
+        if section.host_key_fingerprints.is_empty() && section.known_hosts_path.is_none() {
+            return Err(invalid(format!(
+                "{id}: host_key_fingerprints or known_hosts_path is required. Host keys are always \
+                 verified"
+            )));
+        }
+        if section
+            .host_key_fingerprints
+            .iter()
+            .any(|fingerprint| !fingerprint.starts_with("SHA256:"))
+        {
+            return Err(invalid(format!(
+                "{id}: host_key_fingerprints must look like SHA256:…, as ssh-keygen -lf prints them"
+            )));
+        }
+        if section.upload_attempts == 0 || section.transfer_timeout_seconds == 0 {
+            return Err(invalid(format!(
+                "{id}: upload_attempts and transfer_timeout_seconds must be at least 1"
+            )));
+        }
+        repositories.insert(
+            uuid,
+            RepositoryConfig {
+                host: section.host,
+                port: section.port,
+                username: section.username,
+                remote_root: section.remote_root,
+                private_key_path: section.private_key_path,
+                host_key_fingerprints: section.host_key_fingerprints,
+                known_hosts_path: section.known_hosts_path,
+                connect_timeout_seconds: section.connect_timeout_seconds,
+                transfer_timeout_seconds: section.transfer_timeout_seconds,
+                connect_retries: section.connect_retries,
+                upload_attempts: section.upload_attempts,
+            },
+        );
+    }
+    Ok(repositories)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -222,6 +364,13 @@ fn resolve_emulator(
 }
 
 impl Config {
+    /// Where archives are built, if that is known.
+    pub fn effective_staging_dir(&self) -> Option<PathBuf> {
+        self.staging_dir
+            .clone()
+            .or_else(|| self.state_dir.as_ref().map(|dir| dir.join("staging")))
+    }
+
     /// Loads the configuration. An explicitly chosen file must exist. The default file is
     /// optional, so that an agent can be configured through the environment alone.
     pub fn load(
@@ -325,6 +474,10 @@ impl Config {
                 .map(PathBuf::from)
                 .or(file.state.dir)
                 .or_else(|| default_state_dir(env)),
+            staging_dir: env("EMUCAT_AGENT_STAGING_DIR")
+                .map(PathBuf::from)
+                .or(file.storage.staging_dir),
+            repositories: resolve_repositories(file.repositories)?,
             log_level,
             log_format,
         })
@@ -446,6 +599,52 @@ pub fn validate(config: &Config) -> Vec<ValidationIssue> {
                     ));
                 }
             }
+        }
+    }
+
+    if let Some(staging) = &config.staging_dir {
+        if !staging.is_absolute() {
+            error(format!(
+                "staging directory must be absolute: {}",
+                staging.display()
+            ));
+        }
+        for (emulator, paths) in &config.emulators {
+            if is_within(staging, &paths.base_path) {
+                error(format!(
+                    "staging directory must not be inside the {emulator} base path: {}",
+                    staging.display()
+                ));
+            }
+        }
+    }
+
+    for (id, repository) in &config.repositories {
+        if !repository.private_key_path.is_absolute() {
+            error(format!(
+                "repository {id}: private_key_path must be absolute"
+            ));
+        } else if !repository.private_key_path.is_file() {
+            error(format!(
+                "repository {id}: private key not found: {}",
+                repository.private_key_path.display()
+            ));
+        }
+        for (emulator, paths) in &config.emulators {
+            if is_within(&repository.private_key_path, &paths.base_path) {
+                error(format!(
+                    "repository {id}: the private key must not be inside the {emulator} base path, \
+                     or it could end up in an archive"
+                ));
+            }
+        }
+        if let Some(known_hosts) = &repository.known_hosts_path
+            && !known_hosts.is_file()
+        {
+            error(format!(
+                "repository {id}: known_hosts file not found: {}",
+                known_hosts.display()
+            ));
         }
     }
 

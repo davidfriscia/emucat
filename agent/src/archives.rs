@@ -1,8 +1,5 @@
 //! Version domain: full, standalone archives forming a branching tree from an immutable master.
-//! Creating and transferring archives is not implemented yet.
-
-use std::future::Future;
-use std::path::Path;
+//! Creating archives is in `packaging`, and storing them in `repository`.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -223,38 +220,4 @@ pub(crate) fn is_root_ppm(segments: &[&str]) -> bool {
         return false;
     };
     name.to_ascii_lowercase().ends_with(".ppm")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveObjectInfo {
-    pub key: String,
-    pub size_bytes: u64,
-    pub sha256: String,
-}
-
-/// Storage for version archives, implemented per backend in future milestones. Archives are
-/// immutable: `upload` must fail if the key exists, and implementations verify size and hash before
-/// making an object visible.
-pub trait ArchiveRepository: Send + Sync {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    fn stat(
-        &self,
-        key: &str,
-    ) -> impl Future<Output = Result<Option<ArchiveObjectInfo>, Self::Error>> + Send;
-
-    fn upload(
-        &self,
-        key: &str,
-        source: &Path,
-        expected_sha256: &str,
-    ) -> impl Future<Output = Result<ArchiveObjectInfo, Self::Error>> + Send;
-
-    fn download(
-        &self,
-        key: &str,
-        destination: &Path,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-    fn delete(&self, key: &str) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }

@@ -14,7 +14,6 @@ describe('API configuration', () => {
     expect(config.port).toBe(4000);
     expect(config.host).toBe('127.0.0.1');
     expect(isAbsolute(config.storagePath)).toBe(true);
-    expect(config.archiveRepository.kind).toBe('none');
   });
 
   it('reads overrides', () => {
@@ -27,11 +26,5 @@ describe('API configuration', () => {
     const attempt = () => loadConfig({ DB_PASSWORD: 'super-secret', API_PORT: 'not-a-port' });
     expect(attempt).toThrow(/API_PORT/);
     expect(attempt).not.toThrow(/super-secret/);
-  });
-
-  it('rejects an invalid repository kind', () => {
-    expect(() => loadConfig({ DB_PASSWORD: 'x', ARCHIVE_REPOSITORY_KIND: '../s3' })).toThrow(
-      /ARCHIVE_REPOSITORY_KIND/,
-    );
   });
 });

@@ -72,7 +72,8 @@ export function SettingsPage() {
         </section>
       </div>
       <p className="text-body-secondary small mt-4">
-        Agent, emulator and repository settings are planned for a future version.
+        Repositories are managed under Repositories. Agent and emulator settings live in each
+        agent’s own configuration file.
       </p>
     </>
   );

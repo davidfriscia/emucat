@@ -1,8 +1,8 @@
 # REST API
 
 Everything is under `/api/v1` and speaks JSON, apart from image files. Request and response shapes are
-Zod schemas in [`packages/contracts`](../packages/contracts): [`auth.ts`](../packages/contracts/src/auth.ts)
-and [`catalog.ts`](../packages/contracts/src/catalog.ts). The agent's WebSocket is described in the
+Zod schemas in [`packages/contracts`](../packages/contracts): [`auth.ts`](../packages/contracts/src/auth.ts),
+[`catalog.ts`](../packages/contracts/src/catalog.ts) and [`registration.ts`](../packages/contracts/src/registration.ts). The agent's WebSocket is described in the
 [protocol](protocol.md).
 
 ## Conventions
@@ -99,8 +99,7 @@ Requires a session with the `admin` role. Responses are `Cache-Control: no-store
 Media mutations return the VM's updated media list.
 
 **There is no route that creates a VM**, and none that changes `emulator_type` or `vm_name`. A VM enters the
-catalog only through agent discovery followed by user confirmation. Discovery exists, and the confirmation
-arrives in Milestone 3.
+catalog only through agent discovery followed by [an explicit registration](#registrations), which keeps it private.
 
 ## Agent pairing
 
@@ -146,17 +145,58 @@ hostCompatible, registered }`. See [the agent guide](agent.md#discovery).
 
 **Discovery creates nothing.** No route here writes to `virtual_machines` or `vm_versions`.
 
+## Registrations
+
+Administrators only, with the session and CSRF token. Nothing here accepts or returns archive bytes, a filesystem path or a
+private key: archives go directly between agent and repository. See the [protocol](protocol.md#registration). Shapes are in
+[`registration.ts`](../packages/contracts/src/registration.ts).
+
+| Route                                              | What it does                                                                                                                                        |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /admin/registrations`                        | Starts one: `agentId`, `repositoryId`, `emulatorType`, `vmName`, `mode`, `discoveryOperationId`, and `confirmDestructive: true` for a transfer. 202 |
+| `GET /admin/registrations`                         | The latest 100, newest first. `?agentId=` narrows it                                                                                                |
+| `GET /admin/registrations/:operationId`            | One operation: its state, progress, archive, local copy, error and recovery guidance                                                                |
+| `POST /admin/registrations/:operationId/cancel`    | Until the master exists. Otherwise 409 `registration_committed`                                                                                     |
+| `POST /admin/registrations/:operationId/reconcile` | Tries a failed commit again, from the metadata the agent already reported. Safe to repeat                                                           |
+
+`archive` in a response is what the **agent** verified, and says so with `verifiedBy: "agent"`. The server has not read the archive.
+
+| Status | Code                                                                               | Meaning                                                                  |
+| ------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| 400    | `validation_failed`                                                                | Includes any extra field, an unsafe VM name, and an unconfirmed transfer |
+| 409    | `agent_offline`, `agent_revoked`, `agent_cannot_register`                          |                                                                          |
+| 409    | `discovery_stale`                                                                  | Run discovery again, and choose the VM from the new report               |
+| 409    | `vm_already_registered`, `registration_in_progress`                                |                                                                          |
+| 409    | `repository_not_authorized`, `repository_disabled`                                 |                                                                          |
+| 409    | `registration_committed`, `registration_finished`, `registration_not_reconcilable` |                                                                          |
+| 404    | `registration_not_found`, `repository_not_found`                                   |                                                                          |
+
+## Repositories
+
+Administrators only, with the session and CSRF token. No response holds a credential, and no request can send one. See the
+[repository guide](repositories.md).
+
+| Route                                                                 | What it does                                                                                    |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `GET /admin/repositories`                                             | Each with its address, status, last successful check, agents, errors                            |
+| `POST /admin/repositories`                                            | `name`, `host`, `port`, `username`, `remoteRoot`. 201. 409 `repository_exists` if one is active |
+| `PUT /admin/repositories/:repositoryId`                               | Replaces those details, and forgets earlier checks                                              |
+| `PUT /admin/repositories/:repositoryId/agents/:agentId`               | Allows an agent to use it                                                                       |
+| `DELETE /admin/repositories/:repositoryId/agents/:agentId`            | Stops allowing it. A running registration then fails at its commit                              |
+| `POST /admin/repositories/:repositoryId/agents/:agentId/health-check` | Asks the agent to test it. 202. The result appears in the list                                  |
+
 ## Browser pages
 
-| Route                              | Audience      | Page                      |
-| ---------------------------------- | ------------- | ------------------------- |
-| `/`                                | Public        | Catalog                   |
-| `/vms/:emulatorType/:vmName`       | Public        | VM detail                 |
-| `/login`, `/setup`                 | Public        | Sign in, first-run setup  |
-| `/admin`                           | Administrator | Dashboard                 |
-| `/admin/catalog`                   | Administrator | Catalog management        |
-| `/admin/agents`                    | Administrator | Agents, pairing           |
-| `/admin/agents/:agentId`           | Administrator | One agent, discovery      |
-| `/admin/vms/:emulatorType/:vmName` | Administrator | VM metadata editor        |
-| `…/media`                          | Administrator | Media management          |
-| `/account`, `/settings`            | Signed in     | Password, sessions, theme |
+| Route                              | Audience      | Page                               |
+| ---------------------------------- | ------------- | ---------------------------------- |
+| `/`                                | Public        | Catalog                            |
+| `/vms/:emulatorType/:vmName`       | Public        | VM detail                          |
+| `/login`, `/setup`                 | Public        | Sign in, first-run setup           |
+| `/admin`                           | Administrator | Dashboard                          |
+| `/admin/catalog`                   | Administrator | Catalog management                 |
+| `/admin/agents`                    | Administrator | Agents, pairing                    |
+| `/admin/agents/:agentId`           | Administrator | One agent, discovery, registration |
+| `/admin/repositories`              | Administrator | Repositories, connectivity tests   |
+| `/admin/vms/:emulatorType/:vmName` | Administrator | VM metadata editor                 |
+| `…/media`                          | Administrator | Media management                   |
+| `/account`, `/settings`            | Signed in     | Password, sessions, theme          |

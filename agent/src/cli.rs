@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use uuid::Uuid;
 
 use crate::config::{self, LogFormat, SettingOverrides};
 use crate::platform::PlatformInfo;
@@ -14,9 +15,12 @@ use crate::protocol::PROTOCOL_VERSION;
     version,
     about = "Headless local agent for EmuCat",
     long_about = "Headless local agent for EmuCat.\n\n\
-        Connects outbound to an EmuCat server, and reports the 86Box and QEMU virtual machines in \
-        its configured directories when asked. It has no listener, launches no emulators and does \
-        not change VM directories. Pair it once with `pair`, then keep it running with `run`."
+        Connects outbound to an EmuCat server, reports the 86Box and QEMU virtual machines in its \
+        configured directories when asked, and registers one when an administrator asks: it builds a \
+        standalone ZIP archive with a manifest, uploads it straight to an SSH/SFTP repository, and \
+        verifies its SHA-256 there. It has no listener and launches no emulators. It removes a local \
+        VM only for an explicitly confirmed transfer, after the server has committed a verified \
+        master. Pair it once with `pair`, then keep it running with `run`."
 )]
 pub struct Cli {
     /// Configuration file [env: EMUCAT_AGENT_CONFIG]
@@ -52,6 +56,18 @@ pub enum Command {
     Unpair,
     /// Scan the configured VM directories, read-only, and print the report. Needs no server
     Discover,
+    /// Test a configured SSH repository directly: connection, host key, key, read, write, publication
+    RepositoryCheck {
+        /// The repository's UUID, as shown on the Repositories page
+        #[arg(long, value_name = "UUID")]
+        repository: Uuid,
+    },
+    /// Store the passphrase of a repository's SSH key, protected with DPAPI. Reads it from standard input
+    RepositoryPassphrase {
+        /// The repository's UUID, as shown on the Repositories page
+        #[arg(long, value_name = "UUID")]
+        repository: Uuid,
+    },
     /// Validate the configuration and exit
     CheckConfig,
     /// Print version, protocol, platform and default paths

@@ -1,5 +1,4 @@
 import { isAbsolute, resolve } from 'node:path';
-import { REPOSITORY_KIND_PATTERN } from '@emucat/contracts';
 import { z } from 'zod';
 import { REPOSITORY_ROOT } from './env.js';
 
@@ -22,8 +21,6 @@ const envSchema = z.object({
   // Required, with no default: there are no built-in credentials.
   DB_PASSWORD: z.string().min(1),
   STORAGE_PATH: z.string().min(1).default('var/storage'),
-  ARCHIVE_REPOSITORY_KIND: z.string().regex(REPOSITORY_KIND_PATTERN).default('none'),
-  ARCHIVE_REPOSITORY_URI: z.string().default(''),
   NODE_ENV: z.string().optional(),
   // Defaults to true when NODE_ENV is production.
   COOKIE_SECURE: emptyAsUndefined(booleanFlag.optional()),
@@ -50,7 +47,6 @@ export interface Config {
     password: string;
   };
   storagePath: string;
-  archiveRepository: { kind: string; uri: string };
   cookieSecure: boolean;
   sessionIdleTtlSeconds: number;
   sessionAbsoluteTtlSeconds: number;
@@ -88,10 +84,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     storagePath: isAbsolute(values.STORAGE_PATH)
       ? values.STORAGE_PATH
       : resolve(REPOSITORY_ROOT, values.STORAGE_PATH),
-    archiveRepository: {
-      kind: values.ARCHIVE_REPOSITORY_KIND,
-      uri: values.ARCHIVE_REPOSITORY_URI,
-    },
     cookieSecure: values.COOKIE_SECURE ?? values.NODE_ENV === 'production',
     sessionIdleTtlSeconds: values.SESSION_IDLE_TTL_HOURS * 3600,
     sessionAbsoluteTtlSeconds: values.SESSION_ABSOLUTE_TTL_HOURS * 3600,

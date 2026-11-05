@@ -9,11 +9,14 @@ export const DISCOVERY_MAX_VMS = 256;
 export const DISCOVERY_MAX_SKIPPED = 64;
 export const DISCOVERY_SKIPPED_NAME_MAX_LENGTH = 80;
 
-/** The launch script each host can run. Scripts are reported, and never executed by discovery. */
-export const QEMU_HOST_LAUNCH_SCRIPTS: Readonly<Record<Platform, string>> = {
-  windows: 'run-win.cmd',
-  macos: 'run-mac.sh',
-  linux: 'run-linux.sh',
+/**
+ * The launch scripts each host can run. Scripts are reported, and never executed by discovery or
+ * registration. `.bat` and `.cmd` files are Windows scripts, whatever else their name says.
+ */
+export const QEMU_HOST_LAUNCH_SCRIPTS: Readonly<Record<Platform, readonly string[]>> = {
+  windows: ['run.bat', 'run.cmd', 'run-win.bat', 'run-win.cmd'],
+  macos: ['run-mac.sh'],
+  linux: ['run-linux.sh'],
 };
 
 /**
@@ -25,7 +28,9 @@ export function hostCompatibility(
   markers: readonly string[],
   host: Platform,
 ): boolean | null {
-  return emulatorType === 'qemu' ? markers.includes(QEMU_HOST_LAUNCH_SCRIPTS[host]) : null;
+  if (emulatorType !== 'qemu') return null;
+  const scripts = QEMU_HOST_LAUNCH_SCRIPTS[host];
+  return markers.some((marker) => scripts.includes(marker));
 }
 
 export const DISCOVERY_EMULATOR_STATUSES = [
@@ -56,7 +61,7 @@ export const discoveredVmSchema = z
     emulatorType: emulatorTypeSchema,
     vmName: vmNameSchema,
     /** The markers present, as regular files, in the VM's root. */
-    markers: z.array(z.string().max(32)).min(1).max(3),
+    markers: z.array(z.string().max(32)).min(1).max(6),
     hostCompatible: z.boolean().nullable(),
   })
   .superRefine((vm, context) => {

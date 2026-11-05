@@ -6,6 +6,18 @@ import {
   discoveryResultPayloadSchema,
 } from './discovery.js';
 import { architectureSchema, platformSchema } from './platform.js';
+import {
+  registrationAckPayloadSchema,
+  registrationCancelPayloadSchema,
+  registrationCleanupPayloadSchema,
+  registrationErrorPayloadSchema,
+  registrationProgressPayloadSchema,
+  registrationRequestPayloadSchema,
+  registrationResultPayloadSchema,
+  registrationSyncPayloadSchema,
+  repositoryHealthRequestPayloadSchema,
+  repositoryHealthResultPayloadSchema,
+} from './registration.js';
 import { timestampSchema } from './version.js';
 
 export * from './platform.js';
@@ -66,7 +78,10 @@ export type ServerErrorPayload = z.infer<typeof serverErrorPayloadSchema>;
 
 const emptyPayloadSchema = z.object({}).strict();
 
-/** Messages an agent may send. None of them can make the server act on anything but its own report. */
+/**
+ * Messages an agent may send. None of them can make the server act on anything but its own report, and
+ * a registration result only counts for an operation the server itself created for this agent.
+ */
 export const agentMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({ type: z.literal('agent.hello'), payload: agentHelloPayloadSchema }),
   envelopeSchema.extend({ type: z.literal('agent.heartbeat'), payload: emptyPayloadSchema }),
@@ -78,10 +93,37 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.discovery_error'),
     payload: discoveryErrorPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.registration_sync'),
+    payload: registrationSyncPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.registration_progress'),
+    payload: registrationProgressPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.registration_result'),
+    payload: registrationResultPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.registration_error'),
+    payload: registrationErrorPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.registration_cleanup'),
+    payload: registrationCleanupPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.repository_health_result'),
+    payload: repositoryHealthResultPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
-/** Messages a server may send. `server.discovery_request` is the only command, and it is read-only. */
+/**
+ * Messages a server may send. The commands name identities, and never a path or an address: the agent
+ * validates each one against its own configuration.
+ */
 export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({ type: z.literal('server.welcome'), payload: serverWelcomePayloadSchema }),
   envelopeSchema.extend({ type: z.literal('server.heartbeat_ack'), payload: emptyPayloadSchema }),
@@ -89,6 +131,22 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.discovery_request'),
     payload: discoveryRequestPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.registration_request'),
+    payload: registrationRequestPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.registration_cancel'),
+    payload: registrationCancelPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.registration_ack'),
+    payload: registrationAckPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.repository_health_request'),
+    payload: repositoryHealthRequestPayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

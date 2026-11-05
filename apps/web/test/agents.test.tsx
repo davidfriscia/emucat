@@ -510,10 +510,10 @@ describe('discovery', () => {
     const registered = articleOf(screen.getByRole('heading', { name: 'Win98' }));
     expect(within(registered).getByText('QEMU')).toBeTruthy();
     expect(within(registered).getByText('Already registered')).toBeTruthy();
-    expect(within(registered).getByText('Has a launch script for this host')).toBeTruthy();
+    expect(within(registered).getByText('Has a launcher for this host')).toBeTruthy();
 
     const foreign = articleOf(screen.getByRole('heading', { name: 'Tux' }));
-    expect(within(foreign).getByText('No launch script for this host')).toBeTruthy();
+    expect(within(foreign).getByText('No launcher for this host')).toBeTruthy();
   });
 
   it('explains skipped directories', async () => {
@@ -536,11 +536,11 @@ describe('discovery', () => {
     });
     renderAt(AGENT_PATH);
     await screen.findByRole('heading', { name: 'Dos622' });
-    const buttons = screen.getAllByRole('button', { name: /Register/ }) as HTMLButtonElement[];
-    expect(buttons.length).toBe(2);
+    // Without a repository there is nothing to register to, so nothing can be started.
+    const buttons = screen.getAllByRole('button', { name: /to remote/ }) as HTMLButtonElement[];
+    expect(buttons.length).toBe(4);
     for (const button of buttons) {
       expect(button.disabled).toBe(true);
-      expect(button.textContent).toContain('Milestone 3');
       fireEvent.click(button);
     }
     expect(screen.getByRole('note').textContent).toMatch(/observations, not catalog entries/);

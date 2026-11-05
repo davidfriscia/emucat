@@ -10,7 +10,7 @@ use emucat_agent::emulators::{
 };
 use emucat_agent::filesystem::{parse_vm_relative_path, vm_directory};
 use emucat_agent::media::{MediaVisibility, is_watched_media_path};
-use emucat_agent::protocol::{Envelope, Message, PROTOCOL_VERSION};
+use emucat_agent::protocol::{Decoded, Envelope, Message, PROTOCOL_VERSION, decode};
 use emucat_agent::state::{AgentVmState, ContentStatus};
 use serde::Deserialize;
 use serde_json::Value;
@@ -361,4 +361,31 @@ fn protocol_refuses_unknown_messages() {
     let mut value = wire("agentHeartbeat");
     value["payload"] = serde_json::json!({ "unexpected": true });
     assert!(serde_json::from_value::<Envelope>(value).is_err());
+}
+
+#[test]
+fn registration_messages_match_the_shared_fixtures() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in ["registrationServerMessages", "registrationAgentMessages"] {
+        for example in wire[key].as_array().unwrap() {
+            let text = example.to_string();
+            let Decoded::Message(envelope) = decode(&text) else {
+                panic!("{key}: {text} should decode");
+            };
+            // It reads back with the same meaning, whichever optional fields were left out.
+            let again = serde_json::to_value(&*envelope).unwrap();
+            assert_eq!(again["type"], example["type"]);
+            assert_eq!(
+                again["payload"]["operationId"],
+                example["payload"]["operationId"]
+            );
+        }
+    }
+    for example in wire["registrationRefusedByTheAgent"].as_array().unwrap() {
+        let text = example.to_string();
+        assert!(
+            matches!(decode(&text), Decoded::InvalidPayload { .. }),
+            "{text} must be refused"
+        );
+    }
 }

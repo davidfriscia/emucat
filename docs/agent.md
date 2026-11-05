@@ -1,8 +1,20 @@
 # Running the agent
 
 The agent runs on a computer that holds virtual machines. It connects out to your EmuCat server, and never
-listens on any port. This version reports the VMs it finds when asked. It does not launch emulators, transfer
-anything, or change VM directories.
+listens on any port. It reports the VMs it finds when asked, and registers one when an administrator asks. It does not
+launch emulators. It changes a VM directory in one case only: a transfer an administrator confirmed, after a verified master
+is committed.
+
+## Commands
+
+| Command                                   | What it does                                                       |
+| ----------------------------------------- | ------------------------------------------------------------------ |
+| `run`                                     | Connects, and stays connected until stopped. The default           |
+| `pair`, `unpair`                          | Pairs with a server, or removes the local credential               |
+| `discover`                                | Scans the configured directories, read-only, and prints the report |
+| `repository-check --repository UUID`      | Tests a configured repository directly                             |
+| `repository-passphrase --repository UUID` | Stores the passphrase of a repository's key, protected with DPAPI  |
+| `check-config`, `info`                    | Validates the configuration, or prints versions and default paths  |
 
 ## Configuration
 
@@ -91,7 +103,7 @@ On the agent's page, choose **Discover virtual machines**. To try it without a s
 ```
 
 **A discovered VM is an observation, not a catalog entry.** Nothing is stored, nothing is registered, and nothing
-reaches the public catalog. Registration arrives in Milestone 3. Results last until the next scan of that agent
+reaches the public catalog until you [register it](#registering-vms). Results last until the next scan of that agent
 or the next API restart.
 
 ### What counts as a VM
@@ -99,19 +111,19 @@ or the next API restart.
 Only **immediate child directories** of a base path are candidates, and the VM's name is exactly the directory's
 name.
 
-| Emulator | A candidate's root must contain, as a regular file          |
-| -------- | ----------------------------------------------------------- |
-| 86Box    | `86box.cfg`. An `nvr/` directory is not required            |
-| QEMU     | At least one of `run-win.cmd`, `run-mac.sh`, `run-linux.sh` |
+| Emulator | A candidate's root must contain, as a regular file                                               |
+| -------- | ------------------------------------------------------------------------------------------------ |
+| 86Box    | `86box.cfg`. An `nvr/` directory is not required                                                 |
+| QEMU     | At least one of `run.bat`, `run.cmd`, `run-win.bat`, `run-win.cmd`, `run-mac.sh`, `run-linux.sh` |
 
 Marker names are matched **exactly**, as the [domain rules](domain-model.md#virtual-machine-identity) say, even on
-Windows. `86BOX.CFG` is not a marker, and is reported as `marker_wrong_case` so that it is easy to spot. Other
-scripts, such as `run.bat`, are not markers either.
+Windows. `RUN.BAT` is not a marker, and is reported as `marker_wrong_case` so that it is easy to spot. Other scripts,
+such as `run.sh`, are not markers either. See [decision 0011](decisions/0011-qemu-launcher-markers.md).
 
 ### Host compatibility
 
-Each QEMU VM reports whether it has a launch script for the agent's own platform: `run-win.cmd` on Windows,
-`run-mac.sh` on macOS, and `run-linux.sh` on Linux. Scripts are only looked at, never executed. 86Box VMs have no
+Each QEMU VM reports all its launchers, and whether one suits the agent's own platform: `run.bat`, `run.cmd`, `run-win.bat` or
+`run-win.cmd` on Windows, `run-mac.sh` on macOS, and `run-linux.sh` on Linux. Scripts are only looked at, never executed. 86Box VMs have no
 such notion, so the value is `null`.
 
 ### Skipped directories
@@ -144,6 +156,35 @@ are not candidates and are not mentioned.
   directory is reported as `base_path_missing`, and is not created. An agent also refuses to _start_ with a
   missing base directory, as `check-config` does.
 
+## Registering VMs
+
+First [set up a repository](repositories.md). Then, on the agent's page, run discovery and choose **Copy to remote** or **Transfer to
+remote**. **Stop the VM first.** The agent builds the archive in `storage.staging_dir`, uploads it directly to the repository, reads it
+back and hashes it, and publishes it so that it can never be overwritten. The server then records one private master. Nothing
+passes through the server, and a registration carries on while the server is away.
+
+|              | Copy               | Transfer                                                     |
+| ------------ | ------------------ | ------------------------------------------------------------ |
+| The local VM | Stays, unchanged   | Removed, once the master is committed and every check passed |
+| Screenshots  | Stay, not archived | The transfer is **refused** while any exist                  |
+| Confirmation | One click          | An explicit checkbox                                         |
+
+**What a transfer checks before deleting anything:** that the server committed this exact version, that the archive still reads back
+correctly from the repository, that the directory is the same one that was archived, that every file still has the same hash, that no
+file exists that is not in the archive, that no screenshot would be lost, and that nothing is in use. If any of that fails, the VM stays, the
+master stays, and the operation is a **partial success** that says what to do. See
+[decision 0015](decisions/0015-registration-state-machine.md#transfer).
+
+**What is in an archive:** everything in the VM's directory, with no wrapper directory, including firmware, scripts, nested files and
+empty directories, plus `.emucat-manifest.json` as the last entry. Not in it: `screenshots/` for 86Box and root-level `.ppm` files for
+QEMU. A symlink, junction or other reparse point inside a VM fails the archive, rather than being skipped. See
+[decision 0014](decisions/0014-archive-and-manifest.md), which also explains the limits of archiving something that might be running.
+
+**If something is interrupted,** nothing is lost. Staging uses a separate key, so a partial upload can never be taken for an archive.
+Restart whichever side stopped. An unfinished registration fails with `agent_restarted`, and you can start again. A published one
+continues, and is committed once the server is back. Nothing is deleted by a restart alone. Local journals are in `registrations` in the
+state directory, and hold no secrets and no VM contents.
+
 ## Troubleshooting
 
 | Symptom                                            | Likely cause and fix                                                                                 |
@@ -165,3 +206,22 @@ are not candidates and are not mentioned.
 | `result_too_large` or `malformed_result`           | Should not happen with a matching agent. Check that the versions match, and report it                |
 
 `--log-level debug` shows more. Secrets stay out of the logs at every level.
+
+### Registration
+
+| What you see                      | What it means                                                                              | What to do                                                                    |
+| --------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `source_in_use`, `cleanup_in_use` | Another program has a file open for writing, probably the emulator                         | Stop the VM, and try again                                                    |
+| `source_changed`                  | A file changed while it was being read                                                     | Stop whatever is writing, and try again                                       |
+| `source_unsafe`                   | The VM holds a symlink, junction or OneDrive placeholder                                   | Replace it with real files, or make the files available offline               |
+| `source_invalid`                  | No marker, or a name an archive cannot hold, such as `.emucat-manifest.json`               | Fix what the message says, and run discovery again                            |
+| `transfer_blocked_media`          | The VM has screenshots, which are not archived                                             | Move them elsewhere, or use Copy                                              |
+| `insufficient_staging_space`      | The staging disk may be too small. This assumes no compression at all                      | Free up space, or set `storage.staging_dir`                                   |
+| `discovery_stale`                 | The report is too old, or the agent reconnected since                                      | Run discovery again                                                           |
+| `agent_cannot_register`           | The agent is older than the server                                                         | Update the agent                                                              |
+| Stuck in **Recording the master** | The server could not commit. The archive is safe, and the agent keeps repeating its report | Check the database. **Retry recording it** also works with the agent away     |
+| **Registered, with a problem**    | The master is safe, but the local files were kept                                          | Follow the guidance shown. If you do not need the files, delete them yourself |
+| A `.emucat-removing-…` directory  | A removal stopped partway. Discovery reports it as skipped                                 | Its archive is verified in the repository, so it can be deleted by hand       |
+
+Problems reaching the repository are in the [repository guide](repositories.md#troubleshooting). The agent's log says more, and
+`--log-level debug` adds detail. It never contains a private key, a passphrase or a credential.

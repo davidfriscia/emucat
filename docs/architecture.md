@@ -12,8 +12,15 @@ computers through a local agent.
                      │
                  Agent (Rust) ──▶ Local VM directories, emulators
                      │
-                     └──────────────▶ Remote archive repository (future)
+                     └──────────────▶ SSH/SFTP archive repository, directly
 ```
+
+The API is the control plane and never carries an archive: there is no route for one. Archive bytes go straight between
+agent and repository, and the API records what the agent verified. Screenshots will take the other path, from the agent over
+HTTPS to the API and server media storage, and never through the archive repository. See
+[decision 0012](decisions/0012-direct-agent-repository.md). The browser, the API, the agent, MariaDB and the repository are
+separate trust boundaries: the browser and the API never receive an SSH credential, and the agent's pairing credential is
+never used for SSH.
 
 ## Components
 
@@ -24,31 +31,34 @@ that does the same, so the API has no CORS configuration.
 **API (`apps/api`).** A Fastify server with a versioned REST API under `/api/v1` and the agent
 WebSocket endpoint.
 
-| File                           | Responsibility                                                  |
-| ------------------------------ | --------------------------------------------------------------- |
-| `src/server.ts`                | Entry point: configuration, listening, graceful shutdown        |
-| `src/app.ts`                   | Builds the app from injected dependencies, for tests            |
-| `src/config.ts`                | Validated, environment-based configuration                      |
-| `src/errors.ts`                | One error response shape for every failure                      |
-| `src/validation.ts`            | Zod schemas as Fastify route validators                         |
-| `src/readiness.ts`             | Database and migration checks                                   |
-| `src/routes/system.ts`         | `health`, `ready`, `info`                                       |
-| `src/routes/browser.ts`        | Wires up the routes the web app uses                            |
-| `src/routes/auth.ts`           | Setup, sign-in, sign-out, account and sessions                  |
-| `src/routes/public-catalog.ts` | Public listing, detail and published images                     |
-| `src/routes/admin-catalog.ts`  | Administration of existing VMs and media                        |
-| `src/auth/`                    | Passwords, sessions, setup, guards, agent tokens, rate limiting |
-| `src/catalog/repository.ts`    | All catalog SQL                                                 |
-| `src/storage/`                 | Reads and removes media files, safely                           |
-| `src/routes/agent-ws.ts`       | Authenticates agents, and hands sockets to the hub              |
-| `src/routes/agent-pairing.ts`  | What an agent uses before it has a credential                   |
-| `src/routes/admin-agents.ts`   | Agents, pairing decisions, revocation, starting discovery       |
-| `src/agents/hub.ts`            | Every connected agent, protocol handling, presence              |
-| `src/agents/discovery.ts`      | Tracks scans in memory, and decides which answers count         |
-| `src/agents/pairing.ts`        | The pairing state machine and all its SQL                       |
-| `src/agents/repository.ts`     | SQL for agents, and presence in the database                    |
-| `src/db/`                      | Connection pool and migration runner                            |
-| `migrations/`                  | Forward-only SQL migrations                                     |
+| File                                | Responsibility                                                  |
+| ----------------------------------- | --------------------------------------------------------------- |
+| `src/server.ts`                     | Entry point: configuration, listening, graceful shutdown        |
+| `src/app.ts`                        | Builds the app from injected dependencies, for tests            |
+| `src/config.ts`                     | Validated, environment-based configuration                      |
+| `src/errors.ts`                     | One error response shape for every failure                      |
+| `src/validation.ts`                 | Zod schemas as Fastify route validators                         |
+| `src/readiness.ts`                  | Database and migration checks                                   |
+| `src/routes/system.ts`              | `health`, `ready`, `info`                                       |
+| `src/routes/browser.ts`             | Wires up the routes the web app uses                            |
+| `src/routes/auth.ts`                | Setup, sign-in, sign-out, account and sessions                  |
+| `src/routes/public-catalog.ts`      | Public listing, detail and published images                     |
+| `src/routes/admin-catalog.ts`       | Administration of existing VMs and media                        |
+| `src/auth/`                         | Passwords, sessions, setup, guards, agent tokens, rate limiting |
+| `src/catalog/repository.ts`         | All catalog SQL                                                 |
+| `src/storage/`                      | Reads and removes media files, safely                           |
+| `src/routes/agent-ws.ts`            | Authenticates agents, and hands sockets to the hub              |
+| `src/routes/agent-pairing.ts`       | What an agent uses before it has a credential                   |
+| `src/routes/admin-agents.ts`        | Agents, pairing decisions, revocation, starting discovery       |
+| `src/agents/hub.ts`                 | Every connected agent, protocol handling, presence              |
+| `src/agents/discovery.ts`           | Tracks scans in memory, and decides which answers count         |
+| `src/agents/pairing.ts`             | The pairing state machine and all its SQL                       |
+| `src/agents/repository.ts`          | SQL for agents, and presence in the database                    |
+| `src/routes/admin-registrations.ts` | Registrations and repositories, for administrators              |
+| `src/registration/coordinator.ts`   | The registration state machine and all its SQL                  |
+| `src/registration/repositories.ts`  | SQL for repositories and which agents may use them              |
+| `src/db/`                           | Connection pool and migration runner                            |
+| `migrations/`                       | Forward-only SQL migrations                                     |
 
 The web application's routes are optional dependencies of `buildApp`, so tests of the system routes and the agent
 endpoint need no database. See the [API reference](api.md) and [authentication](authentication.md).
@@ -75,9 +85,14 @@ builds and tests on Linux so that portability stays honest.
 | `discovery`    | Read-only scanning of the base paths            |                          |
 | `emulators`    | Types, names, identity, root markers            | Launching                |
 | `filesystem`   | Safe paths                                      | Directory operations     |
-| `archives`     | Version rules, exclusions, repository interface | Creation, transfer       |
+| `archives`     | Version rules, exclusions                       |                          |
+| `repository`   | Provider-independent store interface, safe keys | HTTPS provider           |
+| `sftp`         | The SSH/SFTP provider, with host-key checks     |                          |
+| `packaging`    | Standalone ZIP, manifest, source consistency    | Extraction               |
+| `registration` | Durable operations, journals, recovery          | Snapshots                |
+| `removal`      | Conservative local removal after a transfer     |                          |
 | `media`        | Watched paths, visibility                       | Watcher, upload          |
-| `state`        | State and operation types                       | Persistence              |
+| `state`        | State types, local source version               | Fuller persistence       |
 
 ## Principles
 
@@ -97,7 +112,11 @@ builds and tests on Linux so that portability stays honest.
 - **Fail closed.** Without a live credential that a person approved, the agent endpoint opens no socket. See
   [decision 0009](decisions/0009-agent-pairing-and-credentials.md).
 - **One API process.** Agent presence and discovery results are in memory, as rate limits are. See
-  [decision 0010](decisions/0010-agent-connections-and-discovery.md).
+  [decision 0010](decisions/0010-agent-connections-and-discovery.md). Registration is not: it lives in the database.
+- **Durable, idempotent operations.** Agents repeat their reports until they are answered, which covers a restart of either
+  side. See [decision 0015](decisions/0015-registration-state-machine.md).
+- **Source preservation comes first.** Only a positive, matching confirmation of a verified master can lead to a deletion,
+  and only for a confirmed transfer.
 - **No default credentials.** The first administrator comes from an explicit, one-time setup. See
   [decision 0007](decisions/0007-local-authentication.md).
 
@@ -110,7 +129,8 @@ Everything comes from the environment, and nothing developer-specific is built i
 | Database, API address, logging           | `.env` ([`.env.example`](../.env.example))                                |
 | Media storage path                       | `STORAGE_PATH` in `.env`                                                  |
 | Sessions, cookies, setup token, proxies  | `.env`. See [authentication](authentication.md)                           |
-| Archive repository (placeholder)         | `ARCHIVE_REPOSITORY_*` in `.env`                                          |
+| Repository metadata                      | MariaDB, through the Repositories page                                    |
+| Repository access, private key location  | Each agent's configuration. See the [repository guide](repositories.md)   |
 | API URL, emulator paths, state directory | Agent configuration ([`agent.example.toml`](../agent/agent.example.toml)) |
 
 Precedence for the agent is command line, then environment, then file. Unknown settings in the file
@@ -143,5 +163,6 @@ pnpm test
 pnpm build
 .\agent\target\release\emucat-agent.exe --version
 .\agent\target\release\emucat-agent.exe --help
-pnpm test:e2e                  # the real agent against the real API, on Windows
+pnpm test:sftp                 # the SFTP provider against a real OpenSSH server, needs Docker
+pnpm test:e2e                  # the real agent, API and SFTP server, on Windows
 ```

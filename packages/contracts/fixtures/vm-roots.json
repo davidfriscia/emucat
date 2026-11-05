@@ -1,13 +1,169 @@
 {
   "cases": [
-    { "emulator": "86box", "entries": [{ "name": "86box.cfg", "isFile": true }], "valid": true },
-    { "emulator": "86box", "entries": [{ "name": "86box.cfg", "isFile": false }], "valid": false },
-    { "emulator": "86box", "entries": [{ "name": "run-win.cmd", "isFile": true }], "valid": false },
-    { "emulator": "86box", "entries": [], "valid": false },
-    { "emulator": "qemu", "entries": [{ "name": "run-win.cmd", "isFile": true }], "valid": true },
-    { "emulator": "qemu", "entries": [{ "name": "run-mac.sh", "isFile": true }], "valid": true },
-    { "emulator": "qemu", "entries": [{ "name": "run-linux.sh", "isFile": true }], "valid": true },
-    { "emulator": "qemu", "entries": [{ "name": "86box.cfg", "isFile": true }], "valid": false },
-    { "emulator": "qemu", "entries": [{ "name": "run-win.cmd", "isFile": false }], "valid": false }
+    {
+      "emulator": "86box",
+      "entries": [
+        {
+          "name": "86box.cfg",
+          "isFile": true
+        }
+      ],
+      "valid": true
+    },
+    {
+      "emulator": "86box",
+      "entries": [
+        {
+          "name": "86box.cfg",
+          "isFile": false
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "86box",
+      "entries": [
+        {
+          "name": "run-win.cmd",
+          "isFile": true
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "86box",
+      "entries": [],
+      "valid": false
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run-win.cmd",
+          "isFile": true
+        }
+      ],
+      "valid": true
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run-mac.sh",
+          "isFile": true
+        }
+      ],
+      "valid": true
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run-linux.sh",
+          "isFile": true
+        }
+      ],
+      "valid": true
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "86box.cfg",
+          "isFile": true
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run-win.cmd",
+          "isFile": false
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run.bat",
+          "isFile": true
+        }
+      ],
+      "valid": true
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run.cmd",
+          "isFile": true
+        }
+      ],
+      "valid": true
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run-win.bat",
+          "isFile": true
+        }
+      ],
+      "valid": true
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run.bat",
+          "isFile": false
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "RUN.BAT",
+          "isFile": true
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "Run.Cmd",
+          "isFile": true
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "qemu",
+      "entries": [
+        {
+          "name": "run.sh",
+          "isFile": true
+        }
+      ],
+      "valid": false
+    },
+    {
+      "emulator": "86box",
+      "entries": [
+        {
+          "name": "run.bat",
+          "isFile": true
+        }
+      ],
+      "valid": false
+    }
   ]
 }

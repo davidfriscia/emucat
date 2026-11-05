@@ -10,6 +10,7 @@
 #   EMUCAT_AGENT_QEMU_BASE_PATH        [emulators.qemu] base_path
 #   EMUCAT_AGENT_QEMU_EXECUTABLE       [emulators.qemu] executable
 #   EMUCAT_AGENT_STATE_DIR             [state] dir
+#   EMUCAT_AGENT_STAGING_DIR           [storage] staging_dir
 #   EMUCAT_AGENT_LOG_LEVEL             [logging] level
 #   EMUCAT_AGENT_LOG_FORMAT            [logging] format
 #
@@ -40,6 +41,32 @@ executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
 # Where the agent keeps its own data, including its encrypted credential. Defaults to a per-user location; see `emucat-agent info`.
 # Must not be inside an emulator base path.
 # dir = 'C:\path\to\emucat-agent-state'
+
+[storage]
+# Where archives are built while a VM is being registered. It needs room for the whole VM, and must be
+# outside every VM directory. Defaults to `staging` in the state directory.
+# staging_dir = 'D:\EmuCat\staging'
+
+# How to reach an SSH repository. The section name is the repository's UUID, from the Repositories page.
+# Only a repository named here can be used, whatever the server asks for. See docs/repositories.md.
+#
+# This file names where the private key is, and never holds it. A passphrase, if the key has one, is
+# stored separately with `emucat-agent repository-passphrase`, protected with DPAPI.
+#
+# [repositories."018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f61"]
+# kind = "sftp"
+# host = "nas.example.lan"
+# port = 22
+# username = "emucat"
+# remote_root = "/emucat"
+# private_key_path = 'C:\Users\me\.ssh\emucat_ed25519'
+# # Either or both. Host keys are always verified, and an unknown or changed key fails.
+# host_key_fingerprints = ["SHA256:replace-with-the-output-of-ssh-keygen-lf"]
+# # known_hosts_path = 'C:\Users\me\.ssh\known_hosts'
+# connect_timeout_seconds = 20
+# transfer_timeout_seconds = 60
+# connect_retries = 2
+# upload_attempts = 2
 
 [logging]
 # An EnvFilter expression: error, warn, info, debug, trace, or per-module directives.

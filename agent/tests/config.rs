@@ -340,3 +340,146 @@ fn derives_the_websocket_address() {
         assert_eq!(agent_ws_url(&url).as_str(), expected);
     }
 }
+
+const REPOSITORY_ID: &str = "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f61";
+
+fn with_repository(body: &str) -> String {
+    format!(
+        r#"
+[server]
+api_url = "http://127.0.0.1:4000"
+[repositories."{REPOSITORY_ID}"]
+{body}
+"#
+    )
+}
+
+const VALID_REPOSITORY: &str = r#"
+kind = "sftp"
+host = "nas.example"
+username = "emucat"
+remote_root = "/srv/emucat"
+private_key_path = 'C:\keys\emucat'
+host_key_fingerprints = ["SHA256:abc"]
+"#;
+
+fn parse_repository(body: &str) -> Result<Config, ConfigError> {
+    Config::from_toml(
+        &with_repository(body),
+        &|_| None,
+        &SettingOverrides::default(),
+    )
+}
+
+#[test]
+fn a_repository_is_keyed_by_uuid_with_conservative_defaults() {
+    let config = parse_repository(VALID_REPOSITORY).unwrap();
+    let repository = config
+        .repositories
+        .get(&REPOSITORY_ID.parse().unwrap())
+        .unwrap();
+    assert_eq!(repository.port, 22);
+    assert_eq!(repository.host, "nas.example");
+    assert_eq!(repository.connect_retries, 2);
+    assert_eq!(repository.upload_attempts, 2);
+}
+
+#[test]
+fn host_key_verification_cannot_be_left_out() {
+    let body = VALID_REPOSITORY.replace(r#"host_key_fingerprints = ["SHA256:abc"]"#, "");
+    let error = parse_repository(&body).unwrap_err();
+    assert!(
+        error.to_string().contains("host_key_fingerprints"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_fingerprint_must_have_the_expected_form() {
+    let body = VALID_REPOSITORY.replace("SHA256:abc", "MD5:ab:cd");
+    assert!(parse_repository(&body).is_err());
+}
+
+#[test]
+fn a_repository_of_another_kind_or_without_a_uuid_is_refused() {
+    let body = VALID_REPOSITORY.replace(r#"kind = "sftp""#, r#"kind = "https""#);
+    assert!(parse_repository(&body).is_err());
+    let text = with_repository(VALID_REPOSITORY).replace(REPOSITORY_ID, "my-nas");
+    assert!(Config::from_toml(&text, &|_| None, &SettingOverrides::default()).is_err());
+}
+
+#[test]
+fn a_remote_root_that_could_escape_is_refused() {
+    for bad in ["/srv/../etc", "..", r"C:\\repo", ""] {
+        let body = VALID_REPOSITORY.replace("/srv/emucat", bad);
+        assert!(parse_repository(&body).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_secret_has_no_place_in_the_file() {
+    for field in ["private_key", "password", "passphrase"] {
+        let body = format!("{VALID_REPOSITORY}\n{field} = \"secret\"\n");
+        assert!(parse_repository(&body).is_err(), "{field} must be refused");
+    }
+}
+
+#[test]
+fn validation_refuses_a_staging_directory_or_a_key_inside_a_base_path() {
+    let base = TempDir::new().unwrap();
+    let executable = base.path().join("emulator.exe");
+    std::fs::write(&executable, "").unwrap();
+    let key = base.path().join("emucat-key");
+    std::fs::write(&key, "").unwrap();
+    let text = format!(
+        r#"
+[server]
+api_url = "http://127.0.0.1:4000"
+[emulators.qemu]
+base_path = {base:?}
+executable = {executable:?}
+[state]
+dir = {state:?}
+[storage]
+staging_dir = {staging:?}
+[repositories."{REPOSITORY_ID}"]
+kind = "sftp"
+host = "nas"
+username = "emucat"
+remote_root = "/repo"
+private_key_path = {key:?}
+host_key_fingerprints = ["SHA256:abc"]
+"#,
+        base = base.path(),
+        state = std::env::temp_dir().join("emucat-config-test-state"),
+        staging = base.path().join("staging"),
+    );
+    let config = Config::from_toml(&text, &|_| None, &SettingOverrides::default()).unwrap();
+    let messages: Vec<String> = validate(&config)
+        .iter()
+        .filter(|issue| issue.severity == Severity::Error)
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("staging directory")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("private key")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn the_staging_directory_defaults_to_the_state_directory() {
+    let config = parse_repository(VALID_REPOSITORY).unwrap();
+    assert!(
+        config
+            .effective_staging_dir()
+            .is_none_or(|dir| dir.ends_with("staging"))
+    );
+}

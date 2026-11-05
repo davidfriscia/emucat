@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import { AgentHub, NO_PRESENCE } from './agents/hub.js';
 import type { AgentAuthenticator } from './auth/agent-auth.js';
 import { registerErrorHandling } from './errors.js';
+import { RegistrationCoordinator } from './registration/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
 import { registerBrowserRoutes, type BrowserDependencies } from './routes/browser.js';
@@ -50,7 +51,22 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       dependencies.extraRoutes?.(api);
       if (dependencies.browser) {
         const { browser } = dependencies;
-        await api.register(async (scope) => registerBrowserRoutes(scope, browser, hub));
+        const registrations = new RegistrationCoordinator(
+          browser.pool,
+          {
+            isOnline: (agentId) => hub.isOnline(agentId),
+            isRegistrationCapable: (agentId) => hub.isRegistrationCapable(agentId),
+            activeConnectionId: (agentId) => hub.activeConnectionId(agentId),
+            latestDiscovery: (agentId) => hub.discovery.get(agentId),
+            send: (agentId, message) => hub.sendToAgent(agentId, message),
+          },
+          app.log,
+          browser.registrationPolicy,
+        );
+        hub.setOperations(registrations);
+        await api.register(async (scope) =>
+          registerBrowserRoutes(scope, browser, hub, registrations),
+        );
       }
     },
     { prefix: API_PREFIX },

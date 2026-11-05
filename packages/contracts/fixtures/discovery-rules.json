@@ -1,11 +1,41 @@
 {
   "hostCompatibility": [
-    { "emulator": "qemu", "markers": ["run-win.cmd"], "host": "windows", "compatible": true },
-    { "emulator": "qemu", "markers": ["run-win.cmd"], "host": "linux", "compatible": false },
-    { "emulator": "qemu", "markers": ["run-win.cmd"], "host": "macos", "compatible": false },
-    { "emulator": "qemu", "markers": ["run-mac.sh"], "host": "macos", "compatible": true },
-    { "emulator": "qemu", "markers": ["run-mac.sh"], "host": "windows", "compatible": false },
-    { "emulator": "qemu", "markers": ["run-linux.sh"], "host": "linux", "compatible": true },
+    {
+      "emulator": "qemu",
+      "markers": ["run-win.cmd"],
+      "host": "windows",
+      "compatible": true
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run-win.cmd"],
+      "host": "linux",
+      "compatible": false
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run-win.cmd"],
+      "host": "macos",
+      "compatible": false
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run-mac.sh"],
+      "host": "macos",
+      "compatible": true
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run-mac.sh"],
+      "host": "windows",
+      "compatible": false
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run-linux.sh"],
+      "host": "linux",
+      "compatible": true
+    },
     {
       "emulator": "qemu",
       "markers": ["run-linux.sh", "run-mac.sh", "run-win.cmd"],
@@ -18,14 +48,78 @@
       "host": "windows",
       "compatible": false
     },
-    { "emulator": "86box", "markers": ["86box.cfg"], "host": "windows", "compatible": null },
-    { "emulator": "86box", "markers": ["86box.cfg"], "host": "linux", "compatible": null }
+    {
+      "emulator": "86box",
+      "markers": ["86box.cfg"],
+      "host": "windows",
+      "compatible": null
+    },
+    {
+      "emulator": "86box",
+      "markers": ["86box.cfg"],
+      "host": "linux",
+      "compatible": null
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run.bat"],
+      "host": "windows",
+      "compatible": true
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run.bat"],
+      "host": "linux",
+      "compatible": false
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run.bat"],
+      "host": "macos",
+      "compatible": false
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run.cmd"],
+      "host": "windows",
+      "compatible": true
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run-win.bat"],
+      "host": "windows",
+      "compatible": true
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run-win.bat"],
+      "host": "linux",
+      "compatible": false
+    },
+    {
+      "emulator": "qemu",
+      "markers": ["run.bat", "run-linux.sh"],
+      "host": "linux",
+      "compatible": true
+    }
   ],
   "skippedNames": [
-    { "raw": "ok name", "display": "ok name" },
-    { "raw": "café", "display": "caf?" },
-    { "raw": "a\tb", "display": "a?b" },
-    { "raw": "quote\"back\\slash", "display": "quote?back?slash" },
+    {
+      "raw": "ok name",
+      "display": "ok name"
+    },
+    {
+      "raw": "café",
+      "display": "caf?"
+    },
+    {
+      "raw": "a\tb",
+      "display": "a?b"
+    },
+    {
+      "raw": "quote\"back\\slash",
+      "display": "quote?back?slash"
+    },
     {
       "raw": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
       "display": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

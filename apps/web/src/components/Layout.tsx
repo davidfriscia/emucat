@@ -67,6 +67,11 @@ export function Layout() {
                       Agents
                     </NavLink>
                   </li>
+                  <li className="nav-item">
+                    <NavLink to="/admin/repositories" className={navLinkClass} onClick={closeMenu}>
+                      Repositories
+                    </NavLink>
+                  </li>
                 </>
               ) : null}
               {session ? (

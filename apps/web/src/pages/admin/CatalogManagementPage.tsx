@@ -50,7 +50,7 @@ export function CatalogManagementPage() {
           </EmptyState>
         ) : (
           <EmptyState title="No registered virtual machines">
-            Registration will become available through a connected local agent in a later milestone.
+            To add one, run discovery on an agent from the Agents page, and choose Copy or Transfer.
           </EmptyState>
         )
       ) : null}

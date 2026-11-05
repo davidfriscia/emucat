@@ -8,7 +8,7 @@ export * from './emulator.js';
 export * from './media.js';
 export * from './operations.js';
 export * from './protocol.js';
-export * from './repository.js';
+export * from './registration.js';
 export * from './snapshot-name.js';
 export * from './version.js';
 export * from './vm-name.js';

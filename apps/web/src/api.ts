@@ -18,6 +18,10 @@ import {
   publicVmApiPath,
   publicVmDetailSchema,
   readyResponseSchema,
+  registrationListResponseSchema,
+  registrationOperationSchema,
+  repositoryListResponseSchema,
+  repositorySummarySchema,
   revokedSessionsResponseSchema,
   sessionListResponseSchema,
   sessionStateResponseSchema,
@@ -29,6 +33,7 @@ import {
   type AgentListResponse,
   type AgentSummary,
   type AuthenticatedSession,
+  type CreateRegistrationRequest,
   type DiscoveryOperation,
   type DiscoveryStateResponse,
   type EmulatorType,
@@ -38,6 +43,11 @@ import {
   type PairingRequestReview,
   type PublicCatalogResponse,
   type PublicVmDetail,
+  type RegistrationListResponse,
+  type RegistrationOperation,
+  type RepositoryListResponse,
+  type RepositorySummary,
+  type SaveRepositoryRequest,
   type RevokedSessionsResponse,
   type SessionListResponse,
   type SessionStateResponse,
@@ -414,6 +424,95 @@ export function startDiscovery(agentId: string): Promise<DiscoveryOperation> {
   return requestJson(
     `/admin/agents/${encodeURIComponent(agentId)}/discovery`,
     discoveryOperationSchema,
+    { method: 'POST' },
+  );
+}
+
+// Registration and repositories. Nothing here ever carries archive bytes, a path or a key.
+
+export function fetchRegistrations(
+  agentId: string | undefined,
+  signal?: AbortSignal,
+): Promise<RegistrationListResponse> {
+  return requestJson(
+    `/admin/registrations${queryString({ agentId })}`,
+    registrationListResponseSchema,
+    { signal },
+  );
+}
+
+export function startRegistration(
+  request: CreateRegistrationRequest,
+): Promise<RegistrationOperation> {
+  return requestJson('/admin/registrations', registrationOperationSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function cancelRegistration(operationId: string): Promise<RegistrationOperation> {
+  return requestJson(
+    `/admin/registrations/${encodeURIComponent(operationId)}/cancel`,
+    registrationOperationSchema,
+    { method: 'POST' },
+  );
+}
+
+export function reconcileRegistration(operationId: string): Promise<RegistrationOperation> {
+  return requestJson(
+    `/admin/registrations/${encodeURIComponent(operationId)}/reconcile`,
+    registrationOperationSchema,
+    { method: 'POST' },
+  );
+}
+
+export function fetchRepositories(signal?: AbortSignal): Promise<RepositoryListResponse> {
+  return requestJson('/admin/repositories', repositoryListResponseSchema, { signal });
+}
+
+export function createRepository(request: SaveRepositoryRequest): Promise<RepositorySummary> {
+  return requestJson('/admin/repositories', repositorySummarySchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function updateRepository(
+  repositoryId: string,
+  request: SaveRepositoryRequest,
+): Promise<RepositorySummary> {
+  return requestJson(
+    `/admin/repositories/${encodeURIComponent(repositoryId)}`,
+    repositorySummarySchema,
+    { method: 'PUT', body: request },
+  );
+}
+
+const repositoryAgentPath = (repositoryId: string, agentId: string) =>
+  `/admin/repositories/${encodeURIComponent(repositoryId)}/agents/${encodeURIComponent(agentId)}`;
+
+export function associateRepositoryAgent(
+  repositoryId: string,
+  agentId: string,
+): Promise<RepositorySummary> {
+  return requestJson(repositoryAgentPath(repositoryId, agentId), repositorySummarySchema, {
+    method: 'PUT',
+  });
+}
+
+export function dissociateRepositoryAgent(
+  repositoryId: string,
+  agentId: string,
+): Promise<RepositorySummary> {
+  return requestJson(repositoryAgentPath(repositoryId, agentId), repositorySummarySchema, {
+    method: 'DELETE',
+  });
+}
+
+export function checkRepository(repositoryId: string, agentId: string): Promise<RepositorySummary> {
+  return requestJson(
+    `${repositoryAgentPath(repositoryId, agentId)}/health-check`,
+    repositorySummarySchema,
     { method: 'POST' },
   );
 }

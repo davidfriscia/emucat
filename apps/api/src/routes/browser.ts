@@ -8,9 +8,11 @@ import type { PasswordHasher } from '../auth/passwords.js';
 import type { RateLimiter } from '../auth/rate-limiter.js';
 import type { SessionPolicy } from '../auth/sessions.js';
 import type { SetupToken } from '../auth/setup.js';
+import type { RegistrationCoordinator, RegistrationPolicy } from '../registration/coordinator.js';
 import type { MediaStorage } from '../storage/media-storage.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
+import { registerAdminRegistrationRoutes } from './admin-registrations.js';
 import { registerAgentPairingRoutes, type PairingRateLimits } from './agent-pairing.js';
 import { registerAuthRoutes, type AuthRateLimits } from './auth.js';
 import { registerPublicCatalogRoutes } from './public-catalog.js';
@@ -28,12 +30,15 @@ export interface BrowserDependencies {
   publicOrigin?: string | undefined;
   pairing: PairingPolicy;
   pairingRateLimits: PairingRateLimits;
+  /** Limits on acting on discovery results. Tests shorten them. */
+  registrationPolicy?: RegistrationPolicy;
 }
 
 export async function registerBrowserRoutes(
   api: FastifyInstance,
   dependencies: BrowserDependencies,
   hub: AgentHub,
+  registrations: RegistrationCoordinator,
 ): Promise<void> {
   await api.register(cookie);
   api.decorateRequest('authSession', null);
@@ -46,4 +51,5 @@ export async function registerBrowserRoutes(
   registerAdminCatalogRoutes(api, dependencies);
   registerAgentPairingRoutes(api, dependencies);
   registerAdminAgentRoutes(api, dependencies, hub);
+  registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
 }

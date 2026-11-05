@@ -18,14 +18,18 @@ A VM is identified by `(emulator_type, vm_name)`.
 A VM enters the catalog only through agent discovery followed by user registration. A directory is a
 candidate when its root contains, as a regular file:
 
-| Emulator | Marker                                                      |
-| -------- | ----------------------------------------------------------- |
-| `86box`  | `86box.cfg`                                                 |
-| `qemu`   | At least one of `run-win.cmd`, `run-mac.sh`, `run-linux.sh` |
+| Emulator | Marker                                                                                           |
+| -------- | ------------------------------------------------------------------------------------------------ |
+| `86box`  | `86box.cfg`                                                                                      |
+| `qemu`   | At least one of `run.bat`, `run.cmd`, `run-win.bat`, `run-win.cmd`, `run-mac.sh`, `run-linux.sh` |
+
+Marker names are matched exactly, on every system. Scripts are never executed. See
+[decision 0011](decisions/0011-qemu-launcher-markers.md).
 
 Discovery reports candidates without registering them. A discovered VM is an observation, held in memory, and is
-not a catalog entry. A QEMU VM is _compatible_ with a host if it has that host's script: `run-win.cmd` on Windows,
-`run-mac.sh` on macOS, `run-linux.sh` on Linux. See [the agent guide](agent.md#discovery).
+not a catalog entry. A QEMU VM is _compatible_ with a host if it has one of that host's scripts: `run.bat`, `run.cmd`,
+`run-win.bat` or `run-win.cmd` on Windows, `run-mac.sh` on macOS, `run-linux.sh` on Linux. See
+[the agent guide](agent.md#discovery).
 
 ### VM names
 
@@ -95,7 +99,10 @@ For each VM it holds, an agent tracks:
 `contentStatus` starts as `unverified`. A cached VM may change while its agent is offline, so
 `isLocalContentTrusted` only accepts a verification made since the agent's latest connection.
 
-Declared for future use, with no behavior yet:
+Registration sets the first of these: a copy makes the master the VM's local source version, as `idle` and `verified`. A
+completed transfer leaves `absent`, with no source version. A transfer whose local cleanup failed leaves `error` and
+`unverified`. `lastVerifiedSha256` is the manifest's hash, since that is what describes a local copy. The rest are
+declared for future use, with no behavior yet:
 
 - **Execution states:** `unknown`, `absent`, `idle`, `downloading`, `extracting`, `verifying`,
   `starting`, `running`, `stopping`, `archiving`, `uploading`, `error`.
@@ -139,26 +146,46 @@ it in SQL.
 
 ## Repositories
 
-A repository stores version archives. `ArchiveRepository` (in TypeScript and Rust) is the abstract
-interface: `stat`, `put`/`upload`, `get`/`download` and `delete`. There are no implementations yet.
-Archives are immutable, so writing to an existing key must fail. The `repositories` table holds
-connection details but no secrets: `secret_ref` only names where a secret lives.
+A repository stores version archives. Agents reach it directly. `ArchiveRepository`, in the agent, is the
+provider-independent interface: `health_check`, `stat`, `upload`, `download`, `verify`, `publish` and `delete`, with
+`SftpArchiveRepository` as its one implementation. Archives are immutable: an upload can only write to a staging key, and
+publishing can never replace an object. See [decision 0012](decisions/0012-direct-agent-repository.md).
+
+The `repositories` table holds connection details and no secrets. `agent_repositories` says which agents may use which
+repository, and holds each one's last health check. Private keys stay on the agents. There is one active SSH repository for
+now, which a unique index enforces. See [the repository guide](repositories.md).
+
+## Registration
+
+Registration turns a discovered VM into a catalog entry with a master version. An administrator asks for it explicitly: nothing
+registers automatically, and the new entry is private. **Copy** keeps the local VM. **Transfer** removes it, once a verified
+master is committed and every local check has passed again.
+
+A `registration_operations` row is the durable record of one attempt, kept after it ends. It is bound to the administrator, the
+agent, the VM's identity, the repository, the mode, and a version UUID and archive key issued when it is created. Its states
+are in [decision 0015](decisions/0015-registration-state-machine.md). A failed attempt owns nothing: trying again is a new
+operation, with a new version UUID.
+
+An archive is a complete standalone ZIP of the VM's directory, ending with a deterministic manifest. Media are excluded. See
+[decision 0014](decisions/0014-archive-and-manifest.md).
 
 ## Database tables
 
-| Table                    | Holds                                    | Key                                  |
-| ------------------------ | ---------------------------------------- | ------------------------------------ |
-| `users`                  | Accounts. None are seeded.               | `id`                                 |
-| `user_sessions`          | Browser sessions, as token digests       | `id`                                 |
-| `agents`                 | Paired agents, as credential digests     | `id`                                 |
-| `repositories`           | Archive storage locations                | `id`                                 |
-| `virtual_machines`       | Registered VMs                           | `(emulator_type, vm_name)`           |
-| `vm_versions`            | Masters and snapshots                    | `id`                                 |
-| `agent_vm_state`         | Each agent's view of its local copy      | `(agent_id, emulator_type, vm_name)` |
-| `vm_sessions`            | Runs of a VM on an agent                 | `id`                                 |
-| `vm_media`               | Media metadata                           | `id`                                 |
-| `agent_pairing_requests` | Pairing requests, as digests             | `id`                                 |
-| `system_bootstrap`       | That first-run setup has happened        | `id`, always 1                       |
-| `schema_migrations`      | Migration history, managed by the runner | `version`                            |
+| Table                     | Holds                                    | Key                                  |
+| ------------------------- | ---------------------------------------- | ------------------------------------ |
+| `users`                   | Accounts. None are seeded.               | `id`                                 |
+| `user_sessions`           | Browser sessions, as token digests       | `id`                                 |
+| `agents`                  | Paired agents, as credential digests     | `id`                                 |
+| `repositories`            | Archive storage locations                | `id`                                 |
+| `virtual_machines`        | Registered VMs                           | `(emulator_type, vm_name)`           |
+| `vm_versions`             | Masters and snapshots                    | `id`                                 |
+| `agent_vm_state`          | Each agent's view of its local copy      | `(agent_id, emulator_type, vm_name)` |
+| `vm_sessions`             | Runs of a VM on an agent                 | `id`                                 |
+| `vm_media`                | Media metadata                           | `id`                                 |
+| `agent_pairing_requests`  | Pairing requests, as digests             | `id`                                 |
+| `agent_repositories`      | Which agents may use which repository    | `(agent_id, repository_id)`          |
+| `registration_operations` | Registrations, kept after they end       | `id`                                 |
+| `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                       |
+| `schema_migrations`       | Migration history, managed by the runner | `version`                            |
 
 The view `public_catalog_card_media` is the public read path for card images.

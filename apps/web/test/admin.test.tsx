@@ -39,7 +39,7 @@ describe('dashboard', () => {
     expect(await screen.findByText('1 public, 2 private')).toBeTruthy();
     expect(screen.getByText('4 published, 1 private')).toBeTruthy();
     expect(screen.getByRole('note').textContent).toMatch(/connected EmuCat agent/);
-    expect(screen.getByRole('note').textContent).toMatch(/later milestone/);
+    expect(screen.getByRole('note').textContent).toMatch(/Agents page/);
   });
 
   it('reports a failure', async () => {
@@ -74,7 +74,7 @@ describe('catalog management', () => {
     expect(
       await screen.findByRole('heading', { name: 'No registered virtual machines' }),
     ).toBeTruthy();
-    expect(screen.getAllByText(/later milestone/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Agents page/).length).toBeGreaterThan(0);
     for (const element of [...screen.queryAllByRole('button'), ...screen.queryAllByRole('link')]) {
       expect(element.textContent).not.toMatch(/\b(create|add|new|register)\b/i);
     }

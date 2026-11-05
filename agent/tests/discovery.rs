@@ -123,6 +123,50 @@ fn reports_every_qemu_script_present_in_a_fixed_order() {
 }
 
 #[test]
+fn a_real_world_qemu_directory_with_run_bat_is_a_vm() {
+    let base = TempDir::new().unwrap();
+    vm(base.path(), "garmin", &["run.bat", "run.sh", "winxp.qcow2"]);
+    let report = scan_of(EmulatorType::Qemu, base.path(), Platform::Windows);
+    assert_eq!(report.vms[0].markers, ["run.bat"]);
+    assert_eq!(report.vms[0].host_compatible, Some(true));
+    let on_linux = scan_of(EmulatorType::Qemu, base.path(), Platform::Linux);
+    assert_eq!(on_linux.vms[0].host_compatible, Some(false));
+}
+
+#[test]
+fn every_windows_launcher_is_recognized_and_reported_with_its_original_name() {
+    let base = TempDir::new().unwrap();
+    for script in ["run.bat", "run.cmd", "run-win.bat", "run-win.cmd"] {
+        vm(base.path(), &format!("Only {script}"), &[script]);
+        let report = scan_of(EmulatorType::Qemu, base.path(), Platform::Windows);
+        let found = report
+            .vms
+            .iter()
+            .find(|vm| vm.vm_name.as_str() == format!("Only {script}"))
+            .unwrap();
+        assert_eq!(found.markers, [script]);
+        assert_eq!(found.host_compatible, Some(true));
+    }
+}
+
+#[test]
+fn a_launcher_with_other_capitalization_or_another_name_does_not_count() {
+    let base = TempDir::new().unwrap();
+    vm(base.path(), "Shouting", &["RUN.BAT"]);
+    vm(base.path(), "Shell only", &["run.sh"]);
+    let report = scan_of(EmulatorType::Qemu, base.path(), Platform::Windows);
+    assert!(report.vms.is_empty());
+    assert_eq!(
+        skip_of(&report, "Shouting").reason,
+        SkipReason::MarkerWrongCase
+    );
+    assert_eq!(
+        skip_of(&report, "Shell only").reason,
+        SkipReason::MissingMarker
+    );
+}
+
+#[test]
 fn a_directory_without_a_marker_is_reported() {
     let base = TempDir::new().unwrap();
     vm(base.path(), "Empty", &[]);
@@ -473,7 +517,14 @@ fn the_largest_possible_report_fits_in_one_message() {
         vm(
             base.path(),
             &format!("{index:0>64}"),
-            &["run-win.cmd", "run-mac.sh", "run-linux.sh"],
+            &[
+                "run.bat",
+                "run.cmd",
+                "run-win.bat",
+                "run-win.cmd",
+                "run-mac.sh",
+                "run-linux.sh",
+            ],
         );
     }
     for index in 0..(MAX_SKIPPED + 8) {

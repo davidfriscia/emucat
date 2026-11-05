@@ -1,11 +1,16 @@
-import type {
-  AgentSummary,
-  DiscoveryEmulatorStatus,
-  DiscoveryOperation,
-  DiscoverySkipReason,
-  DiscoverySkipped,
-  DiscoveryListedVm,
-  EmulatorType,
+import {
+  isRegistrationCommitted,
+  isRegistrationTerminal,
+  type AgentSummary,
+  type DiscoveryEmulatorStatus,
+  type DiscoveryOperation,
+  type DiscoverySkipReason,
+  type DiscoverySkipped,
+  type DiscoveryListedVm,
+  type EmulatorType,
+  type RegistrationMode,
+  type RegistrationOperation,
+  type RepositorySummary,
 } from '@emucat/contracts';
 import { useCallback, useState } from 'react';
 import { Link, useParams } from 'react-router';
@@ -13,6 +18,8 @@ import {
   ApiRequestError,
   fetchAgent,
   fetchDiscovery,
+  fetchRegistrations,
+  fetchRepositories,
   revokeAgent,
   startDiscovery,
 } from '../../api';
@@ -22,12 +29,19 @@ import {
   AgentPairingBadge,
   formatTime,
 } from '../../components/Agents';
+import {
+  RegistrationCard,
+  RegistrationDialog,
+  type RegistrationTarget,
+} from '../../components/Registration';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
 import { usePolledData } from '../../usePolledData';
 import { NotFoundPage } from '../NotFoundPage';
 
 const AGENT_REFRESH_MS = 5_000;
 const RUNNING_REFRESH_MS = 1_000;
+const REGISTRATION_ACTIVE_REFRESH_MS = 1_500;
+const REGISTRATION_IDLE_REFRESH_MS = 10_000;
 
 const EMULATOR_NAMES: Record<EmulatorType, string> = { '86box': '86Box', qemu: 'QEMU' };
 
@@ -63,36 +77,65 @@ const NAME_ERROR_TEXT: Record<string, string> = {
 function HostCompatibility({ vm }: { vm: DiscoveryListedVm }) {
   if (vm.hostCompatible === null) return null;
   return vm.hostCompatible ? (
-    <span className="badge text-bg-success">Has a launch script for this host</span>
+    <span className="badge text-bg-success">Has a launcher for this host</span>
   ) : (
-    <span className="badge text-bg-warning">No launch script for this host</span>
+    <span className="badge text-bg-warning">No launcher for this host</span>
   );
 }
 
-function DiscoveredVmCard({ vm }: { vm: DiscoveryListedVm }) {
+interface VmActions {
+  /** Why nothing can be started right now, or null if it can. */
+  blocked: string | null;
+  running: ReadonlySet<string>;
+  /** Registered since this report was made. The report itself says nothing about that. */
+  registered: ReadonlySet<string>;
+  onChoose: (vm: DiscoveryListedVm, mode: RegistrationMode) => void;
+}
+
+const vmKey = (emulatorType: string, vmName: string) => `${emulatorType}/${vmName.toLowerCase()}`;
+
+function DiscoveredVmCard({ vm, actions }: { vm: DiscoveryListedVm; actions: VmActions }) {
+  const key = vmKey(vm.emulatorType, vm.vmName);
+  const running = actions.running.has(key);
+  const registered = vm.registered || actions.registered.has(key);
+  const title = actions.blocked ?? undefined;
   return (
     <article className="card h-100">
       <div className="card-body d-flex flex-column">
         <h4 className="h6 card-title">{vm.vmName}</h4>
         <div className="d-flex flex-wrap gap-1 mb-2">
           <span className="badge text-bg-dark border">{EMULATOR_NAMES[vm.emulatorType]}</span>
-          {vm.registered ? (
+          {registered ? (
             <span className="badge text-bg-primary">Already registered</span>
+          ) : running ? (
+            <span className="badge text-bg-info">Registration running</span>
           ) : (
             <span className="badge text-bg-secondary">Not registered</span>
           )}
           <HostCompatibility vm={vm} />
         </div>
-        <p className="small text-body-secondary media-filename">{vm.markers.join(', ')}</p>
-        {vm.registered ? null : (
-          <div className="mt-auto">
+        <p className="small text-body-secondary media-filename">
+          Launchers: {vm.markers.join(', ')}
+        </p>
+        {registered || running ? null : (
+          <div className="mt-auto d-flex flex-wrap gap-2">
             <button
               type="button"
-              className="btn btn-sm btn-outline-secondary"
-              disabled
-              title="Registration arrives in Milestone 3"
+              className="btn btn-sm btn-primary"
+              disabled={actions.blocked !== null}
+              title={title}
+              onClick={() => actions.onChoose(vm, 'copy')}
             >
-              Register (Milestone 3)
+              Copy to remote
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-danger"
+              disabled={actions.blocked !== null}
+              title={title}
+              onClick={() => actions.onChoose(vm, 'transfer')}
+            >
+              Transfer to remote
             </button>
           </div>
         )}
@@ -122,13 +165,19 @@ function SkippedList({ skipped }: { skipped: DiscoverySkipped[] }) {
   );
 }
 
-function DiscoveryResults({ operation }: { operation: DiscoveryOperation }) {
+function DiscoveryResults({
+  operation,
+  actions,
+}: {
+  operation: DiscoveryOperation;
+  actions: VmActions;
+}) {
   const truncated = operation.emulators.some((emulator) => emulator.truncated);
   return (
     <>
       <div className="alert alert-secondary small" role="note">
         <strong>These are observations, not catalog entries.</strong> Nothing here is stored or
-        public. A VM joins the catalog only when you register it, which arrives in Milestone 3.
+        public. A VM joins the catalog, privately, only when you register it with Copy or Transfer.
       </div>
       <ul className="list-unstyled small mb-3">
         {operation.emulators.map((emulator) => (
@@ -152,7 +201,7 @@ function DiscoveryResults({ operation }: { operation: DiscoveryOperation }) {
       ) : (
         <div className="media-grid">
           {operation.vms.map((vm) => (
-            <DiscoveredVmCard key={`${vm.emulatorType}/${vm.vmName}`} vm={vm} />
+            <DiscoveredVmCard key={`${vm.emulatorType}/${vm.vmName}`} vm={vm} actions={actions} />
           ))}
         </div>
       )}
@@ -161,7 +210,73 @@ function DiscoveryResults({ operation }: { operation: DiscoveryOperation }) {
   );
 }
 
+function usableRepository(
+  repositories: RepositorySummary[],
+  agentId: string,
+): RepositorySummary | null {
+  return (
+    repositories.find(
+      (repository) =>
+        repository.enabled && repository.agents.some((agent) => agent.agentId === agentId),
+    ) ?? null
+  );
+}
+
+function RegistrationsPanel({
+  operations,
+  error,
+  onChanged,
+}: {
+  operations: RegistrationOperation[];
+  error: unknown;
+  onChanged: () => void;
+}) {
+  if (operations.length === 0) return null;
+  return (
+    <section className="mt-4" aria-labelledby="registrations-heading">
+      <h2 className="h5" id="registrations-heading">
+        Registrations
+      </h2>
+      <p className="text-body-secondary">
+        These keep going if you leave this page, and survive a server restart.
+      </p>
+      {error ? (
+        <div className="alert alert-warning" role="alert">
+          The server cannot be reached right now. Still trying.
+        </div>
+      ) : null}
+      <div className="d-grid gap-3">
+        {operations.map((operation) => (
+          <RegistrationCard key={operation.id} operation={operation} onChanged={onChanged} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
+  const loadRepositories = useCallback((signal: AbortSignal) => fetchRepositories(signal), []);
+  const repositories = usePolledData(loadRepositories, REGISTRATION_IDLE_REFRESH_MS);
+  const [active, setActive] = useState(false);
+  const loadRegistrations = useCallback(
+    (signal: AbortSignal) => fetchRegistrations(agent.id, signal),
+    [agent.id],
+  );
+  const registrations = usePolledData(
+    loadRegistrations,
+    active ? REGISTRATION_ACTIVE_REFRESH_MS : REGISTRATION_IDLE_REFRESH_MS,
+  );
+  const operations = registrations.data?.operations ?? [];
+  const activeOperations = operations.filter(
+    (operation) => !isRegistrationTerminal(operation.state),
+  );
+  const isActive = activeOperations.length > 0;
+  if (active !== isActive) setActive(isActive);
+  const [choice, setChoice] = useState<{
+    target: RegistrationTarget;
+    mode: RegistrationMode;
+  } | null>(null);
+
   const [running, setRunning] = useState(false);
   const load = useCallback((signal: AbortSignal) => fetchDiscovery(agent.id, signal), [agent.id]);
   const discovery = usePolledData(load, running ? RUNNING_REFRESH_MS : null);
@@ -187,6 +302,42 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
     }
   };
 
+  const repository = usableRepository(repositories.data?.repositories ?? [], agent.id);
+  const blocked =
+    agent.pairingStatus === 'revoked'
+      ? 'This agent has been revoked'
+      : !agent.online
+        ? 'This agent is offline'
+        : !repository
+          ? 'This agent is not allowed to use a repository yet'
+          : isActive
+            ? 'This agent is already running a registration'
+            : null;
+  const actions: VmActions = {
+    blocked,
+    running: new Set(
+      activeOperations.map((operation) => vmKey(operation.emulatorType, operation.vmName)),
+    ),
+    registered: new Set(
+      operations
+        .filter((operation) => isRegistrationCommitted(operation.state))
+        .map((operation) => vmKey(operation.emulatorType, operation.vmName)),
+    ),
+    onChoose: (vm, mode) => {
+      if (!operation) return;
+      setChoice({
+        mode,
+        target: {
+          agentId: agent.id,
+          agentName: agent.name,
+          emulatorType: vm.emulatorType,
+          vmName: vm.vmName,
+          discoveryOperationId: operation.id,
+        },
+      });
+    },
+  };
+
   const unavailable =
     agent.pairingStatus === 'revoked'
       ? 'This agent has been revoked, so it can no longer discover anything.'
@@ -195,53 +346,82 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
         : 'This agent is offline. Discovery works once it reconnects.';
 
   return (
-    <section className="mt-4">
-      <h2 className="h5">Discovery</h2>
-      <p className="text-body-secondary">
-        Asks the agent to look, read-only, inside its configured VM directories.
-      </p>
-      {unavailable ? (
-        <div className="alert alert-secondary" role="status">
-          {unavailable}
-        </div>
-      ) : null}
-      <FormError error={error} />
-      <button
-        type="button"
-        className="btn btn-primary mb-3"
-        disabled={!!unavailable || starting || isRunning}
-        onClick={() => void start()}
-      >
-        {isRunning ? 'Discovering…' : 'Discover virtual machines'}
-      </button>
-      {discovery.error ? (
-        <div className="alert alert-warning" role="alert">
-          The server cannot be reached right now. Still trying.
-        </div>
-      ) : null}
-      {isRunning ? (
-        <div className="alert alert-info" role="status">
-          <span className="spinner-border spinner-border-sm me-2" aria-hidden="true" />
-          The agent is scanning. This page updates by itself.
-        </div>
-      ) : null}
-      {operation?.status === 'failed' ? (
-        <div className="alert alert-danger" role="alert">
-          {operation.failure?.message ?? 'Discovery failed.'} Nothing was changed.
-        </div>
-      ) : null}
-      {operation?.status === 'completed' ? (
-        <>
-          <p className="small text-body-secondary">
-            Finished at {formatTime(operation.finishedAt)}.
-          </p>
-          <DiscoveryResults operation={operation} />
-        </>
-      ) : null}
-      {!operation && !discovery.loading && !unavailable ? (
-        <p className="text-body-secondary">No discovery has run since the server started.</p>
-      ) : null}
-    </section>
+    <>
+      <div id="registrations" />
+      <RegistrationsPanel
+        operations={operations}
+        error={registrations.error}
+        onChanged={registrations.refresh}
+      />
+      <section className="mt-4">
+        <h2 className="h5">Discovery</h2>
+        <p className="text-body-secondary">
+          Asks the agent to look, read-only, inside its configured VM directories.
+        </p>
+        {unavailable ? (
+          <div className="alert alert-secondary" role="status">
+            {unavailable}
+          </div>
+        ) : null}
+        <FormError error={error} />
+        <button
+          type="button"
+          className="btn btn-primary mb-3"
+          disabled={!!unavailable || starting || isRunning}
+          onClick={() => void start()}
+        >
+          {isRunning ? 'Discovering…' : 'Discover virtual machines'}
+        </button>
+        {discovery.error ? (
+          <div className="alert alert-warning" role="alert">
+            The server cannot be reached right now. Still trying.
+          </div>
+        ) : null}
+        {isRunning ? (
+          <div className="alert alert-info" role="status">
+            <span className="spinner-border spinner-border-sm me-2" aria-hidden="true" />
+            The agent is scanning. This page updates by itself.
+          </div>
+        ) : null}
+        {operation?.status === 'failed' ? (
+          <div className="alert alert-danger" role="alert">
+            {operation.failure?.message ?? 'Discovery failed.'} Nothing was changed.
+          </div>
+        ) : null}
+        {operation?.status === 'completed' ? (
+          <>
+            <p className="small text-body-secondary">
+              Finished at {formatTime(operation.finishedAt)}.
+            </p>
+            {agent.online && agent.pairingStatus !== 'revoked' && !repository ? (
+              <div className="alert alert-secondary small" role="status">
+                To register a VM, first <Link to="/admin/repositories">allow this agent</Link> to
+                use a repository.
+              </div>
+            ) : null}
+            <DiscoveryResults operation={operation} actions={actions} />
+          </>
+        ) : null}
+        {!operation && !discovery.loading && !unavailable ? (
+          <p className="text-body-secondary">No discovery has run since the server started.</p>
+        ) : null}
+        {choice && repository ? (
+          <RegistrationDialog
+            target={choice.target}
+            mode={choice.mode}
+            repository={repository}
+            onClose={() => setChoice(null)}
+            onStarted={() => {
+              setChoice(null);
+              setActive(true);
+              registrations.refresh();
+              // Its progress appears above the list this was started from.
+              document.getElementById('registrations')?.scrollIntoView?.();
+            }}
+          />
+        ) : null}
+      </section>
+    </>
   );
 }
 

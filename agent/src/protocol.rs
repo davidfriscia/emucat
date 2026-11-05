@@ -6,6 +6,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::discovery::DiscoveryReport;
+use crate::emulators::{EmulatorType, VmName};
 use crate::platform::{Architecture, Platform};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -73,6 +74,26 @@ pub enum Message {
     ServerError(ServerError),
     #[serde(rename = "server.discovery_request")]
     ServerDiscoveryRequest(DiscoveryRequest),
+    #[serde(rename = "agent.registration_sync")]
+    AgentRegistrationSync(RegistrationSync),
+    #[serde(rename = "agent.registration_progress")]
+    AgentRegistrationProgress(RegistrationProgress),
+    #[serde(rename = "agent.registration_result")]
+    AgentRegistrationResult(RegistrationResult),
+    #[serde(rename = "agent.registration_error")]
+    AgentRegistrationError(RegistrationFailure),
+    #[serde(rename = "agent.registration_cleanup")]
+    AgentRegistrationCleanup(RegistrationCleanup),
+    #[serde(rename = "agent.repository_health_result")]
+    AgentRepositoryHealthResult(RepositoryHealthResult),
+    #[serde(rename = "server.registration_request")]
+    ServerRegistrationRequest(RegistrationRequest),
+    #[serde(rename = "server.registration_cancel")]
+    ServerRegistrationCancel(RegistrationCancel),
+    #[serde(rename = "server.registration_ack")]
+    ServerRegistrationAck(RegistrationAck),
+    #[serde(rename = "server.repository_health_request")]
+    ServerRepositoryHealthRequest(RepositoryHealthRequest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -131,6 +152,177 @@ pub enum DiscoveryErrorCode {
     Busy,
     ScanFailed,
     InvalidRequest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistrationMode {
+    Copy,
+    Transfer,
+}
+
+/// Which VM, in which repository, under which identities. It holds no path and no address: the agent
+/// resolves a VM against its own base paths and a repository against its own configuration, and it
+/// recomputes the archive key rather than believing it. Unknown fields are refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistrationRequest {
+    pub operation_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub mode: RegistrationMode,
+    pub repository_id: Uuid,
+    pub version_id: Uuid,
+    pub archive_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistrationCancel {
+    pub operation_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AckOutcome {
+    /// The master is committed. `removeLocal` says whether the local copy may now be removed.
+    Committed,
+    /// There is no master for this operation, and there will not be one.
+    Rejected,
+    /// The server has everything. The agent can forget this operation.
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistrationAck {
+    pub operation_id: Uuid,
+    pub outcome: AckOutcome,
+    #[serde(default)]
+    pub version_id: Option<Uuid>,
+    #[serde(default)]
+    pub remove_local: bool,
+    /// The published archive is referenced by nothing, and will never be.
+    #[serde(default)]
+    pub delete_published: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryHealthRequest {
+    pub operation_id: Uuid,
+    pub repository_id: Uuid,
+}
+
+/// How far along an operation is, as far as this agent knows. The server decides what follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationPhase {
+    Running,
+    Publishing,
+    Published,
+    Cleaning,
+    Reported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationSyncEntry {
+    pub operation_id: Uuid,
+    pub phase: RegistrationPhase,
+}
+
+/// Sent after every welcome. It also tells the server that this agent can register VMs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationSync {
+    pub operations: Vec<RegistrationSyncEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationStage {
+    Validating,
+    Archiving,
+    Uploading,
+    Verifying,
+    CleaningLocal,
+}
+
+/// Only real measurements: without a known total there is no total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationProgress {
+    pub operation_id: Uuid,
+    pub stage: RegistrationStage,
+    pub done_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+}
+
+/// What this agent verified. It is a report, and authorizes nothing: the server only accepts it for an
+/// operation it created, from the agent it created it for, with the identities it issued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationResult {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+    pub archive_key: String,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+    pub manifest_version: u32,
+    pub manifest_sha256: String,
+    pub file_count: u64,
+    pub total_uncompressed_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationFailure {
+    pub operation_id: Uuid,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCopyStatus {
+    Preserved,
+    Removed,
+    CleanupFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationCleanup {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+    pub local_copy: LocalCopyStatus,
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+/// The agent's local settings for a repository, minus anything secret. The server compares them with
+/// its own record, since the two are configured separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryConfigSummary {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub remote_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryHealthResult {
+    pub operation_id: Uuid,
+    pub repository_id: Uuid,
+    pub ok: bool,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub configuration: Option<RepositoryConfigSummary>,
+    pub host_key_fingerprint: Option<String>,
+    pub free_bytes: Option<u64>,
 }
 
 /// What a text frame from the server turned out to be.
@@ -194,5 +386,15 @@ fn is_known_type(message_type: &str) -> bool {
             | "server.heartbeat_ack"
             | "server.error"
             | "server.discovery_request"
+            | "agent.registration_sync"
+            | "agent.registration_progress"
+            | "agent.registration_result"
+            | "agent.registration_error"
+            | "agent.registration_cleanup"
+            | "agent.repository_health_result"
+            | "server.registration_request"
+            | "server.registration_cancel"
+            | "server.registration_ack"
+            | "server.repository_health_request"
     )
 }

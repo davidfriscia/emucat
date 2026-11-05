@@ -71,3 +71,35 @@ describe('agent VM state', () => {
     ).toBe(false);
   });
 });
+
+const registration =
+  fixture<
+    Record<
+      'registrationServerMessages' | 'registrationAgentMessages' | 'registrationRefusedByTheAgent',
+      { type: string }[]
+    >
+  >('wire-examples');
+
+describe('registration messages', () => {
+  it('accepts the shared examples', () => {
+    for (const message of registration.registrationServerMessages) {
+      expect(serverMessageSchema.safeParse(message).success, message.type).toBe(true);
+    }
+    for (const message of registration.registrationAgentMessages) {
+      expect(agentMessageSchema.safeParse(message).success, message.type).toBe(true);
+    }
+  });
+
+  it('refuses a command that adds a path, an unsafe VM name or an unknown mode', () => {
+    for (const message of registration.registrationRefusedByTheAgent) {
+      expect(serverMessageSchema.safeParse(message).success).toBe(false);
+    }
+  });
+
+  it('never carries archive bytes: a result is metadata only', () => {
+    const result = registration.registrationAgentMessages.find(
+      (message) => message.type === 'agent.registration_result',
+    );
+    expect(JSON.stringify(result).length).toBeLessThan(1024);
+  });
+});

@@ -1,15 +1,21 @@
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use emucat_agent::cli::{Cli, Command, Overrides, print_info};
 use emucat_agent::config::{Config, ConfigError, Severity, process_env, validate};
 use emucat_agent::connectivity::{self, ConnectionEnd, ConnectionSettings, check_transport};
-use emucat_agent::credentials::{self, CredentialStore};
+use emucat_agent::credentials::{self, CredentialStore, Secret};
 use emucat_agent::discovery::{self, ScanLimits};
 use emucat_agent::pairing::{self, PairingRequest};
 use emucat_agent::platform::{Architecture, Platform};
 use emucat_agent::protocol::AgentHello;
+use emucat_agent::registration::{AgentOperations, OperationsConfig, RepositoryProvider};
+use emucat_agent::repository::CancelFlag;
+use emucat_agent::sftp::ConfiguredRepositories;
 use emucat_agent::{logging, platform, protocol, shutdown};
+use uuid::Uuid;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -23,6 +29,8 @@ fn main() -> ExitCode {
         Command::Pair { name, force } => pair(&cli, name.as_deref(), *force),
         Command::Unpair => unpair(&cli),
         Command::Discover => discover(&cli),
+        Command::RepositoryCheck { repository } => repository_check(&cli, *repository),
+        Command::RepositoryPassphrase { repository } => repository_passphrase(&cli, *repository),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -130,7 +138,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         "Agent started"
     );
 
-    let settings = ConnectionSettings::new(
+    let mut settings = ConnectionSettings::new(
         &config.api_url,
         stored.credential,
         AgentHello {
@@ -141,12 +149,105 @@ fn run(cli: &Cli) -> Result<(), String> {
         host,
         config.emulators.clone(),
     );
-    let end = runtime()?.block_on(connectivity::run(settings, stop_requested()));
+    let agent_id = stored.agent_id;
+    let runtime = runtime()?;
+    let end = runtime.block_on(async {
+        // Loading resumes interrupted work, which needs the runtime.
+        settings.operations = Some(operations(&config, agent_id, &settings)?);
+        Ok::<_, String>(connectivity::run(settings, stop_requested()).await)
+    })?;
+    // Blocking work has been told to stop, and notices within one read.
+    runtime.shutdown_timeout(Duration::from_secs(10));
     tracing::info!(reason = %end, "Agent stopped");
     match end {
         ConnectionEnd::Shutdown => Ok(()),
         other => Err(other.to_string()),
     }
+}
+
+fn operations(
+    config: &Config,
+    agent_id: Uuid,
+    settings: &ConnectionSettings,
+) -> Result<Arc<AgentOperations>, String> {
+    let state_dir = config
+        .state_dir
+        .clone()
+        .ok_or("no state directory is configured and no default is known")?;
+    let staging_dir = config
+        .effective_staging_dir()
+        .ok_or("no staging directory is configured and no default is known")?;
+    AgentOperations::load(OperationsConfig {
+        agent_id,
+        repositories: Arc::new(ConfiguredRepositories::new(
+            config.repositories.clone(),
+            state_dir.clone(),
+        )),
+        state_dir,
+        staging_dir,
+        emulators: Arc::clone(&settings.emulators),
+        retry_delay: Duration::from_secs(5),
+    })
+}
+
+fn repository_check(cli: &Cli, repository_id: Uuid) -> Result<(), String> {
+    let config = load(cli).map_err(|error| error.to_string())?;
+    let state_dir = config
+        .state_dir
+        .clone()
+        .ok_or("no state directory is configured and no default is known")?;
+    let repositories = ConfiguredRepositories::new(config.repositories.clone(), state_dir);
+    let summary = repositories
+        .summary(repository_id)
+        .ok_or_else(|| format!("this agent has no configuration for repository {repository_id}"))?;
+    println!(
+        "Testing {}@{}:{} with remote root {}",
+        summary.username, summary.host, summary.port, summary.remote_root
+    );
+    let repository = repositories
+        .open(repository_id)
+        .map_err(|error| error.message)?;
+    let report = runtime()?
+        .block_on(repository.health_check(&CancelFlag::new()))
+        .map_err(|error| format!("{}: {}", error.kind.code(), error.message))?;
+    println!("Connection and authentication: ok");
+    println!(
+        "Host key: trusted ({})",
+        report.host_key_fingerprint.as_deref().unwrap_or("unknown")
+    );
+    println!("Remote root readable: {}", report.root_readable);
+    println!("Remote root writable: {}", report.root_writable);
+    println!(
+        "Publication that cannot overwrite: {}",
+        report.no_overwrite_publication
+    );
+    match report.free_bytes {
+        Some(free) => println!("Free space: {free} bytes"),
+        None => println!("Free space: not reported by this server"),
+    }
+    Ok(())
+}
+
+fn repository_passphrase(cli: &Cli, repository_id: Uuid) -> Result<(), String> {
+    let config = load(cli).map_err(|error| error.to_string())?;
+    let state_dir = config
+        .state_dir
+        .clone()
+        .ok_or("no state directory is configured and no default is known")?;
+    if !config.repositories.contains_key(&repository_id) {
+        return Err(format!(
+            "this agent has no configuration for repository {repository_id}"
+        ));
+    }
+    eprintln!("Enter the passphrase. It is not shown, and is stored protected with DPAPI:");
+    let passphrase = shutdown::read_secret_line().map_err(|error| error.to_string())?;
+    if passphrase.is_empty() {
+        return Err("the passphrase is empty, so nothing was stored".to_owned());
+    }
+    credentials::save_repository_passphrase(&state_dir, repository_id, &Secret::new(passphrase))
+        .map_err(|error| error.to_string())?;
+    println!("Stored the passphrase for repository {repository_id}.");
+    Ok(())
 }
 
 fn pair(cli: &Cli, name: Option<&str>, force: bool) -> Result<(), String> {

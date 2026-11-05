@@ -76,6 +76,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - if: runner.os == 'Linux'
+        # The SFTP provider against a real OpenSSH server, and the ZIP64 test. Needs Docker.
+        run: cargo test --locked --test sftp --test packaging -- --include-ignored --test-threads=4
       - run: cargo build --release --locked
       - if: runner.os == 'Windows'
         run: target\release\emucat-agent.exe --version

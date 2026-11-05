@@ -30,7 +30,14 @@ impl EmulatorType {
     pub const fn root_markers(self) -> &'static [&'static str] {
         match self {
             Self::Box86 => &["86box.cfg"],
-            Self::Qemu => &["run-win.cmd", "run-mac.sh", "run-linux.sh"],
+            Self::Qemu => &[
+                "run.bat",
+                "run.cmd",
+                "run-win.bat",
+                "run-win.cmd",
+                "run-mac.sh",
+                "run-linux.sh",
+            ],
         }
     }
 }

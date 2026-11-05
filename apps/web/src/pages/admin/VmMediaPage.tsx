@@ -17,15 +17,10 @@ import {
   updateMediaVisibility,
 } from '../../api';
 import { VmImage } from '../../components/Catalog';
+import { formatBytes } from '../../components/Agents';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
 import { useAsync } from '../../useAsync';
 import { NotFoundPage } from '../NotFoundPage';
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} bytes`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
 
 function publicEffect(item: AdminMedia): string | null {
   if (item.shownAsPublicMain) return 'Shown as the main image in the public catalog.';
@@ -192,7 +187,8 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
       <FormError error={error} />
       {state.data.media.length === 0 ? (
         <EmptyState title="No media yet">
-          Screenshots will arrive from a connected EmuCat agent in a later milestone.
+          Screenshots will arrive from a connected EmuCat agent in a later milestone. Registering a
+          VM does not upload them.
         </EmptyState>
       ) : (
         <div className="media-grid">

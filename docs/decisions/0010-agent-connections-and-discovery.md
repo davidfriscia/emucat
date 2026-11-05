@@ -51,4 +51,5 @@ placeholders and deduplicated files are reparse points too, and can lead somewhe
 be. Being strict means that such a VM is skipped with a clear reason, which is the safer way to be wrong.
 
 **Marker rules are unchanged.** Real QEMU directories using `run.bat` do not qualify. That is the documented domain
-rule, so they are reported as `missing_marker` rather than the rule being stretched to fit.
+rule, so they are reported as `missing_marker` rather than the rule being stretched to fit. _Superseded by
+[0011](0011-qemu-launcher-markers.md), which adds those launchers._

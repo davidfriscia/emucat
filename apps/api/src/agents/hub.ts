@@ -13,6 +13,14 @@ import {
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { WebSocket } from 'ws';
+import type {
+  RegistrationCleanupPayload,
+  RegistrationErrorPayload,
+  RegistrationProgressPayload,
+  RegistrationResultPayload,
+  RegistrationSyncPayload,
+  RepositoryHealthResultPayload,
+} from '@emucat/contracts';
 import { DiscoveryCoordinator, type DiscoveryRecord } from './discovery.js';
 
 /**
@@ -31,6 +39,18 @@ export const NO_PRESENCE: AgentPresence = {
   seen: async () => true,
   disconnected: async () => undefined,
 };
+
+/** What is done with registration messages. Every call is for the agent's active connection. */
+export interface AgentOperationsHandler {
+  synced(agentId: string, payload: RegistrationSyncPayload): Promise<void>;
+  progress(agentId: string, payload: RegistrationProgressPayload): Promise<void>;
+  result(agentId: string, payload: RegistrationResultPayload): Promise<void>;
+  failed(agentId: string, payload: RegistrationErrorPayload): Promise<void>;
+  cleanedUp(agentId: string, payload: RegistrationCleanupPayload): Promise<void>;
+  healthResult(agentId: string, payload: RepositoryHealthResultPayload): Promise<void>;
+  agentRevoked(agentId: string): Promise<void>;
+  close(): void;
+}
 
 export interface AgentHubOptions {
   presence: AgentPresence;
@@ -73,6 +93,8 @@ interface Connection {
   helloTimer: NodeJS.Timeout | null;
   silenceTimer: NodeJS.Timeout | null;
   closed: boolean;
+  /** Set once this connection has sent `agent.registration_sync`, which older agents never do. */
+  registrationCapable: boolean;
 }
 
 /** What `ws` calls a frame over its `maxPayload`. */
@@ -103,6 +125,7 @@ export class AgentHub {
   private readonly connections = new Set<Connection>();
   private readonly active = new Map<string, Connection>();
   private readonly pendingPresence = new Set<Promise<unknown>>();
+  private operations: AgentOperationsHandler | null = null;
 
   constructor(options: Partial<AgentHubOptions> & Pick<AgentHubOptions, 'presence'>) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -114,6 +137,24 @@ export class AgentHub {
 
   isOnline(agentId: string): boolean {
     return this.active.has(agentId);
+  }
+
+  setOperations(operations: AgentOperationsHandler): void {
+    this.operations = operations;
+  }
+
+  isRegistrationCapable(agentId: string): boolean {
+    return this.active.get(agentId)?.registrationCapable ?? false;
+  }
+
+  activeConnectionId(agentId: string): string | null {
+    return this.active.get(agentId)?.id ?? null;
+  }
+
+  /** Sends to the agent's active connection, or returns false if it has none. */
+  sendToAgent(agentId: string, message: ServerMessageBody): boolean {
+    const connection = this.active.get(agentId);
+    return connection ? this.send(connection, message) : false;
   }
 
   /** Starts a scan on the agent's active connection, or returns `null` if it has none. */
@@ -138,6 +179,7 @@ export class AgentHub {
       helloTimer: null,
       silenceTimer: null,
       closed: false,
+      registrationCapable: false,
     };
     this.connections.add(connection);
     log.info({ agentId, connectionId: connection.id }, 'Agent connected');
@@ -163,6 +205,7 @@ export class AgentHub {
   /** Disconnects every connection of a revoked agent, and fails what it was doing. */
   revoke(agentId: string): void {
     this.discovery.failRunning(agentId, 'agent_revoked');
+    this.operationsRevoked(agentId);
     for (const connection of [...this.connections]) {
       if (connection.agentId !== agentId) continue;
       this.sendError(connection, 'agent_revoked', 'This agent has been revoked');
@@ -173,6 +216,7 @@ export class AgentHub {
   /** Closes everything for a server shutdown, and waits for presence to reach the database. */
   async shutdown(): Promise<void> {
     this.discovery.close();
+    this.operations?.close();
     for (const connection of [...this.connections]) {
       this.drop(connection, 1001, 'server shutting down');
     }
@@ -335,7 +379,82 @@ export class AgentHub {
         }
         break;
       }
+      case 'agent.registration_sync':
+      case 'agent.registration_progress':
+      case 'agent.registration_result':
+      case 'agent.registration_error':
+      case 'agent.registration_cleanup':
+      case 'agent.repository_health_result':
+        await this.handleOperationMessage(connection, message);
+        break;
     }
+  }
+
+  /**
+   * A stale connection's word counts for nothing. A database failure here is not the agent's fault, so
+   * it does not close the connection: no answer is sent, and the agent repeats its report.
+   */
+  private async handleOperationMessage(
+    connection: Connection,
+    message: Extract<
+      AgentMessage,
+      {
+        type:
+          | 'agent.registration_sync'
+          | 'agent.registration_progress'
+          | 'agent.registration_result'
+          | 'agent.registration_error'
+          | 'agent.registration_cleanup'
+          | 'agent.repository_health_result';
+      }
+    >,
+  ): Promise<void> {
+    const { agentId, log } = connection;
+    if (this.active.get(agentId) !== connection || !this.operations) {
+      log.warn({ agentId, type: message.type }, 'Ignored a message from an inactive connection');
+      return;
+    }
+    const operations = this.operations;
+    try {
+      switch (message.type) {
+        case 'agent.registration_sync':
+          connection.registrationCapable = true;
+          await operations.synced(agentId, message.payload);
+          break;
+        case 'agent.registration_progress':
+          await operations.progress(agentId, message.payload);
+          break;
+        case 'agent.registration_result':
+          await operations.result(agentId, message.payload);
+          break;
+        case 'agent.registration_error':
+          await operations.failed(agentId, message.payload);
+          break;
+        case 'agent.registration_cleanup':
+          await operations.cleanedUp(agentId, message.payload);
+          break;
+        case 'agent.repository_health_result':
+          await operations.healthResult(agentId, message.payload);
+          break;
+      }
+    } catch (error) {
+      log.error({ agentId, type: message.type, err: error }, 'Cannot handle an agent report');
+    }
+  }
+
+  private operationsRevoked(agentId: string): void {
+    if (!this.operations) return;
+    const update = this.operations
+      .agentRevoked(agentId)
+      .catch((error: unknown) => {
+        for (const connection of this.connections) {
+          if (connection.agentId === agentId) {
+            connection.log.error({ agentId, err: error }, 'Cannot end a revoked agent’s work');
+          }
+        }
+      })
+      .finally(() => this.pendingPresence.delete(update));
+    this.pendingPresence.add(update);
   }
 
   private activePlatform(connection: Connection): Platform | null {
@@ -392,6 +511,7 @@ export class AgentHub {
 
   private refuseRevoked(connection: Connection): void {
     this.discovery.failRunning(connection.agentId, 'agent_revoked');
+    this.operationsRevoked(connection.agentId);
     this.sendError(connection, 'agent_revoked', 'This agent has been revoked');
     this.drop(connection, WS_CLOSE_CODES.agentRevoked, 'revoked');
   }

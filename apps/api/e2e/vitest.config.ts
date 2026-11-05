@@ -7,5 +7,6 @@ export default defineConfig({
     hookTimeout: 60_000,
     // The tests in the file are one scenario, in order, around one running agent.
     sequence: { concurrent: false, shuffle: false },
+    fileParallelism: false,
   },
 });

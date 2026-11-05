@@ -161,5 +161,214 @@
       "code": "busy",
       "message": "A scan is already running"
     }
-  }
+  },
+  "registrationServerMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6001",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.registration_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "transfer",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6102",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101.zip"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6002",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.registration_cancel",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6003",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.registration_ack",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "outcome": "committed",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101",
+        "removeLocal": true,
+        "deletePublished": false
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6004",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.registration_ack",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "outcome": "closed"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6005",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.repository_health_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6102"
+      }
+    }
+  ],
+  "registrationAgentMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6006",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_sync",
+      "payload": {
+        "operations": [
+          {
+            "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+            "phase": "published"
+          }
+        ]
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6007",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_progress",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "stage": "uploading",
+        "doneBytes": 1024,
+        "totalBytes": 2048
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6008",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_progress",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "stage": "validating",
+        "doneBytes": null,
+        "totalBytes": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6009",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_result",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101.zip",
+        "archiveSizeBytes": 2048,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "manifestVersion": 1,
+        "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "fileCount": 3,
+        "totalUncompressedBytes": 4096
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6010",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_error",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "code": "source_changed",
+        "message": "disk.img changed"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6011",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_cleanup",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101",
+        "localCopy": "removed",
+        "code": null,
+        "message": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6012",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.repository_health_result",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6102",
+        "ok": true,
+        "code": null,
+        "message": null,
+        "configuration": {
+          "host": "nas.example",
+          "port": 22,
+          "username": "emucat",
+          "remoteRoot": "/repo"
+        },
+        "hostKeyFingerprint": "SHA256:abc",
+        "freeBytes": 1048576
+      }
+    }
+  ],
+  "registrationRefusedByTheAgent": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6013",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.registration_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "copy",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6102",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101.zip",
+        "path": "C:\\Windows"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6014",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.registration_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "emulatorType": "qemu",
+        "vmName": "../evil",
+        "mode": "copy",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6102",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101.zip"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6015",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.registration_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "delete",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6102",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101.zip"
+      }
+    }
+  ]
 }
