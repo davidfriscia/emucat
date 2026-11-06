@@ -1,6 +1,6 @@
 import {
   adminCatalogQuerySchema,
-  mediaVariantSchema,
+  adminMediaVariantSchema,
   selectMainMediaRequestSchema,
   updateMediaVisibilityRequestSchema,
   updateVmMetadataRequestSchema,
@@ -8,7 +8,9 @@ import {
   vmPathParamsSchema,
   type AdminCatalogQuery,
   type AdminCatalogResponse,
+  type AdminMediaDetail,
   type AdminMediaListResponse,
+  type AdminMediaSyncResponse,
   type AdminSummaryResponse,
   type AdminVmDetail,
   type VmIdentity,
@@ -16,13 +18,16 @@ import {
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'mysql2/promise';
 import { z } from 'zod';
+import type { AgentHub } from '../agents/hub.js';
 import { noStore, requireAdmin, requireSameOrigin, requireSession } from '../auth/guards.js';
 import {
-  adminMediaKey,
+  adminMediaFile,
   adminSummary,
+  agentsHoldingVm,
   CatalogNotFoundError,
   clearMainMedia,
   deleteMedia,
+  getAdminMedia,
   getAdminVm,
   listAdminMedia,
   listAdminVms,
@@ -40,7 +45,7 @@ const vmNotFound = () => new ApiError(404, 'vm_not_found', 'Virtual machine not 
 const mediaNotFound = () => new ApiError(404, 'media_not_found', 'Media not found');
 
 const mediaParams = vmPathParamsSchema.extend({ mediaId: z.uuid() });
-const mediaFileParams = mediaParams.extend({ variant: mediaVariantSchema });
+const mediaFileParams = mediaParams.extend({ variant: adminMediaVariantSchema });
 
 async function adminVmOr404(pool: Pool, vm: VmIdentity): Promise<AdminVmDetail> {
   const detail = await getAdminVm(pool, vm);
@@ -73,6 +78,7 @@ async function mapNotFound<T>(work: Promise<T>): Promise<T> {
 export function registerAdminCatalogRoutes(
   parent: FastifyInstance,
   dependencies: BrowserDependencies,
+  hub: AgentHub,
 ): void {
   const { pool, storage, session, cookie, publicOrigin } = dependencies;
 
@@ -127,6 +133,36 @@ export function registerAdminCatalogRoutes(
           mediaListOr404(pool, request.params as VmIdentity),
       );
 
+      // What each agent holding this VM last said about its screenshots. In memory, like presence.
+      api.get(
+        '/vms/:emulatorType/:vmName/media-sync',
+        { schema: { params: vmPathParamsSchema } },
+        async (request): Promise<AdminMediaSyncResponse> => {
+          const vm = request.params as VmIdentity;
+          if (!(await vmExists(pool, vm))) throw vmNotFound();
+          const agents = await agentsHoldingVm(pool, vm);
+          return {
+            agents: agents.map((agent) => ({
+              agentId: agent.id,
+              agentName: agent.name,
+              online: hub.isOnline(agent.id),
+              status: hub.mediaStatus(agent.id, vm),
+            })),
+          };
+        },
+      );
+
+      api.get(
+        '/vms/:emulatorType/:vmName/media/:mediaId',
+        { schema: { params: mediaParams } },
+        async (request): Promise<AdminMediaDetail> => {
+          const { mediaId, ...vm } = request.params as z.infer<typeof mediaParams>;
+          const media = await getAdminMedia(pool, vm, mediaId);
+          if (!media) throw mediaNotFound();
+          return media;
+        },
+      );
+
       api.put(
         '/vms/:emulatorType/:vmName/main-media',
         { schema: { params: vmPathParamsSchema, body: selectMainMediaRequestSchema } },
@@ -174,8 +210,15 @@ export function registerAdminCatalogRoutes(
         { schema: { params: mediaFileParams } },
         async (request, reply) => {
           const { mediaId, variant, ...vm } = request.params as z.infer<typeof mediaFileParams>;
-          const key = await adminMediaKey(pool, vm, mediaId, variant);
-          return sendMediaFile(request, reply, storage, key, 'private, no-store');
+          const file = await adminMediaFile(pool, vm, mediaId, variant);
+          return sendMediaFile(
+            request,
+            reply,
+            storage,
+            file.key,
+            'private, no-store',
+            file.original,
+          );
         },
       );
     },

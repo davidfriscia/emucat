@@ -2,6 +2,8 @@ import {
   CATALOG_SUMMARY_LENGTH,
   type AdminCatalogQuery,
   type AdminMedia,
+  type AdminMediaDetail,
+  type AdminMediaVariant,
   type AdminSummaryResponse,
   type AdminVmCard,
   type AdminVmDetail,
@@ -186,19 +188,80 @@ export async function publicMediaKey(
   return (rows[0]?.storage_key as string | undefined) ?? null;
 }
 
-export async function adminMediaKey(
+/** A name for the `Content-Disposition` header: its base name, in characters that need no escaping. */
+function downloadName(originalFilename: string): string {
+  const base = originalFilename.split('/').at(-1) ?? 'screenshot';
+  const safe = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '');
+  return safe === '' ? 'screenshot' : safe;
+}
+
+/** Where an item's file is. An original also says how to present it, and legacy rows have none. */
+export async function adminMediaFile(
   pool: Pool,
   vm: VmIdentity,
   mediaId: string,
-  variant: MediaVariant,
-): Promise<string | null> {
-  const column = storageKeyColumn(variant);
+  variant: AdminMediaVariant,
+): Promise<{ key: string | null; original?: { mimeType: string; downloadName: string } }> {
   const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT ${column} AS storage_key FROM vm_media
+    `SELECT jpeg_key, thumbnail_key, original_key, original_mime, original_filename FROM vm_media
      WHERE id = ? AND emulator_type = ? AND vm_name = ?`,
     [mediaId, vm.emulatorType, vm.vmName],
   );
-  return (rows[0]?.storage_key as string | undefined) ?? null;
+  const row = rows[0];
+  if (!row) return { key: null };
+  if (variant !== 'original') {
+    return { key: row[storageKeyColumn(variant)] as string };
+  }
+  if (!row.original_key) return { key: null };
+  return {
+    key: row.original_key as string,
+    original: {
+      mimeType: row.original_mime as string,
+      downloadName: downloadName(row.original_filename as string),
+    },
+  };
+}
+
+/** One item in full, for the administration interface. Storage keys stay out of every response. */
+export async function getAdminMedia(
+  pool: Pool,
+  vm: VmIdentity,
+  mediaId: string,
+): Promise<AdminMediaDetail | null> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT media.original_sha256, media.original_mime, media.uploaded_by_agent_id,
+            agent.name AS agent_name
+     FROM vm_media AS media
+     LEFT JOIN agents AS agent ON agent.id = media.uploaded_by_agent_id
+     WHERE media.id = ? AND media.emulator_type = ? AND media.vm_name = ?`,
+    [mediaId, vm.emulatorType, vm.vmName],
+  );
+  const row = rows[0];
+  const listed = (await listAdminMedia(pool, vm)).find((item) => item.id === mediaId);
+  if (!row || !listed) return null;
+  return {
+    ...listed,
+    originalSha256: row.original_sha256 as string,
+    originalMimeType: (row.original_mime as string | null) ?? null,
+    uploadedByAgentId: (row.uploaded_by_agent_id as string | null) ?? null,
+    uploadedByAgentName: (row.agent_name as string | null) ?? null,
+  };
+}
+
+/** The agents that have or had a copy of this VM, and so may be synchronizing its screenshots. */
+export async function agentsHoldingVm(
+  pool: Pool,
+  vm: VmIdentity,
+): Promise<{ id: string; name: string }[]> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT agent.id, agent.name
+     FROM agent_vm_state AS state
+     JOIN agents AS agent ON agent.id = state.agent_id
+     WHERE state.emulator_type = ? AND state.vm_name = ? AND agent.revoked_at IS NULL
+     ORDER BY agent.name, agent.id`,
+    [vm.emulatorType, vm.vmName],
+  );
+  return rows.map((row) => ({ id: row.id as string, name: row.name as string }));
 }
 
 const ADMIN_VM_COLUMNS = `
@@ -444,7 +507,7 @@ export async function deleteMedia(
   await withTransaction(pool, async (connection) => {
     await lockVm(connection, vm);
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT jpeg_key, thumbnail_key FROM vm_media
+      `SELECT original_key, jpeg_key, thumbnail_key FROM vm_media
        WHERE id = ? AND emulator_type = ? AND vm_name = ? FOR UPDATE`,
       [mediaId, vm.emulatorType, vm.vmName],
     );
@@ -452,10 +515,13 @@ export async function deleteMedia(
     if (!row) throw new CatalogNotFoundError('media');
     await connection.execute('DELETE FROM vm_media WHERE id = ?', [mediaId]);
 
-    for (const key of new Set([row.jpeg_key as string, row.thumbnail_key as string])) {
+    const keys = [row.original_key, row.jpeg_key, row.thumbnail_key].filter(
+      (key): key is string => typeof key === 'string',
+    );
+    for (const key of new Set(keys)) {
       const [others] = await connection.execute<RowDataPacket[]>(
-        'SELECT 1 FROM vm_media WHERE jpeg_key = ? OR thumbnail_key = ? LIMIT 1',
-        [key, key],
+        'SELECT 1 FROM vm_media WHERE jpeg_key = ? OR thumbnail_key = ? OR original_key = ? LIMIT 1',
+        [key, key, key],
       );
       if (others.length === 0) await removeFile(key);
     }

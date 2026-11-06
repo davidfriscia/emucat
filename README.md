@@ -3,12 +3,12 @@
 Self-hosted web catalog and local launcher for [86Box](https://86box.net/) and
 [QEMU](https://www.qemu.org/) virtual machines.
 
-**Status: Milestone 3 (VM registration, immutable ZIP masters, direct SSH repository).** There is a first-administrator
+**Status: Milestone 4 (screenshot and media pipeline).** There is a first-administrator
 setup, local sign-in with persistent sessions, a public catalog, and an administration area. A native agent pairs with
 the server, stays connected over an authenticated WebSocket, and reports the VMs it finds. An administrator can register
 one, with **Copy** or **Transfer**: the agent builds a standalone ZIP with a manifest, uploads it directly to an SSH/SFTP
 repository, verifies its SHA-256 there, and publishes it immutably, after which the server records one private master.
-Launching, snapshots, restoring and media upload are **not** implemented yet. See
+Screenshots synchronize by themselves from registered VMs to the server, and stay private until published: see [the media guide](docs/media.md). Launching, snapshots and restoring are **not** implemented yet. See
 [known limitations](#known-limitations).
 
 | Part                                       | Technology                                       |
@@ -159,8 +159,8 @@ After upgrading from an earlier milestone, run `pnpm db:migrate`.
 
 - **Registered VMs cannot be used yet.** A master is stored and cataloged, but downloading, restoring, launching and
   snapshots arrive in later milestones. There is no way to delete a registered VM or remove an archive through the app.
-- **Screenshots are not uploaded.** They are excluded from archives, so a **transfer is refused** while a VM has any, and they
-  stay on the agent's disk after a copy. See [decision 0015](docs/decisions/0015-registration-state-machine.md#transfer).
+- **A transfer of a VM with screenshots can end as a partial success.** Screenshots are not in archives, so the VM is only removed once the
+  server holds every one of them. If that cannot be proved, the master and the local VM both stay, and the removal can be retried.
 - **Archiving is not a filesystem snapshot.** Changes during archiving are detected and fail the operation, and Windows also
   refuses files open for writing, but a VM should be stopped first. See
   [decision 0014](docs/decisions/0014-archive-and-manifest.md).
@@ -176,7 +176,7 @@ After upgrading from an earlier milestone, run `pnpm db:migrate`.
   store yet, so it refuses to pair. It does not install itself as a service, and has no tray icon.
 - **QEMU VMs need a recognized launcher.** A VM whose only script is named otherwise, such as `run.sh`, is reported as
   having no marker. See [the agent guide](docs/agent.md#what-counts-as-a-vm).
-- **No media upload.** The administration pages manage media rows that already exist. Nothing creates them yet.
+- **No media upload from a browser.** Screenshots only come from agents. Orphaned media files are reported at startup and removed by hand.
 - **Single role.** Only administrators exist in practice, and there is no user management.
 - **No password recovery** other than editing the database. See
   [authentication](docs/authentication.md#if-you-lose-the-password).

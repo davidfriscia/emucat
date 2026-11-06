@@ -231,7 +231,7 @@ minutes old, spelled exactly as discovered.
 
 **The agent checks for itself** that the repository is in its own configuration, that the archive key is the one that follows
 from the VM and version, that the VM's directory is an exact immediate child of the base path, not a link, and has a marker, and
-that a transfer would lose no screenshots.
+that a transfer of a VM with screenshots is something it can prove safe. See [the media guide](media.md#transfers).
 
 **A report authorizes nothing.** It counts only from the operation's own agent, on its active connection, with the identities the
 server issued. Stages only move forward, and an agent's report can never set a state the server decides.
@@ -251,11 +251,26 @@ that the agent can register, so a server does not send registration requests to 
 
 Progress reports are thinned out to one per two seconds, and carry only what was measured: no total, no percentage.
 
+### Retrying a blocked removal
+
+A transfer whose removal a screenshot blocked ends as `partial_success`. The agent keeps its journal, in the phase `media_blocked`, which
+it lists in `agent.registration_sync`. If an administrator asks, the server moves the operation back to `cleaning_local` and sends
+`server.registration_retry_cleanup`, which holds the operation and version IDs. The agent then runs every check again, and reports as usual.
+If the message is lost, the next sync that lists the operation as blocked while the server has it in `cleaning_local` brings it again.
+
 ### Repository health
 
 The agent runs the check described in [the repository guide](repositories.md#7-test-the-connection), and reports its settings for
 that repository, without anything secret. The server compares them with its own record, and reports a difference. An answer
 counts only for the check in progress, from the agent it was asked of. A check that gets no answer in two minutes fails.
+
+## Screenshots
+
+Screenshot bytes never travel over this connection, and only a status does: see [the REST routes](api.md#agent-media).
+
+`agent.media_sync_status` is sent after each welcome and at most every 5 seconds after a change. It holds up to 100 VMs, each with counts
+of `pending`, `uploading`, `synchronized` and `failed`, and the latest error, and it says `truncated` if they did not all fit. The server only
+shows it. Nothing decides anything on it, and only the HTTP acknowledgement route can prove that a screenshot is stored.
 
 ## Errors
 

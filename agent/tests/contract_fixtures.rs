@@ -364,6 +364,13 @@ fn protocol_refuses_unknown_messages() {
 }
 
 #[test]
+fn the_media_status_message_round_trips() {
+    let value = wire("agentMediaSyncStatus");
+    let envelope: Envelope = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&envelope).unwrap(), value);
+}
+
+#[test]
 fn registration_messages_match_the_shared_fixtures() {
     let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
     for key in ["registrationServerMessages", "registrationAgentMessages"] {

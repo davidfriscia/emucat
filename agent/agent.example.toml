@@ -68,6 +68,21 @@ executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
 # connect_retries = 2
 # upload_attempts = 2
 
+# Screenshot synchronization. These are the defaults. See docs/media.md. Screenshots go to the EmuCat
+# server over this agent's authenticated connection, and never through a repository.
+# [media]
+# max_concurrent_uploads = 2
+# max_upload_bytes = 67108864
+# # Everything is looked at again this often, in case a filesystem notification was missed.
+# reconcile_interval_seconds = 300
+# # A failed upload waits this long, doubling up to the ceiling, with some randomness.
+# retry_initial_seconds = 5
+# retry_ceiling_seconds = 900
+# # How long a file must stay the same before it counts as finished being written.
+# stability_seconds = 2
+# # How long a transfer waits for its screenshots to reach the server before keeping the local VM.
+# transfer_wait_seconds = 120
+
 [logging]
 # An EnvFilter expression: error, warn, info, debug, trace, or per-module directives.
 level = "info"

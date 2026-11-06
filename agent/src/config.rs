@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 use clap::ValueEnum;
 use serde::Deserialize;
@@ -51,6 +52,36 @@ pub struct RepositoryConfig {
     pub upload_attempts: u32,
 }
 
+/// How screenshots are synchronized. The defaults are deliberately gentle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSettings {
+    pub max_concurrent_uploads: usize,
+    pub max_upload_bytes: u64,
+    /// How often everything is looked at again, in case a filesystem notification was missed.
+    pub reconcile_interval: Duration,
+    /// The first wait after a failed upload, which then doubles.
+    pub retry_initial: Duration,
+    pub retry_ceiling: Duration,
+    /// How long a file must look the same before it counts as finished.
+    pub stability_window: Duration,
+    /// How long a transfer waits for its screenshots to reach the server before keeping the local VM.
+    pub transfer_wait: Duration,
+}
+
+impl Default for MediaSettings {
+    fn default() -> Self {
+        Self {
+            max_concurrent_uploads: 2,
+            max_upload_bytes: 64 * 1024 * 1024,
+            reconcile_interval: Duration::from_secs(300),
+            retry_initial: Duration::from_secs(5),
+            retry_ceiling: Duration::from_secs(900),
+            stability_window: Duration::from_secs(2),
+            transfer_wait: Duration::from_secs(120),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub api_url: Url,
@@ -61,6 +92,7 @@ pub struct Config {
     /// Where archives are built. Defaults to `staging` in the state directory.
     pub staging_dir: Option<PathBuf>,
     pub repositories: BTreeMap<Uuid, RepositoryConfig>,
+    pub media: MediaSettings,
     pub log_level: String,
     pub log_format: LogFormat,
 }
@@ -113,6 +145,61 @@ struct FileConfig {
     storage: StorageSection,
     #[serde(default)]
     repositories: BTreeMap<String, RepositorySection>,
+    #[serde(default)]
+    media: MediaSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaSection {
+    max_concurrent_uploads: Option<u32>,
+    max_upload_bytes: Option<u64>,
+    reconcile_interval_seconds: Option<u64>,
+    retry_initial_seconds: Option<u64>,
+    retry_ceiling_seconds: Option<u64>,
+    stability_seconds: Option<u64>,
+    transfer_wait_seconds: Option<u64>,
+}
+
+fn resolve_media(section: MediaSection) -> Result<MediaSettings, ConfigError> {
+    let defaults = MediaSettings::default();
+    let invalid = |message: &str| ConfigError::Invalid {
+        field: "media",
+        message: message.to_owned(),
+    };
+    let seconds =
+        |value: Option<u64>, fallback: Duration| value.map_or(fallback, Duration::from_secs);
+    let settings = MediaSettings {
+        max_concurrent_uploads: section
+            .max_concurrent_uploads
+            .map_or(defaults.max_concurrent_uploads, |value| value as usize),
+        max_upload_bytes: section
+            .max_upload_bytes
+            .unwrap_or(defaults.max_upload_bytes),
+        reconcile_interval: seconds(
+            section.reconcile_interval_seconds,
+            defaults.reconcile_interval,
+        ),
+        retry_initial: seconds(section.retry_initial_seconds, defaults.retry_initial),
+        retry_ceiling: seconds(section.retry_ceiling_seconds, defaults.retry_ceiling),
+        stability_window: seconds(section.stability_seconds, defaults.stability_window),
+        transfer_wait: seconds(section.transfer_wait_seconds, defaults.transfer_wait),
+    };
+    if !(1..=16).contains(&settings.max_concurrent_uploads) {
+        return Err(invalid("max_concurrent_uploads must be between 1 and 16"));
+    }
+    if settings.max_upload_bytes == 0 {
+        return Err(invalid("max_upload_bytes must be above zero"));
+    }
+    if settings.reconcile_interval < Duration::from_secs(1) {
+        return Err(invalid("reconcile_interval_seconds must be at least 1"));
+    }
+    if settings.retry_initial.is_zero() || settings.retry_ceiling < settings.retry_initial {
+        return Err(invalid(
+            "retry_initial_seconds must be above zero, and no more than retry_ceiling_seconds",
+        ));
+    }
+    Ok(settings)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -474,6 +561,7 @@ impl Config {
                 .map(PathBuf::from)
                 .or(file.state.dir)
                 .or_else(|| default_state_dir(env)),
+            media: resolve_media(file.media)?,
             staging_dir: env("EMUCAT_AGENT_STAGING_DIR")
                 .map(PathBuf::from)
                 .or(file.storage.staging_dir),

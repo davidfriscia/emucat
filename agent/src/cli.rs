@@ -56,6 +56,8 @@ pub enum Command {
     Unpair,
     /// Scan the configured VM directories, read-only, and print the report. Needs no server
     Discover,
+    /// Print what the screenshot queue holds, from the local state directory.
+    MediaStatus,
     /// Test a configured SSH repository directly: connection, host key, key, read, write, publication
     RepositoryCheck {
         /// The repository's UUID, as shown on the Repositories page

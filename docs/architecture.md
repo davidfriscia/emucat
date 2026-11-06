@@ -16,11 +16,9 @@ computers through a local agent.
 ```
 
 The API is the control plane and never carries an archive: there is no route for one. Archive bytes go straight between
-agent and repository, and the API records what the agent verified. Screenshots will take the other path, from the agent over
-HTTPS to the API and server media storage, and never through the archive repository. See
-[decision 0012](decisions/0012-direct-agent-repository.md). The browser, the API, the agent, MariaDB and the repository are
-separate trust boundaries: the browser and the API never receive an SSH credential, and the agent's pairing credential is
-never used for SSH.
+agent and repository, and the API records what the agent verified. Screenshots take the other path, from the agent over authenticated
+HTTP(S) to the API and server media storage, and never through the archive repository. See
+[decision 0012](decisions/0012-direct-agent-repository.md) and [the media guide](media.md).
 
 ## Components
 
@@ -46,7 +44,9 @@ WebSocket endpoint.
 | `src/routes/admin-catalog.ts`       | Administration of existing VMs and media                        |
 | `src/auth/`                         | Passwords, sessions, setup, guards, agent tokens, rate limiting |
 | `src/catalog/repository.ts`         | All catalog SQL                                                 |
-| `src/storage/`                      | Reads and removes media files, safely                           |
+| `src/storage/`                      | Reads, publishes and removes media files, safely                |
+| `src/media/`                        | Decodes and converts screenshots, and stores an upload          |
+| `src/routes/agent-media.ts`         | What an agent uses to synchronize screenshots                   |
 | `src/routes/agent-ws.ts`            | Authenticates agents, and hands sockets to the hub              |
 | `src/routes/agent-pairing.ts`       | What an agent uses before it has a credential                   |
 | `src/routes/admin-agents.ts`        | Agents, pairing decisions, revocation, starting discovery       |
@@ -75,24 +75,26 @@ Rust tests read too.
 specifics are limited to `platform.rs`, `shutdown.rs` and default paths in `config.rs`, and CI also
 builds and tests on Linux so that portability stays honest.
 
-| Module         | Now                                             | Later                    |
-| -------------- | ----------------------------------------------- | ------------------------ |
-| `config`       | File, environment, validation                   |                          |
-| `protocol`     | Envelope and message types                      | More messages            |
-| `connectivity` | The WebSocket, heartbeats, reconnection         | More commands            |
-| `pairing`      | Device-style pairing                            | Credential rotation      |
-| `credentials`  | The credential store interface, and DPAPI       | Keychain, Secret Service |
-| `discovery`    | Read-only scanning of the base paths            |                          |
-| `emulators`    | Types, names, identity, root markers            | Launching                |
-| `filesystem`   | Safe paths                                      | Directory operations     |
-| `archives`     | Version rules, exclusions                       |                          |
-| `repository`   | Provider-independent store interface, safe keys | HTTPS provider           |
-| `sftp`         | The SSH/SFTP provider, with host-key checks     |                          |
-| `packaging`    | Standalone ZIP, manifest, source consistency    | Extraction               |
-| `registration` | Durable operations, journals, recovery          | Snapshots                |
-| `removal`      | Conservative local removal after a transfer     |                          |
-| `media`        | Watched paths, visibility                       | Watcher, upload          |
-| `state`        | State types, local source version               | Fuller persistence       |
+| Module         | Now                                                | Later                    |
+| -------------- | -------------------------------------------------- | ------------------------ |
+| `config`       | File, environment, validation                      |                          |
+| `protocol`     | Envelope and message types                         | More messages            |
+| `connectivity` | The WebSocket, heartbeats, reconnection            | More commands            |
+| `pairing`      | Device-style pairing                               | Credential rotation      |
+| `credentials`  | The credential store interface, and DPAPI          | Keychain, Secret Service |
+| `discovery`    | Read-only scanning of the base paths               |                          |
+| `emulators`    | Types, names, identity, root markers               | Launching                |
+| `filesystem`   | Safe paths                                         | Directory operations     |
+| `archives`     | Version rules, exclusions                          |                          |
+| `repository`   | Provider-independent store interface, safe keys    | HTTPS provider           |
+| `sftp`         | The SSH/SFTP provider, with host-key checks        |                          |
+| `packaging`    | Standalone ZIP, manifest, source consistency       | Extraction               |
+| `registration` | Durable operations, journals, recovery             | Snapshots                |
+| `removal`      | Conservative local removal after a transfer        |                          |
+| `media`        | Watched paths, safe scanning and reading           | The watcher              |
+| `media_queue`  | The durable record of what has to reach the server | Uploading                |
+| `media_sync`   | Watcher, reconciliation, upload to the API         | Archive transfers        |
+| `state`        | State types, local source version                  | Fuller persistence       |
 
 ## Principles
 

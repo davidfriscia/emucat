@@ -103,3 +103,31 @@ describe('registration messages', () => {
     expect(JSON.stringify(result).length).toBeLessThan(1024);
   });
 });
+
+describe('screenshot messages', () => {
+  it('accepts a status report, and refuses one that says too much', () => {
+    expect(agentMessageSchema.safeParse(wire.agentMediaSyncStatus).success).toBe(true);
+    const status = wire.agentMediaSyncStatus as { payload: { vms: unknown[] } };
+    const many = {
+      ...status,
+      payload: { ...status.payload, vms: Array.from({ length: 101 }, () => status.payload.vms[0]) },
+    };
+    expect(agentMessageSchema.safeParse(many).success).toBe(false);
+  });
+
+  it('asks for a retried removal with identities only', () => {
+    const retry = {
+      protocolVersion: 1,
+      id: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6020',
+      sentAt: '2026-01-31T15:30:00Z',
+      type: 'server.registration_retry_cleanup',
+      payload: {
+        operationId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6100',
+        versionId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101',
+      },
+    };
+    expect(serverMessageSchema.safeParse(retry).success).toBe(true);
+    const withPath = { ...retry, payload: { ...retry.payload, path: 'C:/Windows' } };
+    expect(serverMessageSchema.safeParse(withPath).success).toBe(false);
+  });
+});

@@ -92,6 +92,7 @@ Everything a copy does, and then, on the agent, in this order:
    the same volume and file ID that was recorded before archiving. A replaced directory with the same contents is refused.
 4. Nothing may be excluded from the archive, which today means screenshots. **Since screenshots are not uploaded yet, a
    transfer is refused up front if any exist,** and again here for any taken in the meantime. They are never deleted.
+   _Superseded by [0020](0020-transfer-media-preservation.md): they are allowed once the server holds every one of them._
 5. The tree must match the manifest exactly, with no extra files, and every file is hashed again. This takes about as long as
    reading the VM, and is the point: no file can be lost to something that happened after archiving.
 6. The directory is renamed to `.emucat-removing-{operation_id}` in the same base path. On Windows that fails if a file is

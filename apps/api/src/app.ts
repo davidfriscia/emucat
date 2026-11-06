@@ -65,7 +65,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         );
         hub.setOperations(registrations);
         await api.register(async (scope) =>
-          registerBrowserRoutes(scope, browser, hub, registrations),
+          registerBrowserRoutes(scope, browser, hub, registrations, dependencies.authenticateAgent),
         );
       }
     },

@@ -12,6 +12,7 @@ is committed.
 | `run`                                     | Connects, and stays connected until stopped. The default           |
 | `pair`, `unpair`                          | Pairs with a server, or removes the local credential               |
 | `discover`                                | Scans the configured directories, read-only, and prints the report |
+| `media-status`                            | Prints what the screenshot queue holds, without connecting         |
 | `repository-check --repository UUID`      | Tests a configured repository directly                             |
 | `repository-passphrase --repository UUID` | Stores the passphrase of a repository's key, protected with DPAPI  |
 | `check-config`, `info`                    | Validates the configuration, or prints versions and default paths  |
@@ -166,12 +167,12 @@ passes through the server, and a registration carries on while the server is awa
 |              | Copy               | Transfer                                                     |
 | ------------ | ------------------ | ------------------------------------------------------------ |
 | The local VM | Stays, unchanged   | Removed, once the master is committed and every check passed |
-| Screenshots  | Stay, not archived | The transfer is **refused** while any exist                  |
+| Screenshots  | Stay, not archived | Removed only once the server holds every one of them         |
 | Confirmation | One click          | An explicit checkbox                                         |
 
 **What a transfer checks before deleting anything:** that the server committed this exact version, that the archive still reads back
 correctly from the repository, that the directory is the same one that was archived, that every file still has the same hash, that no
-file exists that is not in the archive, that no screenshot would be lost, and that nothing is in use. If any of that fails, the VM stays, the
+file exists that is not in the archive, that the server holds every screenshot, and that nothing is in use. If any of that fails, the VM stays, the
 master stays, and the operation is a **partial success** that says what to do. See
 [decision 0015](decisions/0015-registration-state-machine.md#transfer).
 
@@ -184,6 +185,11 @@ QEMU. A symlink, junction or other reparse point inside a VM fails the archive, 
 Restart whichever side stopped. An unfinished registration fails with `agent_restarted`, and you can start again. A published one
 continues, and is committed once the server is back. Nothing is deleted by a restart alone. Local journals are in `registrations` in the
 state directory, and hold no secrets and no VM contents.
+
+## Screenshots
+
+While it runs, the agent keeps the screenshots of the VMs it registered on the server, whether or not they are running. It needs nothing
+but the `[media]` section's defaults. `emucat-agent media-status` shows what its queue holds. See [the media guide](media.md).
 
 ## Troubleshooting
 
@@ -209,19 +215,19 @@ state directory, and hold no secrets and no VM contents.
 
 ### Registration
 
-| What you see                      | What it means                                                                              | What to do                                                                    |
-| --------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
-| `source_in_use`, `cleanup_in_use` | Another program has a file open for writing, probably the emulator                         | Stop the VM, and try again                                                    |
-| `source_changed`                  | A file changed while it was being read                                                     | Stop whatever is writing, and try again                                       |
-| `source_unsafe`                   | The VM holds a symlink, junction or OneDrive placeholder                                   | Replace it with real files, or make the files available offline               |
-| `source_invalid`                  | No marker, or a name an archive cannot hold, such as `.emucat-manifest.json`               | Fix what the message says, and run discovery again                            |
-| `transfer_blocked_media`          | The VM has screenshots, which are not archived                                             | Move them elsewhere, or use Copy                                              |
-| `insufficient_staging_space`      | The staging disk may be too small. This assumes no compression at all                      | Free up space, or set `storage.staging_dir`                                   |
-| `discovery_stale`                 | The report is too old, or the agent reconnected since                                      | Run discovery again                                                           |
-| `agent_cannot_register`           | The agent is older than the server                                                         | Update the agent                                                              |
-| Stuck in **Recording the master** | The server could not commit. The archive is safe, and the agent keeps repeating its report | Check the database. **Retry recording it** also works with the agent away     |
-| **Registered, with a problem**    | The master is safe, but the local files were kept                                          | Follow the guidance shown. If you do not need the files, delete them yourself |
-| A `.emucat-removing-…` directory  | A removal stopped partway. Discovery reports it as skipped                                 | Its archive is verified in the repository, so it can be deleted by hand       |
+| What you see                      | What it means                                                                              | What to do                                                                                        |
+| --------------------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `source_in_use`, `cleanup_in_use` | Another program has a file open for writing, probably the emulator                         | Stop the VM, and try again                                                                        |
+| `source_changed`                  | A file changed while it was being read                                                     | Stop whatever is writing, and try again                                                           |
+| `source_unsafe`                   | The VM holds a symlink, junction or OneDrive placeholder                                   | Replace it with real files, or make the files available offline                                   |
+| `source_invalid`                  | No marker, or a name an archive cannot hold, such as `.emucat-manifest.json`               | Fix what the message says, and run discovery again                                                |
+| `transfer_blocked_media`          | The server does not hold every screenshot, or one cannot be uploaded. The message names it | See the VM's Media page, then choose **Retry removal**. See the [media guide](media.md#transfers) |
+| `insufficient_staging_space`      | The staging disk may be too small. This assumes no compression at all                      | Free up space, or set `storage.staging_dir`                                                       |
+| `discovery_stale`                 | The report is too old, or the agent reconnected since                                      | Run discovery again                                                                               |
+| `agent_cannot_register`           | The agent is older than the server                                                         | Update the agent                                                                                  |
+| Stuck in **Recording the master** | The server could not commit. The archive is safe, and the agent keeps repeating its report | Check the database. **Retry recording it** also works with the agent away                         |
+| **Registered, with a problem**    | The master is safe, but the local files were kept                                          | Follow the guidance shown. If you do not need the files, delete them yourself                     |
+| A `.emucat-removing-…` directory  | A removal stopped partway. Discovery reports it as skipped                                 | Its archive is verified in the repository, so it can be deleted by hand                           |
 
 Problems reaching the repository are in the [repository guide](repositories.md#troubleshooting). The agent's log says more, and
 `--log-level debug` adds detail. It never contains a private key, a passphrase or a credential.

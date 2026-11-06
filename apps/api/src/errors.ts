@@ -44,7 +44,7 @@ export function registerErrorHandling(app: FastifyInstance): void {
     }
 
     const status = error.statusCode ?? 500;
-    if (status >= 500) {
+    if (status >= 500 && !((error as Error) instanceof ApiError)) {
       // The cause goes to the log only. Responses never expose internal details.
       request.log.error({ err: error }, 'Request failed');
       return reply.status(status).send(errorBody(request, 'internal_error', 'Internal error'));

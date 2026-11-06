@@ -9,7 +9,12 @@ import {
 } from '@emucat/contracts';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { cancelRegistration, reconcileRegistration, startRegistration } from '../api';
+import {
+  cancelRegistration,
+  reconcileRegistration,
+  retryRegistrationCleanup,
+  startRegistration,
+} from '../api';
 import { formatBytes, formatTime } from './Agents';
 import { FormError } from './States';
 
@@ -211,6 +216,17 @@ export function RegistrationCard({
               Cancel
             </button>
           ) : null}
+          {operation.state === 'partial_success' &&
+          operation.error?.code === 'transfer_blocked_media' ? (
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-secondary theme-button"
+              disabled={busy || !operation.agentOnline}
+              onClick={() => void act(retryRegistrationCleanup)}
+            >
+              Retry removal
+            </button>
+          ) : null}
           {operation.state === 'committing' ? (
             <button
               type="button"
@@ -333,8 +349,9 @@ export function RegistrationDialog({
               {isTransfer ? (
                 <div className="alert alert-danger" role="alert">
                   <strong>This deletes the local VM.</strong> It is removed from the agent’s disk
-                  once the archive is verified and recorded. If the VM has screenshots, the transfer
-                  is refused, because screenshots are not in the archive.
+                  once the archive is verified and recorded. The VM’s screenshots are not in the
+                  archive, so it is only removed once the server confirms that it holds every one of
+                  them. Otherwise it is kept, and the removal can be retried later.
                   <div className="form-check mt-2">
                     <input
                       id="transfer-understood"

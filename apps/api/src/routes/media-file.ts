@@ -12,6 +12,8 @@ export async function sendMediaFile(
   storage: MediaStorage,
   key: string | null,
   cacheControl: string,
+  /** How to present an uploaded original, which is served as a download. JPEG by default. */
+  original?: { mimeType: string; downloadName: string },
 ): Promise<FastifyReply> {
   const notFound = () => new ApiError(404, 'media_not_found', 'Media not found');
   if (key === null) throw notFound();
@@ -24,8 +26,11 @@ export async function sendMediaFile(
     throw notFound();
   }
   if (!file) throw notFound();
+  if (original) {
+    reply.header('content-disposition', `attachment; filename="${original.downloadName}"`);
+  }
   return reply
-    .type('image/jpeg')
+    .type(original?.mimeType ?? 'image/jpeg')
     .header('content-length', file.sizeBytes)
     .header('cache-control', cacheControl)
     .send(file.stream);

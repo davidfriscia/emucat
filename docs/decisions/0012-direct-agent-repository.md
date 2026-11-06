@@ -14,7 +14,7 @@ Browser ─► API ─► MariaDB         commands, authorization, metadata
             ▼
           Agent ─────────────► SSH repository     archive bytes, directly
             │
-            └─► API ─► media storage              screenshots, in a future milestone
+            └─► API ─► media storage              screenshots
 ```
 
 **So the claim about integrity is the agent's.** The server records what the agent reports having verified. It has
@@ -42,5 +42,5 @@ hashed, and only then become visible at `archives/{emulator}/{vm}/{version_id}.z
 staging, so a final key can only ever be written by `publish`.
 
 **Screenshots stay on their own path:** agent to API, over authenticated HTTPS, to server media storage. They are not in
-archives, and never go through this interface. That pipeline is not implemented yet, which has one consequence: see
-[0015](0015-registration-state-machine.md#transfer).
+archives, and never go through this interface. See [0018](0018-agent-media-upload.md) and
+[0020](0020-transfer-media-preservation.md).

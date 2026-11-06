@@ -5,6 +5,7 @@ import {
   discoveryRequestPayloadSchema,
   discoveryResultPayloadSchema,
 } from './discovery.js';
+import { mediaSyncStatusPayloadSchema } from './media.js';
 import { architectureSchema, platformSchema } from './platform.js';
 import {
   registrationAckPayloadSchema,
@@ -14,6 +15,7 @@ import {
   registrationProgressPayloadSchema,
   registrationRequestPayloadSchema,
   registrationResultPayloadSchema,
+  registrationRetryCleanupPayloadSchema,
   registrationSyncPayloadSchema,
   repositoryHealthRequestPayloadSchema,
   repositoryHealthResultPayloadSchema,
@@ -117,6 +119,10 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.repository_health_result'),
     payload: repositoryHealthResultPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.media_sync_status'),
+    payload: mediaSyncStatusPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -147,6 +153,10 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.repository_health_request'),
     payload: repositoryHealthRequestPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.registration_retry_cleanup'),
+    payload: registrationRetryCleanupPayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

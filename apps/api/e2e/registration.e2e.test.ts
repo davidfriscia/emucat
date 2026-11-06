@@ -592,30 +592,37 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
   );
 
   it(
-    'blocks a transfer when screenshots would be lost, and archives none in a copy',
+    'keeps a VM whose screenshot cannot be preserved, and archives none in a copy',
     async () => {
       const root = join(box86, 'Has Media');
       await mkdir(join(root, 'screenshots'), { recursive: true });
       await writeFile(join(root, '86box.cfg'), 'machine = x\n');
       await writeFile(join(root, 'disk.img'), randomBytes(4096));
+      // Not an image, so the server can never acknowledge it.
       await writeFile(join(root, 'screenshots', 'one.png'), 'a screenshot');
       const before = await fingerprint(root);
 
+      // Since Milestone 4 the proof comes after the commit, so the master exists and the VM stays.
       const blocked = await register('Has Media', '86box', 'transfer');
-      const failed = await finished(blocked.id);
-      expect(failed.state, JSON.stringify(failed)).toBe('failed');
-      expect(failed.error?.code).toBe('transfer_blocked_media');
-      expect(failed.recovery).toMatch(/Copy/);
+      const partial = await finished(blocked.id);
+      expect(partial.state, JSON.stringify(partial)).toBe('partial_success');
+      expect(partial.error?.code).toBe('transfer_blocked_media');
+      expect(partial.recovery).toMatch(/Copy/);
       expect(await fingerprint(root)).toEqual(before);
-      expect(await mastersOf('Has Media')).toEqual([]);
+      expect(await mastersOf('Has Media')).toHaveLength(1);
 
-      const copied = await register('Has Media', '86box', 'copy');
+      const other = join(box86, 'Has Media Too');
+      await mkdir(join(other, 'screenshots'), { recursive: true });
+      await writeFile(join(other, '86box.cfg'), 'machine = x\n');
+      await writeFile(join(other, 'screenshots', 'one.png'), 'a screenshot');
+      const otherBefore = await fingerprint(other);
+      const copied = await register('Has Media Too', '86box', 'copy');
       const done = await finished(copied.id);
       expect(done.state, JSON.stringify(done)).toBe('succeeded');
       const listing = sftp.exec(`unzip -l '/srv/sftp/repo/${done.archiveKey}'`);
       expect(listing).toContain('86box.cfg');
       expect(listing).not.toMatch(/screenshots/i);
-      expect(await fingerprint(root)).toEqual(before);
+      expect(await fingerprint(other)).toEqual(otherBefore);
     },
     LONG,
   );

@@ -163,3 +163,5 @@ A future HTTPS provider is planned for repositories without SSH. It would use th
 | Cannot load the private key    | Wrong path, or a wrong or missing passphrase                   | Check `private_key_path`, and run `repository-passphrase` again         |
 
 For problems with a VM's own files, and with Copy or Transfer, see the [agent guide](agent.md#registering-vms).
+
+Screenshots never go through a repository. See [the media guide](media.md).

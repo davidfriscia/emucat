@@ -19,8 +19,9 @@ clap = { version = "4.6", features = ["derive"] }
 fastrand = "2.5"
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+notify = "8.2"
 # The operating system's TLS and trust store: SChannel on Windows. See decision 0009.
-reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "stream"] }
 russh = { version = "0.63.1", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "3.0.1"
 serde = { version = "1.0", features = ["derive"] }

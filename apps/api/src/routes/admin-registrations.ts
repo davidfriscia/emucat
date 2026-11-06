@@ -115,6 +115,18 @@ export function registerAdminRegistrationRoutes(
         },
       );
 
+      api.post(
+        '/registrations/:operationId/retry-cleanup',
+        { schema: { params: registrationPathParamsSchema } },
+        async (request, reply): Promise<RegistrationOperation> => {
+          const { operationId } = request.params as z.infer<typeof registrationPathParamsSchema>;
+          const operation = await registrations.retryCleanup(operationId);
+          request.log.info({ operationId }, 'Retrying the removal of a local VM');
+          reply.status(202);
+          return operation;
+        },
+      );
+
       api.get('/repositories', async (): Promise<RepositoryListResponse> => {
         return { repositories: await listRepositories(pool, presence) };
       });

@@ -10,6 +10,7 @@ import { ConfigError, loadConfig, type Config } from './config.js';
 import { loadMigrations } from './db/migrate.js';
 import { createPool } from './db/pool.js';
 import { loadDotEnv } from './env.js';
+import { maintainMediaStorage } from './media/uploads.js';
 import { databaseReadiness } from './readiness.js';
 import { DEFAULT_PAIRING_RATE_LIMITS } from './routes/agent-pairing.js';
 import { announceSetupToken, DEFAULT_AUTH_RATE_LIMITS } from './routes/auth.js';
@@ -34,6 +35,7 @@ async function main(): Promise<void> {
   const browser: BrowserDependencies = {
     pool,
     storage: fileMediaStorage(config.storagePath),
+    media: config.media,
     passwords: createPasswordHasher(),
     setupToken: createSetupToken(config.setupToken),
     limiter: new RateLimiter(),
@@ -88,6 +90,11 @@ async function main(): Promise<void> {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK'] as const) {
     process.on(signal, shutdown);
   }
+
+  // Housekeeping only, so it must not stop the API from starting if the database is not up yet.
+  await maintainMediaStorage(pool, config.storagePath, app.log).catch((error: unknown) => {
+    app.log.warn({ err: error }, 'Cannot check the media storage');
+  });
 
   await app.listen({ host: config.host, port: config.port });
 }

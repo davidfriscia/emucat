@@ -1,6 +1,7 @@
 import {
   adminCatalogResponseSchema,
   adminMediaListResponseSchema,
+  adminMediaSyncResponseSchema,
   adminSummaryResponseSchema,
   adminVmApiPath,
   adminVmDetailSchema,
@@ -28,6 +29,7 @@ import {
   setupStatusResponseSchema,
   type AdminCatalogResponse,
   type AdminMediaListResponse,
+  type AdminMediaSyncResponse,
   type AdminSummaryResponse,
   type AdminVmDetail,
   type AgentListResponse,
@@ -318,6 +320,15 @@ export function fetchVmMedia(
   });
 }
 
+export function fetchVmMediaSync(
+  vm: VmIdentity,
+  signal: AbortSignal,
+): Promise<AdminMediaSyncResponse> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/media-sync`, adminMediaSyncResponseSchema, {
+    signal,
+  });
+}
+
 export function selectMainMedia(vm: VmIdentity, mediaId: string): Promise<AdminMediaListResponse> {
   return requestJson(`${relative(adminVmApiPath(vm))}/main-media`, adminMediaListResponseSchema, {
     method: 'PUT',
@@ -453,6 +464,14 @@ export function startRegistration(
 export function cancelRegistration(operationId: string): Promise<RegistrationOperation> {
   return requestJson(
     `/admin/registrations/${encodeURIComponent(operationId)}/cancel`,
+    registrationOperationSchema,
+    { method: 'POST' },
+  );
+}
+
+export function retryRegistrationCleanup(operationId: string): Promise<RegistrationOperation> {
+  return requestJson(
+    `/admin/registrations/${encodeURIComponent(operationId)}/retry-cleanup`,
     registrationOperationSchema,
     { method: 'POST' },
   );

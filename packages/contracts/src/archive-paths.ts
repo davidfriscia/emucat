@@ -34,11 +34,23 @@ export function isExcludedFromArchive(emulatorType: EmulatorType, path: string):
   return emulatorType === '86box' ? isInScreenshotsDirectory(segments) : isRootPpm(segments);
 }
 
-/** Whether a VM-relative file is a media file the agent should pick up. */
+/** File name endings the agent treats as screenshots in an 86Box `screenshots` tree, ignoring case. */
+export const SCREENSHOT_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.bmp', '.ppm'] as const;
+
+const hasScreenshotExtension = (name: string): boolean => {
+  const lower = name.toLowerCase();
+  return SCREENSHOT_EXTENSIONS.some((extension) => lower.endsWith(extension));
+};
+
+/**
+ * Whether a VM-relative file is a media file the agent should pick up: a supported image anywhere in an
+ * 86Box `screenshots` tree, or a `.ppm` file in a QEMU VM's root. Everything else in the `screenshots`
+ * tree is still excluded from archives, which is why a transfer treats it as unpreserved.
+ */
 export function isWatchedMediaPath(emulatorType: EmulatorType, path: string): boolean {
   const segments = parseVmRelativePath(path);
   if (!segments) return false;
   return emulatorType === '86box'
-    ? isInScreenshotsDirectory(segments) && segments.length === 2
+    ? isInScreenshotsDirectory(segments) && hasScreenshotExtension(segments.at(-1) ?? '')
     : isRootPpm(segments);
 }

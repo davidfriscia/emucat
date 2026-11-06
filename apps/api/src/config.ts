@@ -1,6 +1,7 @@
 import { isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { REPOSITORY_ROOT } from './env.js';
+import { DEFAULT_MEDIA_POLICY, type MediaPolicy } from './media/uploads.js';
 
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
@@ -21,6 +22,36 @@ const envSchema = z.object({
   // Required, with no default: there are no built-in credentials.
   DB_PASSWORD: z.string().min(1),
   STORAGE_PATH: z.string().min(1).default('var/storage'),
+  MEDIA_MAX_UPLOAD_BYTES: z.coerce
+    .number()
+    .int()
+    .min(1024)
+    .max(1024 * 1024 * 1024)
+    .default(DEFAULT_MEDIA_POLICY.maxUploadBytes),
+  MEDIA_MAX_PIXELS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(268_402_689)
+    .default(DEFAULT_MEDIA_POLICY.maxPixels),
+  MEDIA_MAX_DIMENSION: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(65_535)
+    .default(DEFAULT_MEDIA_POLICY.maxDimension),
+  MEDIA_MAX_CONCURRENT_UPLOADS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(64)
+    .default(DEFAULT_MEDIA_POLICY.maxConcurrentUploads),
+  MEDIA_PROCESSING_TIMEOUT_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(600)
+    .default(DEFAULT_MEDIA_POLICY.processingTimeoutSeconds),
   NODE_ENV: z.string().optional(),
   // Defaults to true when NODE_ENV is production.
   COOKIE_SECURE: emptyAsUndefined(booleanFlag.optional()),
@@ -47,6 +78,7 @@ export interface Config {
     password: string;
   };
   storagePath: string;
+  media: MediaPolicy;
   cookieSecure: boolean;
   sessionIdleTtlSeconds: number;
   sessionAbsoluteTtlSeconds: number;
@@ -84,6 +116,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     storagePath: isAbsolute(values.STORAGE_PATH)
       ? values.STORAGE_PATH
       : resolve(REPOSITORY_ROOT, values.STORAGE_PATH),
+    media: {
+      ...DEFAULT_MEDIA_POLICY,
+      maxUploadBytes: values.MEDIA_MAX_UPLOAD_BYTES,
+      maxPixels: values.MEDIA_MAX_PIXELS,
+      maxDimension: values.MEDIA_MAX_DIMENSION,
+      maxConcurrentUploads: values.MEDIA_MAX_CONCURRENT_UPLOADS,
+      processingTimeoutSeconds: values.MEDIA_PROCESSING_TIMEOUT_SECONDS,
+    },
     cookieSecure: values.COOKIE_SECURE ?? values.NODE_ENV === 'production',
     sessionIdleTtlSeconds: values.SESSION_IDLE_TTL_HOURS * 3600,
     sessionAbsoluteTtlSeconds: values.SESSION_ABSOLUTE_TTL_HOURS * 3600,

@@ -21,13 +21,24 @@
     { "emulator": "86box", "path": "screenshots/shot.png", "excluded": true, "watched": true },
     { "emulator": "86box", "path": "screenshots\\shot.png", "excluded": true, "watched": true },
     { "emulator": "86box", "path": "Screenshots/shot.png", "excluded": true, "watched": true },
-    { "emulator": "86box", "path": "screenshots/old/shot.png", "excluded": true, "watched": false },
+    { "emulator": "86box", "path": "screenshots/old/shot.png", "excluded": true, "watched": true },
+    {
+      "emulator": "86box",
+      "path": "screenshots/a/b/c/SHOT.JPEG",
+      "excluded": true,
+      "watched": true
+    },
+    { "emulator": "86box", "path": "screenshots/shot.bmp", "excluded": true, "watched": true },
+    { "emulator": "86box", "path": "screenshots/notes.txt", "excluded": true, "watched": false },
+    { "emulator": "86box", "path": "screenshots/shot.gif", "excluded": true, "watched": false },
     { "emulator": "86box", "path": "screenshots", "excluded": false, "watched": false },
     { "emulator": "86box", "path": "disks/screenshots/a.png", "excluded": false, "watched": false },
     { "emulator": "qemu", "path": "run-win.cmd", "excluded": false, "watched": false },
     { "emulator": "qemu", "path": "shot.ppm", "excluded": true, "watched": true },
     { "emulator": "qemu", "path": "SHOT.PPM", "excluded": true, "watched": true },
     { "emulator": "qemu", "path": "disks/shot.ppm", "excluded": false, "watched": false },
+    { "emulator": "qemu", "path": "shot.png", "excluded": false, "watched": false },
+    { "emulator": "qemu", "path": "shot.bmp", "excluded": false, "watched": false },
     { "emulator": "qemu", "path": "screenshots/shot.png", "excluded": false, "watched": false }
   ]
 }

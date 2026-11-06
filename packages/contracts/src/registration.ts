@@ -106,7 +106,7 @@ const RECOVERY: Partial<Record<string, string>> = {
     'Free up space on the staging disk, or point storage.staging_dir at a larger one.',
   staging_failed: 'Check the agent’s staging directory, and try again.',
   transfer_blocked_media:
-    'Screenshots are not in the archive, and cannot be uploaded yet. Move them out of the VM directory, or use Copy, which keeps them.',
+    'Screenshots are not in the archive, and the server could not confirm that it holds all of them, so the local VM was kept. Check the VM’s Media page, and choose Retry removal once it is synchronized. A file that is not a supported image has to be moved out of the screenshots directory first. Copy never removes anything.',
   repository_not_configured:
     'Add this repository’s UUID to the agent’s configuration, and restart the agent.',
   repository_unreachable: 'Check that the SSH server is running and reachable, and try again.',
@@ -197,12 +197,25 @@ export const repositoryHealthRequestPayloadSchema = z.strictObject({
 });
 export type RepositoryHealthRequestPayload = z.infer<typeof repositoryHealthRequestPayloadSchema>;
 
+/**
+ * An administrator asks to try removing a local VM again, after its removal was blocked by a screenshot
+ * that had not been preserved. The agent checks everything again, as it did the first time.
+ */
+export const registrationRetryCleanupPayloadSchema = z.strictObject({
+  operationId: z.uuid(),
+  versionId: z.uuid(),
+});
+export type RegistrationRetryCleanupPayload = z.infer<typeof registrationRetryCleanupPayloadSchema>;
+
 export const REGISTRATION_SYNC_PHASES = [
   'running',
   'publishing',
   'published',
   'cleaning',
   'reported',
+  // A transfer's master exists, its removal was blocked by a screenshot, and the agent is keeping what
+  // it needs to try again if an administrator asks.
+  'media_blocked',
 ] as const;
 
 /** What an agent has in its journals. Sent after each welcome, and shows that it can register VMs. */

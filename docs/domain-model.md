@@ -114,35 +114,18 @@ declared for future use, with no behavior yet:
 
 Media are independent of VM archives and versions.
 
-| Emulator | Watched                          | Excluded from archives              |
-| -------- | -------------------------------- | ----------------------------------- |
-| `86box`  | Files directly in `screenshots/` | The entire `screenshots/` directory |
-| `qemu`   | `.ppm` files in the VM root      | `.ppm` files in the VM root         |
+| Emulator | Watched                                              | Excluded from archives              |
+| -------- | ---------------------------------------------------- | ----------------------------------- |
+| `86box`  | Supported images anywhere in the `screenshots/` tree | The entire `screenshots/` directory |
+| `qemu`   | `.ppm` files in the VM root                          | `.ppm` files in the VM root         |
 
 Files elsewhere, such as a `.ppm` in a subdirectory, are ordinary VM content. Matching ignores case, so
 a media file cannot end up in an archive because of how a host spelled its name.
 
-Planned flow: the agent uploads the original over authenticated HTTP POST. The backend validates it,
-verifies its SHA-256, converts it to a full-resolution JPG, generates a JPG thumbnail, stores the files
-under `STORAGE_PATH`, and stores metadata in MariaDB.
-
-Rules:
-
-- **Deduplication** is by VM identity and original hash. The same image on two VMs is two items, each
-  with its own visibility.
-- **Private by default.** Publishing is explicit.
-- **At most one main item per VM**, belonging to that VM.
-- **Public cards** show the main item only while it is published. Otherwise they show a placeholder.
-- **No fallback.** Deleting or privatizing the main item results in the placeholder. Another published
-  item is never promoted, because that would expose something nobody chose to show on the card.
-- **Private media can be selected as main.** The public still sees the placeholder until it is published.
-- **Deleting an item removes its files too.** See
-  [decision 0008](decisions/0008-public-reads-and-media-lifecycle.md).
-
-A VM's detail page may show its other published items in a gallery, but they never take the main image's place.
-
-`resolvePublicCardImage` implements this in code, and the `public_catalog_card_media` view implements
-it in SQL.
+The agent uploads the original over authenticated HTTP(S). The server validates it from its bytes, keeps it unchanged, and makes a
+full-resolution JPEG and a thumbnail with its longest side at about 400 pixels. A row in `vm_media` holds the original's hash,
+filename, type, size, dimensions and the storage keys of all three, and is unique per VM and content hash. Files never live in the
+database, and a screenshot can never create a VM. See [the media guide](media.md).
 
 ## Repositories
 

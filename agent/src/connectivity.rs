@@ -26,6 +26,7 @@ use crate::config::EmulatorConfig;
 use crate::credentials::Secret;
 use crate::discovery::{self, ScanLimits};
 use crate::emulators::EmulatorType;
+use crate::media_sync::MediaSync;
 use crate::platform::Platform;
 use crate::protocol::{
     AGENT_MAX_MESSAGE_BYTES, AgentHello, Decoded, DiscoveryError, DiscoveryErrorCode,
@@ -34,6 +35,8 @@ use crate::protocol::{
 use crate::registration::AgentOperations;
 
 pub const AGENT_WS_PATH: &str = "/api/v1/agent/ws";
+/// How often a change in screenshot synchronization is reported. Far below the server's message limit.
+const MEDIA_STATUS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// WebSocket address of the agent endpoint for a server's base URL. A base path is preserved, so
 /// that a server behind a reverse proxy prefix works.
@@ -160,6 +163,8 @@ pub struct ConnectionSettings {
     pub backoff: Backoff,
     /// Registration and repository work. Without it, this agent only discovers.
     pub operations: Option<Arc<AgentOperations>>,
+    /// Screenshot synchronization, which only needs to hear about the connection and to report.
+    pub media: Option<Arc<MediaSync>>,
 }
 
 impl ConnectionSettings {
@@ -181,6 +186,7 @@ impl ConnectionSettings {
             welcome_timeout: Duration::from_secs(15),
             backoff: Backoff::default(),
             operations: None,
+            media: None,
         }
     }
 }
@@ -355,6 +361,7 @@ async fn run_session<F: Future<Output = ()>>(
     let mut heartbeat = tokio::time::interval(interval);
     let mut last_ack = Instant::now();
     let mut unanswered_since: Option<Instant> = None;
+    let mut media_status = tokio::time::interval(MEDIA_STATUS_INTERVAL);
 
     loop {
         let welcome_wait = tokio::time::sleep_until(welcome_deadline.into());
@@ -402,6 +409,14 @@ async fn run_session<F: Future<Output = ()>>(
                 unanswered_since.get_or_insert_with(Instant::now);
                 if let Some(operations) = &settings.operations {
                     if let Err(error) = send_all(&mut sink, operations.pending_reports()).await {
+                        return SessionEnd::Lost(error);
+                    }
+                }
+            }
+            _ = media_status.tick(), if welcomed && settings.media.is_some() => {
+                let message = settings.media.as_ref().and_then(|media| media.status_message());
+                if let Some(message) = message {
+                    if let Err(error) = send_all(&mut sink, vec![message]).await {
                         return SessionEnd::Lost(error);
                     }
                 }
@@ -511,6 +526,9 @@ async fn run_session<F: Future<Output = ()>>(
                                     return SessionEnd::Lost(error);
                                 }
                             }
+                            if let Some(media) = &settings.media {
+                                media.on_connected();
+                            }
                         }
                         Message::ServerHeartbeatAck(_) => {
                             last_ack = Instant::now();
@@ -555,7 +573,8 @@ async fn run_session<F: Future<Output = ()>>(
                         message @ (Message::ServerRegistrationRequest(_)
                         | Message::ServerRegistrationCancel(_)
                         | Message::ServerRegistrationAck(_)
-                        | Message::ServerRepositoryHealthRequest(_)) => {
+                        | Message::ServerRepositoryHealthRequest(_)
+                        | Message::ServerRegistrationRetryCleanup(_)) => {
                             match &settings.operations {
                                 Some(operations) if welcomed => operations.handle(message),
                                 _ => tracing::warn!("Ignored a repository command"),

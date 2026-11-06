@@ -252,6 +252,64 @@
   overflow-wrap: anywhere;
 }
 
+.media-thumbnail-button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.media-thumbnail-button:focus-visible {
+  outline: 2px solid var(--bs-focus-ring-color, currentColor);
+  outline-offset: -2px;
+}
+
+.media-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1055;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1rem;
+  background: rgb(0 0 0 / 85%);
+  color: #fff;
+}
+
+.media-preview-frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.media-preview-frame img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.media-sync-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+
+.media-sync-counts dt {
+  display: inline;
+  font-weight: 400;
+}
+
+.media-sync-counts dd {
+  display: inline;
+  margin: 0 0 0 0.25rem;
+  font-weight: 600;
+}
+
 /* Forms and settings */
 .narrow-page {
   max-width: 28rem;

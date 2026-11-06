@@ -94,12 +94,44 @@ Requires a session with the `admin` role. Responses are `Cache-Control: no-store
 | `DELETE /admin/vms/:emulatorType/:vmName/main-media`                  | Clears the selection                                 |
 | `PUT /admin/vms/:emulatorType/:vmName/media/:mediaId/visibility`      | `{ visibility: "private" \| "published" }`           |
 | `DELETE /admin/vms/:emulatorType/:vmName/media/:mediaId`              | Deletes the item and its files                       |
+| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId`                 | One item in full, with its hash, type and agent      |
 | `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/thumbnail\|full` | The JPEG, published or not                           |
+| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/original`        | The uploaded file, as a download                     |
+| `GET /admin/vms/:emulatorType/:vmName/media-sync`                     | What each agent holding the VM last reported         |
 
 Media mutations return the VM's updated media list.
 
 **There is no route that creates a VM**, and none that changes `emulator_type` or `vm_name`. A VM enters the
 catalog only through agent discovery followed by [an explicit registration](#registrations), which keeps it private.
+
+## Agent media
+
+How screenshots reach the server. See [the media guide](media.md) and
+[decision 0018](decisions/0018-agent-media-upload.md). Each route needs `Authorization: Bearer <agent credential>` and
+`X-EmuCat-Protocol-Version: 1`, and a browser session means nothing here. The agent comes from the credential, and only a VM that this
+agent holds can be used.
+
+| Route                                                            | What it does                                              |
+| ---------------------------------------------------------------- | --------------------------------------------------------- |
+| `GET /agent/media/vms`                                           | The VMs this agent should synchronize, and the size limit |
+| `POST /agent/media/vms/:emulatorType/:vmName/acknowledgements`   | `{ sha256: [...] }`: which of up to 256 hashes are stored |
+| `PUT /agent/media/vms/:emulatorType/:vmName/screenshots/:sha256` | The file, as `application/octet-stream`                   |
+
+An upload also takes `X-EmuCat-Source-Path`, percent-encoded, and optionally `X-EmuCat-Captured-At`. The answer is `{ mediaId, sha256,
+created }`, with 201 for a new item and 200 for bytes already stored for this VM.
+
+| Status | Code                                                                         | Meaning, and what an agent does                         |
+| ------ | ---------------------------------------------------------------------------- | ------------------------------------------------------- |
+| 400    | `invalid_source_path`, `unsupported_protocol_version`, `invalid_captured_at` | The request is wrong. Not retried                       |
+| 401    | `unauthorized`                                                               | Unknown or revoked. Retried, since connectivity decides |
+| 403    | `vm_not_assigned`                                                            | Another agent's VM. Retried until the list changes      |
+| 404    | `vm_not_registered`                                                          | Retried until the list changes                          |
+| 408    | `upload_timeout`                                                             | The body stopped arriving. Retried                      |
+| 413    | `upload_too_large`                                                           | Not retried                                             |
+| 415    | `unsupported_image`, `unsupported_media_type`                                | Not retried                                             |
+| 422    | `invalid_image`, `image_too_large`                                           | Not retried                                             |
+| 422    | `hash_mismatch`                                                              | Retried, and a scan notices if the file changed         |
+| 503    | `media_busy`, `processing_timeout`, `temporarily_unavailable`                | Retried                                                 |
 
 ## Agent pairing
 
@@ -170,6 +202,9 @@ private key: archives go directly between agent and repository. See the [protoco
 | 409    | `repository_not_authorized`, `repository_disabled`                                 |                                                                          |
 | 409    | `registration_committed`, `registration_finished`, `registration_not_reconcilable` |                                                                          |
 | 404    | `registration_not_found`, `repository_not_found`                                   |                                                                          |
+
+`POST /admin/registrations/:operationId/retry-cleanup` tries again to remove a local VM, after a screenshot blocked it. It only applies to
+a transfer in `partial_success` with the code `transfer_blocked_media`, with the agent online, and the agent checks everything again.
 
 ## Repositories
 

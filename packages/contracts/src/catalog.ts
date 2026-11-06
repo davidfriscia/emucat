@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { API_PREFIX } from './api.js';
 import { emulatorTypeSchema, type EmulatorType } from './emulator.js';
 import { mediaVisibilitySchema } from './media.js';
-import { timestampSchema } from './version.js';
+import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema, type VmIdentity } from './vm-name.js';
 
 export const VM_VISIBILITIES = ['private', 'public'] as const;
@@ -106,6 +106,11 @@ export const MEDIA_VARIANTS = ['thumbnail', 'full'] as const;
 export const mediaVariantSchema = z.enum(MEDIA_VARIANTS);
 export type MediaVariant = z.infer<typeof mediaVariantSchema>;
 
+/** Administrators can also fetch the uploaded file itself. The public never can. */
+export const ADMIN_MEDIA_VARIANTS = [...MEDIA_VARIANTS, 'original'] as const;
+export const adminMediaVariantSchema = z.enum(ADMIN_MEDIA_VARIANTS);
+export type AdminMediaVariant = z.infer<typeof adminMediaVariantSchema>;
+
 /** What the public may know about an image: no filenames, hashes or storage keys. */
 export const publicMediaSchema = z.strictObject({
   id: z.uuid(),
@@ -189,6 +194,17 @@ export const adminMediaSchema = z.strictObject({
 });
 export type AdminMedia = z.infer<typeof adminMediaSchema>;
 
+/** One item in full. The list leaves out what only this view needs. */
+export const adminMediaDetailSchema = adminMediaSchema.extend({
+  originalSha256: sha256HexSchema,
+  /** Worked out from the bytes when they were uploaded. `null` for media that predates uploads. */
+  originalMimeType: z.string().nullable(),
+  /** The agent that uploaded it, while that agent still exists. */
+  uploadedByAgentId: z.uuid().nullable(),
+  uploadedByAgentName: z.string().nullable(),
+});
+export type AdminMediaDetail = z.infer<typeof adminMediaDetailSchema>;
+
 export const adminMediaListResponseSchema = z.strictObject({ media: z.array(adminMediaSchema) });
 export type AdminMediaListResponse = z.infer<typeof adminMediaListResponseSchema>;
 
@@ -219,7 +235,11 @@ export function publicMediaPath(mediaId: string, variant: MediaVariant): string 
   return `${API_PREFIX}/catalog/media/${mediaId}/${variant}`;
 }
 
-export function adminMediaPath(vm: VmIdentity, mediaId: string, variant: MediaVariant): string {
+export function adminMediaPath(
+  vm: VmIdentity,
+  mediaId: string,
+  variant: AdminMediaVariant,
+): string {
   return `${API_PREFIX}/admin/vms/${vmSegments(vm)}/media/${mediaId}/${variant}`;
 }
 

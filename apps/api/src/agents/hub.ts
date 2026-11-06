@@ -7,9 +7,13 @@ import {
   WS_CLOSE_CODES,
   type AgentHelloPayload,
   type AgentMessage,
+  type AdminMediaSyncResponse,
   type Envelope,
+  type MediaSyncStatusPayload,
   type Platform,
   type ServerMessage,
+  type VmIdentity,
+  vmNameKey,
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { WebSocket } from 'ws';
@@ -126,6 +130,11 @@ export class AgentHub {
   private readonly active = new Map<string, Connection>();
   private readonly pendingPresence = new Set<Promise<unknown>>();
   private operations: AgentOperationsHandler | null = null;
+  /** What each agent last said about its screenshots. Stale once it is offline, and says when it spoke. */
+  private readonly mediaStatuses = new Map<
+    string,
+    { reportedAt: string; vms: MediaSyncStatusPayload['vms'] }
+  >();
 
   constructor(options: Partial<AgentHubOptions> & Pick<AgentHubOptions, 'presence'>) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
@@ -149,6 +158,17 @@ export class AgentHub {
 
   activeConnectionId(agentId: string): string | null {
     return this.active.get(agentId)?.id ?? null;
+  }
+
+  mediaStatus(agentId: string, vm: VmIdentity): AdminMediaSyncResponse['agents'][number]['status'] {
+    const report = this.mediaStatuses.get(agentId);
+    const entry = report?.vms.find(
+      (item) =>
+        item.emulatorType === vm.emulatorType && vmNameKey(item.vmName) === vmNameKey(vm.vmName),
+    );
+    if (!report || !entry) return null;
+    const { pending, uploading, synchronized, failed, lastError } = entry;
+    return { pending, uploading, synchronized, failed, lastError, reportedAt: report.reportedAt };
   }
 
   /** Sends to the agent's active connection, or returns false if it has none. */
@@ -206,6 +226,7 @@ export class AgentHub {
   revoke(agentId: string): void {
     this.discovery.failRunning(agentId, 'agent_revoked');
     this.operationsRevoked(agentId);
+    this.mediaStatuses.delete(agentId);
     for (const connection of [...this.connections]) {
       if (connection.agentId !== agentId) continue;
       this.sendError(connection, 'agent_revoked', 'This agent has been revoked');
@@ -379,6 +400,15 @@ export class AgentHub {
         }
         break;
       }
+      case 'agent.media_sync_status':
+        // Informational. A stale connection's word counts for nothing here either.
+        if (this.active.get(agentId) === connection) {
+          this.mediaStatuses.set(agentId, {
+            reportedAt: new Date().toISOString(),
+            vms: message.payload.vms,
+          });
+        }
+        break;
       case 'agent.registration_sync':
       case 'agent.registration_progress':
       case 'agent.registration_result':

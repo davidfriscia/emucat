@@ -11,6 +11,8 @@ use crate::platform::{Architecture, Platform};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const AGENT_MAX_MESSAGE_BYTES: usize = 64 * 1024;
+/// How many VMs one status message can describe. Mirrors `MEDIA_STATUS_MAX_VMS` in the contracts.
+pub const MEDIA_STATUS_MAX_VMS: usize = 100;
 
 /// Application-defined close codes. Mirrors `WS_CLOSE_CODES` in the contracts.
 pub mod close_codes {
@@ -94,6 +96,10 @@ pub enum Message {
     ServerRegistrationAck(RegistrationAck),
     #[serde(rename = "server.repository_health_request")]
     ServerRepositoryHealthRequest(RepositoryHealthRequest),
+    #[serde(rename = "server.registration_retry_cleanup")]
+    ServerRegistrationRetryCleanup(RegistrationRetryCleanup),
+    #[serde(rename = "agent.media_sync_status")]
+    AgentMediaSyncStatus(MediaSyncStatus),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -223,6 +229,8 @@ pub enum RegistrationPhase {
     Published,
     Cleaning,
     Reported,
+    /// The master exists, a screenshot blocked the removal, and this is kept so that it can be retried.
+    MediaBlocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +333,44 @@ pub struct RepositoryHealthResult {
     pub free_bytes: Option<u64>,
 }
 
+/// An administrator asks to try removing a local VM again, after a screenshot blocked it. It names
+/// identities only, and the agent checks everything again before deleting anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegistrationRetryCleanup {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSyncError {
+    pub code: String,
+    pub message: String,
+    pub source_path: Option<String>,
+}
+
+/// One VM's screenshots, as this agent sees them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSyncVmStatus {
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub pending: u32,
+    pub uploading: u32,
+    pub synchronized: u32,
+    pub failed: u32,
+    pub last_error: Option<MediaSyncError>,
+}
+
+/// Informational, for the web interface. The server decides nothing on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSyncStatus {
+    pub vms: Vec<MediaSyncVmStatus>,
+    pub truncated: bool,
+}
+
 /// What a text frame from the server turned out to be.
 #[derive(Debug, PartialEq)]
 pub enum Decoded {
@@ -396,5 +442,7 @@ fn is_known_type(message_type: &str) -> bool {
             | "server.registration_cancel"
             | "server.registration_ack"
             | "server.repository_health_request"
+            | "server.registration_retry_cleanup"
+            | "agent.media_sync_status"
     )
 }

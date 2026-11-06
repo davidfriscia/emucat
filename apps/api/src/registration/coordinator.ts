@@ -425,6 +425,56 @@ export class RegistrationCoordinator {
     return this.require(operationId);
   }
 
+  /**
+   * Tries removing a local VM again, after a screenshot blocked its removal. This only asks: the agent
+   * checks everything again, and the master was never in question. It holds the operation's row lock,
+   * and the state goes back to `cleaning_local` so that the usual report ends it the usual way.
+   */
+  async retryCleanup(operationId: string): Promise<RegistrationOperation> {
+    const before = await this.require(operationId);
+    if (
+      before.state !== 'partial_success' ||
+      before.mode !== 'transfer' ||
+      before.error?.code !== 'transfer_blocked_media'
+    ) {
+      throw new ApiError(
+        409,
+        'registration_not_retryable',
+        'Only a transfer whose removal was blocked by a screenshot can be retried.',
+      );
+    }
+    if (!this.link.isOnline(before.agentId)) {
+      throw new ApiError(409, 'agent_offline', 'This agent is offline.');
+    }
+    try {
+      const [result] = await this.pool.execute<ResultSetHeader>(
+        `UPDATE registration_operations
+         SET state = 'cleaning_local', local_copy = NULL, error_code = NULL, error_message = NULL,
+             finished_at = NULL, progress_done_bytes = NULL, progress_total_bytes = NULL
+         WHERE id = ? AND state = 'partial_success' AND error_code = 'transfer_blocked_media'`,
+        [operationId],
+      );
+      if (result.affectedRows === 0) {
+        throw new ApiError(409, 'registration_not_retryable', 'This has already been retried.');
+      }
+    } catch (error) {
+      if (isDuplicateEntry(error)) {
+        throw new ApiError(
+          409,
+          'registration_in_progress',
+          'A registration is already running on this agent.',
+        );
+      }
+      throw error;
+    }
+    // If this is lost, the agent's next sync lists the operation as blocked, and it is sent again.
+    this.link.send(before.agentId, {
+      type: 'server.registration_retry_cleanup',
+      payload: { operationId, versionId: before.versionId },
+    });
+    return this.require(operationId);
+  }
+
   startHealthCheck(repositoryId: string, agentId: string): void {
     if (!this.link.isOnline(agentId)) {
       throw new ApiError(409, 'agent_offline', 'This agent is offline.');
@@ -531,6 +581,16 @@ export class RegistrationCoordinator {
     }
 
     for (const [operationId, phase] of listed) {
+      if (phase === 'media_blocked') {
+        const row = await this.rowFor(agentId, operationId);
+        if (row?.state === 'cleaning_local') {
+          this.link.send(agentId, {
+            type: 'server.registration_retry_cleanup',
+            payload: { operationId, versionId: row.version_id },
+          });
+        }
+        continue;
+      }
       if (phase !== 'running' && phase !== 'publishing') continue;
       const row = await this.rowFor(agentId, operationId);
       // Finished here while the agent was away, or unknown here altogether: it should stop.

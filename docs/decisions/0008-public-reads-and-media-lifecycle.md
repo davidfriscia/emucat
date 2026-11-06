@@ -50,4 +50,4 @@ placeholder until it is published. Forbidding it would make "set up the main ima
 - Every image request costs a database query. That is the price of the privacy guarantee, and caching can be added
   with revalidation if it ever matters.
 - No ETag exists yet, so revalidation always transfers the file.
-- Uploads do not exist yet. When they do, they must create files before rows, for the same reason as above in reverse.
+- Uploads create files before rows, for the same reason as above in reverse. See [0019](0019-media-processing-and-storage.md).

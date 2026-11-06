@@ -386,6 +386,131 @@ describe('a transfer', () => {
     expect(await versionsOf(w.context, 'Win98')).toHaveLength(1);
   });
 
+  describe('a removal blocked by a screenshot', () => {
+    async function blocked(w: Awaited<ReturnType<typeof world>>) {
+      const { operation } = await commitOperation(w, {
+        mode: 'transfer',
+        confirmDestructive: true,
+      });
+      w.agent.send(
+        envelope('agent.registration_cleanup', {
+          operationId: operation.id,
+          versionId: operation.versionId,
+          localCopy: 'cleanup_failed',
+          code: 'transfer_blocked_media',
+          message: 'capture.ppm has not reached the server',
+        }),
+      );
+      expect((await w.agent.next('server.registration_ack')).payload.outcome).toBe('closed');
+      return operation;
+    }
+    const retry = (w: Awaited<ReturnType<typeof world>>, id: string) =>
+      w.admin.request({ method: 'POST', url: `/admin/registrations/${id}/retry-cleanup` });
+
+    it('reports a partial success, keeps the master, and says what to do', async () => {
+      const w = await world();
+      const operation = await blocked(w);
+      const done = await read(w, operation.id);
+      expect(done).toMatchObject({ state: 'partial_success', localCopy: 'cleanup_failed' });
+      expect(done.error?.message).toContain('capture.ppm');
+      expect(done.recovery).toMatch(/Retry removal/);
+      expect(await versionsOf(w.context, 'Win98')).toHaveLength(1);
+    });
+
+    it('can be retried, which only asks the agent to check everything again', async () => {
+      const w = await world();
+      const operation = await blocked(w);
+      const response = await retry(w, operation.id);
+      expect(response.statusCode, response.body).toBe(202);
+      const message = await w.agent.next('server.registration_retry_cleanup');
+      expect(message.payload).toEqual({
+        operationId: operation.id,
+        versionId: operation.versionId,
+      });
+      expect(await read(w, operation.id)).toMatchObject({
+        state: 'cleaning_local',
+        error: null,
+        finishedAt: null,
+      });
+
+      w.agent.send(
+        envelope('agent.registration_cleanup', {
+          operationId: operation.id,
+          versionId: operation.versionId,
+          localCopy: 'removed',
+          code: null,
+          message: null,
+        }),
+      );
+      expect((await w.agent.next('server.registration_ack')).payload.outcome).toBe('closed');
+      expect(await read(w, operation.id)).toMatchObject({
+        state: 'succeeded',
+        localCopy: 'removed',
+      });
+      expect(await versionsOf(w.context, 'Win98')).toHaveLength(1);
+    });
+
+    it('asks again after a reconnection if the first request was lost', async () => {
+      const w = await world();
+      const operation = await blocked(w);
+      expect((await retry(w, operation.id)).statusCode).toBe(202);
+      await w.agent.next('server.registration_retry_cleanup');
+      await sync(w.agent, [{ operationId: operation.id, phase: 'media_blocked' }]);
+      const again = await w.agent.next('server.registration_retry_cleanup');
+      expect(again.payload.operationId).toBe(operation.id);
+    });
+
+    it('does not ask again for one that nobody retried', async () => {
+      const w = await world();
+      const operation = await blocked(w);
+      await sync(w.agent, [{ operationId: operation.id, phase: 'media_blocked' }]);
+      await barrier(w.agent);
+      expect(w.agent.received.map((message) => message.type)).not.toContain(
+        'server.registration_retry_cleanup',
+      );
+      expect((await read(w, operation.id)).state).toBe('partial_success');
+    });
+
+    it('cannot be retried twice at once, or with the agent away', async () => {
+      const w = await world();
+      const operation = await blocked(w);
+      expect((await retry(w, operation.id)).statusCode).toBe(202);
+      expect((await retry(w, operation.id)).statusCode).toBe(409);
+
+      const x = await world();
+      const other = await blocked(x);
+      x.agent.close();
+      await waitFor(async () => (await read(x, other.id)).agentOnline === false);
+      const response = await retry(x, other.id);
+      expect(response.statusCode).toBe(409);
+      expect(response.json<{ error: { code: string } }>().error.code).toBe('agent_offline');
+      expect((await read(x, other.id)).state).toBe('partial_success');
+    });
+
+    it('is only for what a screenshot blocked', async () => {
+      const w = await world();
+      const { operation } = await commitOperation(w, {
+        mode: 'transfer',
+        confirmDestructive: true,
+      });
+      w.agent.send(
+        envelope('agent.registration_cleanup', {
+          operationId: operation.id,
+          versionId: operation.versionId,
+          localCopy: 'cleanup_failed',
+          code: 'cleanup_content_changed',
+          message: 'changed',
+        }),
+      );
+      await w.agent.next('server.registration_ack');
+      const response = await retry(w, operation.id);
+      expect(response.statusCode).toBe(409);
+      expect(response.json<{ error: { code: string } }>().error.code).toBe(
+        'registration_not_retryable',
+      );
+    });
+  });
+
   it('never lets a late result restart removal once the operation has ended', async () => {
     const w = await world();
     const { operation } = await commitOperation(w, { mode: 'transfer', confirmDestructive: true });

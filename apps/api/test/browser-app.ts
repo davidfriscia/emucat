@@ -13,6 +13,7 @@ import { createPasswordHasher } from '../src/auth/passwords.js';
 import { RateLimiter } from '../src/auth/rate-limiter.js';
 import { createSetupToken } from '../src/auth/setup.js';
 import { migrate } from '../src/db/migrate.js';
+import { DEFAULT_MEDIA_POLICY } from '../src/media/uploads.js';
 import { DEFAULT_PAIRING_RATE_LIMITS } from '../src/routes/agent-pairing.js';
 import { DEFAULT_AUTH_RATE_LIMITS } from '../src/routes/auth.js';
 import type { BrowserDependencies } from '../src/routes/browser.js';
@@ -49,6 +50,7 @@ export async function startBrowserApp(
   const baseDependencies = (): BrowserDependencies => ({
     pool,
     storage: fileMediaStorage(storageRoot),
+    media: DEFAULT_MEDIA_POLICY,
     passwords: createPasswordHasher({ memoryCost: 1024, timeCost: 1, parallelism: 1 }),
     setupToken: createSetupToken(SETUP_TOKEN),
     limiter: new RateLimiter(),

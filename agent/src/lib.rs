@@ -16,7 +16,9 @@
 //! - [`packaging`]: builds a standalone ZIP and its manifest, without changing the source.
 //! - [`registration`]: the durable workflow that turns a discovered VM into a verified archive.
 //! - [`removal`]: removes a local VM after a confirmed transfer, and fails closed.
-//! - [`media`]: which files are media, and their visibility. No watcher or upload yet.
+//! - [`media`]: which files are media, finding them safely, and reading them completely.
+//! - [`media_queue`]: the durable record of what has to reach the server.
+//! - [`media_sync`]: the watcher, reconciliation and upload to the API over HTTP(S).
 //! - [`state`]: local state, operation types and execution states.
 //!
 //! The agent has no inbound listener and does not launch emulators. It changes a VM directory in one
@@ -32,6 +34,8 @@ pub mod emulators;
 pub mod filesystem;
 pub mod logging;
 pub mod media;
+pub mod media_queue;
+pub mod media_sync;
 pub mod packaging;
 pub mod pairing;
 pub mod platform;

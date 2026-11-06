@@ -8,6 +8,9 @@ use emucat_agent::config::{Config, ConfigError, Severity, process_env, validate}
 use emucat_agent::connectivity::{self, ConnectionEnd, ConnectionSettings, check_transport};
 use emucat_agent::credentials::{self, CredentialStore, Secret};
 use emucat_agent::discovery::{self, ScanLimits};
+use emucat_agent::media::MediaScanLimits;
+use emucat_agent::media_queue::MediaQueue;
+use emucat_agent::media_sync::{HttpMediaApi, MediaSync, MediaSyncConfig};
 use emucat_agent::pairing::{self, PairingRequest};
 use emucat_agent::platform::{Architecture, Platform};
 use emucat_agent::protocol::AgentHello;
@@ -29,6 +32,7 @@ fn main() -> ExitCode {
         Command::Pair { name, force } => pair(&cli, name.as_deref(), *force),
         Command::Unpair => unpair(&cli),
         Command::Discover => discover(&cli),
+        Command::MediaStatus => media_status(&cli),
         Command::RepositoryCheck { repository } => repository_check(&cli, *repository),
         Command::RepositoryPassphrase { repository } => repository_passphrase(&cli, *repository),
     };
@@ -138,6 +142,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         "Agent started"
     );
 
+    let media_api = HttpMediaApi::new(&config.api_url, stored.credential.clone())?;
     let mut settings = ConnectionSettings::new(
         &config.api_url,
         stored.credential,
@@ -152,9 +157,30 @@ fn run(cli: &Cli) -> Result<(), String> {
     let agent_id = stored.agent_id;
     let runtime = runtime()?;
     let end = runtime.block_on(async {
+        let media = MediaSync::new(MediaSyncConfig {
+            agent_id,
+            state_dir: config
+                .state_dir
+                .clone()
+                .ok_or("no state directory is configured and no default is known")?,
+            emulators: Arc::clone(&settings.emulators),
+            settings: config.media.clone(),
+            api: Arc::new(media_api),
+            scan_limits: MediaScanLimits::default(),
+        })?;
+        settings.media = Some(Arc::clone(&media));
         // Loading resumes interrupted work, which needs the runtime.
-        settings.operations = Some(operations(&config, agent_id, &settings)?);
-        Ok::<_, String>(connectivity::run(settings, stop_requested()).await)
+        settings.operations = Some(operations(
+            &config,
+            agent_id,
+            &settings,
+            Arc::clone(&media),
+        )?);
+        let watcher = tokio::spawn(Arc::clone(&media).run());
+        let end = connectivity::run(settings, stop_requested()).await;
+        media.shutdown();
+        let _ = watcher.await;
+        Ok::<_, String>(end)
     })?;
     // Blocking work has been told to stop, and notices within one read.
     runtime.shutdown_timeout(Duration::from_secs(10));
@@ -169,6 +195,7 @@ fn operations(
     config: &Config,
     agent_id: Uuid,
     settings: &ConnectionSettings,
+    media: Arc<MediaSync>,
 ) -> Result<Arc<AgentOperations>, String> {
     let state_dir = config
         .state_dir
@@ -187,7 +214,26 @@ fn operations(
         staging_dir,
         emulators: Arc::clone(&settings.emulators),
         retry_delay: Duration::from_secs(5),
+        media: Some(media),
     })
+}
+
+/// What the queue holds, without connecting to anything. Which server has what is the server's to say.
+fn media_status(cli: &Cli) -> Result<(), String> {
+    let config = load(cli).map_err(|error| error.to_string())?;
+    let state_dir = config
+        .state_dir
+        .clone()
+        .ok_or("no state directory is configured and no default is known")?;
+    let stored = credential_store(&config)?
+        .load()
+        .map_err(|error| error.to_string())?
+        .ok_or("this agent is not paired, so it has no screenshot queue")?;
+    let queue = MediaQueue::load(&state_dir, stored.agent_id).map_err(|error| error.to_string())?;
+    let status = queue.status(std::iter::empty());
+    let json = serde_json::to_string_pretty(&status).map_err(|error| error.to_string())?;
+    println!("{json}");
+    Ok(())
 }
 
 fn repository_check(cli: &Cli, repository_id: Uuid) -> Result<(), String> {
