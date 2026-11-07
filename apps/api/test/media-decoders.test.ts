@@ -199,14 +199,17 @@ describe('deadlines', () => {
 });
 
 describe('processing an upload', () => {
-  let directory: string | undefined;
+  // A test can process more than one file, and each gets its own directory.
+  const directories: string[] = [];
   afterEach(async () => {
-    if (directory) await rm(directory, { recursive: true, force: true });
-    directory = undefined;
+    await Promise.all(
+      directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
+    );
   });
 
   async function run(data: Buffer, limits: Parameters<typeof processImage>[3]) {
-    directory = await mkdtemp(join(tmpdir(), 'emucat-decoders-'));
+    const directory = await mkdtemp(join(tmpdir(), 'emucat-decoders-'));
+    directories.push(directory);
     const original = join(directory, 'original');
     await writeFile(original, data);
     return processImage(

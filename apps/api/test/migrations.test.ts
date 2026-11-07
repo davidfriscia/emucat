@@ -27,6 +27,19 @@ let repositoryId: string;
 
 const hash = (character: string) => character.repeat(64);
 
+/** Waits until a migration holding its lock is seen running by the server, rather than guessing. */
+async function waitForSlowMigration(observer: Pool): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const [rows] = await observer.query<RowDataPacket[]>(
+      "SELECT 1 FROM information_schema.processlist WHERE info LIKE 'SELECT SLEEP(1.5)%' LIMIT 1",
+    );
+    if (rows.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('The slow migration never started');
+}
+
 beforeAll(async () => {
   database = await createTestDatabase();
   pool = database.createPool();
@@ -115,6 +128,57 @@ describe('migration runner', () => {
       await migrate(scratch.options, directory);
       await rm(join(directory, '0001_a.sql'));
       await expect(migrate(scratch.options, directory)).rejects.toThrow(/unknown migration/);
+    });
+
+    describe('concurrent runs', () => {
+      const SLOW_MIGRATION = 'SELECT SLEEP(1.5); CREATE TABLE slow (id INT);';
+
+      /** Records the order in which runs finish, which is what the lock decides. */
+      const finishOrder = () => {
+        const order: string[] = [];
+        return {
+          order,
+          track: <T>(name: string, run: Promise<T>) =>
+            run.then((result) => {
+              order.push(name);
+              return result;
+            }),
+        };
+      };
+
+      it('does not make a database wait for a migration of another database', async () => {
+        const other = await createTestDatabase();
+        const otherDirectory = await mkdtemp(join(tmpdir(), 'emucat-migrations-'));
+        try {
+          await writeFile(join(directory, '0001_slow.sql'), SLOW_MIGRATION);
+          await writeFile(join(otherDirectory, '0001_fast.sql'), 'CREATE TABLE fast (id INT);');
+          const { order, track } = finishOrder();
+
+          const slow = track('slow', migrate(scratch.options, directory));
+          await waitForSlowMigration(pool);
+          const fast = track('fast', migrate(other.options, otherDirectory));
+          await Promise.all([slow, fast]);
+
+          expect(order).toEqual(['fast', 'slow']);
+        } finally {
+          await other.drop();
+          await rm(otherDirectory, { recursive: true, force: true });
+        }
+      });
+
+      it('makes concurrent runs against one database wait, so each migration applies once', async () => {
+        await writeFile(join(directory, '0001_slow.sql'), SLOW_MIGRATION);
+        const { order, track } = finishOrder();
+
+        const first = track('first', migrate(scratch.options, directory));
+        await waitForSlowMigration(pool);
+        const second = track('second', migrate(scratch.options, directory));
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+
+        expect(order).toEqual(['first', 'second']);
+        expect(firstResult.applied).toEqual(['0001_slow']);
+        expect(secondResult).toEqual({ applied: [], alreadyApplied: ['0001_slow'] });
+      });
     });
 
     it('rejects a badly named file', async () => {

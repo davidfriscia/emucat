@@ -10,7 +10,7 @@ would add more than it gives.
   several instances cannot race, and readiness reports `not_ready` until the schema is current.
 - **Forward-only.** There are no down migrations. Applied files must not change, which is enforced by
   checksums. Line endings are normalized first, so checkout settings cannot cause false alarms.
-- **Serialized.** `GET_LOCK` makes concurrent runs wait.
+- **Serialized, per database.** `GET_LOCK` makes concurrent runs against a database wait. Its names are global to a server, so the name includes the database: otherwise unrelated databases on one server queue behind each other, with a 30-second limit that can fail a run for no reason.
 - **Failure is visible.** MariaDB cannot roll back DDL, so a failed migration may leave a partial change.
   The runner records a migration before running it and marks it finished afterwards. An unfinished record
   stops further runs until someone restores a backup or resets the database.

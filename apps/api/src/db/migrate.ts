@@ -7,7 +7,7 @@ import mysql, { type Connection, type PoolOptions, type RowDataPacket } from 'my
 export const MIGRATIONS_DIRECTORY = fileURLToPath(new URL('../../migrations', import.meta.url));
 
 const MIGRATION_FILE = /^(\d{4})_[a-z0-9_]+\.sql$/;
-const LOCK_NAME = 'emucat_schema_migrations';
+const LOCK_PREFIX = 'emucat_schema_migrations';
 const LOCK_TIMEOUT_SECONDS = 30;
 
 export interface Migration {
@@ -81,8 +81,22 @@ function verifyHistory(applied: AppliedRow[], migrations: Migration[]): void {
 }
 
 /**
- * Applies pending migrations in order. A lock serializes concurrent runs. Migrations are
- * forward-only: applied files must not be edited, and changes go in a new file.
+ * `GET_LOCK` names are global to the server, while migrations belong to one database. So the name
+ * carries the database: runs against the same database wait for each other, and runs against
+ * different databases on one server have nothing to wait for.
+ */
+async function migrationLockName(connection: Connection): Promise<string> {
+  const [rows] = await connection.query<RowDataPacket[]>('SELECT DATABASE() AS name');
+  const database = rows[0]?.name as string | null | undefined;
+  if (!database) {
+    throw new MigrationError('Migrations need a database to be selected');
+  }
+  return `${LOCK_PREFIX}.${database}`;
+}
+
+/**
+ * Applies pending migrations in order. A lock serializes concurrent runs against a database.
+ * Migrations are forward-only: applied files must not be edited, and changes go in a new file.
  */
 export async function migrate(
   options: PoolOptions,
@@ -93,8 +107,9 @@ export async function migrate(
   const connection = await mysql.createConnection({ ...options, multipleStatements: true });
   try {
     await connection.query("SET time_zone = '+00:00'");
+    const lockName = await migrationLockName(connection);
     const [lock] = await connection.query<RowDataPacket[]>('SELECT GET_LOCK(?, ?) AS acquired', [
-      LOCK_NAME,
+      lockName,
       LOCK_TIMEOUT_SECONDS,
     ]);
     if (lock[0]?.acquired !== 1) {
@@ -124,7 +139,7 @@ export async function migrate(
       }
       return result;
     } finally {
-      await connection.query('SELECT RELEASE_LOCK(?)', [LOCK_NAME]);
+      await connection.query('SELECT RELEASE_LOCK(?)', [lockName]);
     }
   } finally {
     await connection.end();

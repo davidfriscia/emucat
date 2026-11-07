@@ -43,7 +43,11 @@ export async function startBrowserApp(
   hubOptions: Partial<AgentHubOptions> = {},
 ): Promise<BrowserTestContext> {
   const database = await createTestDatabase();
-  await migrate(database.options);
+  // Nobody can close a context that was never returned, so a failure here cleans up after itself.
+  await migrate(database.options).catch(async (error: unknown) => {
+    await database.drop().catch(() => undefined);
+    throw error;
+  });
   const pool = database.createPool();
   const storageRoot = await mkdtemp(join(tmpdir(), 'emucat-storage-'));
 
