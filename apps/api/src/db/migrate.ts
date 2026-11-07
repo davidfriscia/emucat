@@ -85,13 +85,17 @@ function verifyHistory(applied: AppliedRow[], migrations: Migration[]): void {
  * carries the database: runs against the same database wait for each other, and runs against
  * different databases on one server have nothing to wait for.
  */
-async function migrationLockName(connection: Connection): Promise<string> {
+export function migrationLockName(database: string): string {
+  return `${LOCK_PREFIX}.${database}`;
+}
+
+async function selectedDatabase(connection: Connection): Promise<string> {
   const [rows] = await connection.query<RowDataPacket[]>('SELECT DATABASE() AS name');
   const database = rows[0]?.name as string | null | undefined;
   if (!database) {
     throw new MigrationError('Migrations need a database to be selected');
   }
-  return `${LOCK_PREFIX}.${database}`;
+  return database;
 }
 
 /**
@@ -107,7 +111,7 @@ export async function migrate(
   const connection = await mysql.createConnection({ ...options, multipleStatements: true });
   try {
     await connection.query("SET time_zone = '+00:00'");
-    const lockName = await migrationLockName(connection);
+    const lockName = migrationLockName(await selectedDatabase(connection));
     const [lock] = await connection.query<RowDataPacket[]>('SELECT GET_LOCK(?, ?) AS acquired', [
       lockName,
       LOCK_TIMEOUT_SECONDS,

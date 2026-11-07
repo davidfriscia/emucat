@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { databaseAgentAuthenticator, hashToken } from '../src/auth/agent-auth.js';
-import { loadMigrations, migrate, MigrationError } from '../src/db/migrate.js';
+import { loadMigrations, migrate, migrationLockName, MigrationError } from '../src/db/migrate.js';
 import { databaseReadiness } from '../src/readiness.js';
 import { createTestDatabase, type TestDatabase } from './test-database.js';
 
@@ -26,19 +26,6 @@ let pool: Pool;
 let repositoryId: string;
 
 const hash = (character: string) => character.repeat(64);
-
-/** Waits until a migration holding its lock is seen running by the server, rather than guessing. */
-async function waitForSlowMigration(observer: Pool): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    const [rows] = await observer.query<RowDataPacket[]>(
-      "SELECT 1 FROM information_schema.processlist WHERE info LIKE 'SELECT SLEEP(1.5)%' LIMIT 1",
-    );
-    if (rows.length > 0) return;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error('The slow migration never started');
-}
 
 beforeAll(async () => {
   database = await createTestDatabase();
@@ -131,53 +118,74 @@ describe('migration runner', () => {
     });
 
     describe('concurrent runs', () => {
-      const SLOW_MIGRATION = 'SELECT SLEEP(1.5); CREATE TABLE slow (id INT);';
-
-      /** Records the order in which runs finish, which is what the lock decides. */
-      const finishOrder = () => {
-        const order: string[] = [];
+      /** Stands in for a run in progress, for as long as a test wants, so nothing depends on timing. */
+      const holdLockOf = async (target: TestDatabase) => {
+        const holder = await pool.getConnection();
+        const name = migrationLockName(target.options.database as string);
+        const [rows] = await holder.query<RowDataPacket[]>('SELECT GET_LOCK(?, 0) AS acquired', [
+          name,
+        ]);
+        expect(rows[0]?.acquired).toBe(1);
         return {
-          order,
-          track: <T>(name: string, run: Promise<T>) =>
-            run.then((result) => {
-              order.push(name);
-              return result;
-            }),
+          name,
+          release: async () => {
+            await holder.query('SELECT RELEASE_LOCK(?)', [name]);
+            holder.release();
+          },
         };
       };
 
-      it('does not make a database wait for a migration of another database', async () => {
+      const waitForLockWaiter = async (name: string) => {
+        await expect
+          .poll(
+            async () => {
+              const [rows] = await pool.query<RowDataPacket[]>(
+                "SELECT COUNT(*) AS waiting FROM information_schema.processlist WHERE info LIKE 'SELECT GET_LOCK%' AND info LIKE ?",
+                [`%${name}%`],
+              );
+              return Number(rows[0]?.waiting);
+            },
+            { timeout: 20_000, interval: 20 },
+          )
+          .toBeGreaterThan(0);
+      };
+
+      it('does not make a database wait for a run on another database', async () => {
         const other = await createTestDatabase();
-        const otherDirectory = await mkdtemp(join(tmpdir(), 'emucat-migrations-'));
+        const lock = await holdLockOf(other);
         try {
-          await writeFile(join(directory, '0001_slow.sql'), SLOW_MIGRATION);
-          await writeFile(join(otherDirectory, '0001_fast.sql'), 'CREATE TABLE fast (id INT);');
-          const { order, track } = finishOrder();
-
-          const slow = track('slow', migrate(scratch.options, directory));
-          await waitForSlowMigration(pool);
-          const fast = track('fast', migrate(other.options, otherDirectory));
-          await Promise.all([slow, fast]);
-
-          expect(order).toEqual(['fast', 'slow']);
+          await writeFile(join(directory, '0001_a.sql'), 'CREATE TABLE a (id INT);');
+          await expect(migrate(scratch.options, directory)).resolves.toMatchObject({
+            applied: ['0001_a'],
+          });
         } finally {
+          await lock.release();
           await other.drop();
-          await rm(otherDirectory, { recursive: true, force: true });
         }
       });
 
-      it('makes concurrent runs against one database wait, so each migration applies once', async () => {
-        await writeFile(join(directory, '0001_slow.sql'), SLOW_MIGRATION);
-        const { order, track } = finishOrder();
+      it('makes a run wait for another on the same database, so each migration applies once', async () => {
+        await writeFile(join(directory, '0001_a.sql'), 'CREATE TABLE a (id INT);');
+        const lock = await holdLockOf(scratch);
+        let waiting: Promise<unknown> | undefined;
+        try {
+          waiting = migrate(scratch.options, directory);
+          await waitForLockWaiter(lock.name);
 
-        const first = track('first', migrate(scratch.options, directory));
-        await waitForSlowMigration(pool);
-        const second = track('second', migrate(scratch.options, directory));
-        const [firstResult, secondResult] = await Promise.all([first, second]);
+          const [tables] = await pool.query<RowDataPacket[]>(
+            'SELECT 1 FROM information_schema.tables WHERE table_schema = ?',
+            [scratch.options.database],
+          );
+          expect(tables).toEqual([]);
+        } finally {
+          await lock.release();
+        }
 
-        expect(order).toEqual(['first', 'second']);
-        expect(firstResult.applied).toEqual(['0001_slow']);
-        expect(secondResult).toEqual({ applied: [], alreadyApplied: ['0001_slow'] });
+        await expect(waiting).resolves.toMatchObject({ applied: ['0001_a'] });
+        await expect(migrate(scratch.options, directory)).resolves.toEqual({
+          applied: [],
+          alreadyApplied: ['0001_a'],
+        });
       });
     });
 
