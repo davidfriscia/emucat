@@ -43,17 +43,54 @@ async function connect(credential: string, target = url): Promise<TestAgent> {
 }
 
 afterEach(() => {
+  for (const timer of SENDING.splice(0)) clearInterval(timer);
   for (const agent of OPEN.splice(0)) agent.close();
 });
 
-/** Short timers, so that timeouts can be observed quickly. */
+/**
+ * Timers for the shared hub, long enough that no test races them. The test agent does not send
+ * heartbeats by itself, and a hello or a heartbeat is answered only after a database write, so
+ * sub-second timers here would cut off agents whenever the database is slow. Tests about timers use
+ * a hub of their own, with just that timer short: see `useHub`.
+ */
 const HUB_OPTIONS = {
   heartbeatIntervalSeconds: 1,
-  helloTimeoutMs: 300,
-  silenceTimeoutMs: 800,
-  discoveryTimeoutMs: 400,
+  helloTimeoutMs: 10_000,
+  silenceTimeoutMs: 30_000,
+  discoveryTimeoutMs: 30_000,
   closeGraceMs: 200,
 };
+
+/**
+ * Points the helpers in this file at an application whose hub has these timers, for the tests of one
+ * `describe`, and back afterwards. Tests in a file run one after another, so this is not shared.
+ */
+function useHub(timers: Partial<typeof HUB_OPTIONS>): void {
+  let shared: { context: BrowserTestContext; admin: TestClient; url: string };
+  beforeAll(async () => {
+    shared = { context, admin, url };
+    context = await startBrowserApp(
+      { pairingRateLimits: GENEROUS_RATE_LIMITS },
+      {},
+      { ...HUB_OPTIONS, ...timers },
+    );
+    admin = await signedInAdmin(context);
+    await context.app.listen({ host: '127.0.0.1', port: 0 });
+    url = wsUrl(context.app);
+  });
+  afterAll(async () => {
+    const own = context;
+    ({ context, admin, url } = shared);
+    await own.close();
+  });
+}
+
+const SENDING: NodeJS.Timeout[] = [];
+
+/** Heartbeats every `ms`, as a real agent sends them: on its own schedule, not after each answer. */
+function heartbeating(agent: TestAgent, ms = 250): void {
+  SENDING.push(setInterval(() => agent.send(envelope('agent.heartbeat', {})), ms));
+}
 
 beforeAll(async () => {
   context = await startBrowserApp({ pairingRateLimits: GENEROUS_RATE_LIMITS }, {}, HUB_OPTIONS);
@@ -171,34 +208,68 @@ describe('presence', () => {
 });
 
 describe('timeouts', () => {
-  it('closes a connection that never says hello', async () => {
-    const paired = await newAgent();
-    const agent = await connect(paired.credential);
-    const error = await agent.next('server.error');
-    expect(error.payload.code).toBe('hello_timeout');
-    await expect(agent.closed()).resolves.toBe(4408);
+  describe('before hello', () => {
+    useHub({ helloTimeoutMs: 300 });
+
+    it('closes a connection that never says hello', async () => {
+      const paired = await newAgent();
+      const agent = await connect(paired.credential);
+      const error = await agent.next('server.error');
+      expect(error.payload.code).toBe('hello_timeout');
+      await expect(agent.closed()).resolves.toBe(4408);
+    });
   });
 
-  it('closes a connection that goes silent, and marks the agent offline', async () => {
-    const { agentId, agent } = await online();
-    await expect(agent.closed()).resolves.toBe(4408);
-    expect(await isOnline(agentId)).toBe(false);
-  });
+  describe('after hello', () => {
+    useHub({ silenceTimeoutMs: 1500, discoveryTimeoutMs: 400 });
 
-  it('keeps a connection that sends heartbeats', async () => {
-    const { agentId, agent } = await online();
-    // Like a real agent, on its own schedule rather than after each answer. Waiting for answers
-    // would make the gaps depend on how fast the server records them, which is not what this tests.
-    const sending = setInterval(() => agent.send(envelope('agent.heartbeat', {})), 300);
-    try {
+    it('closes a connection that goes silent, and marks the agent offline', async () => {
+      const { agentId, agent } = await online();
+      await expect(agent.closed()).resolves.toBe(4408);
+      expect(await isOnline(agentId)).toBe(false);
+    });
+
+    it('keeps a connection that sends heartbeats', async () => {
+      const paired = await newAgent();
+      const agent = await connect(paired.credential);
+      heartbeating(agent);
+      await agent.hello();
       for (let index = 0; index < 5; index += 1) {
         await agent.next('server.heartbeat_ack');
       }
       expect(agent.closeCode).toBeUndefined();
-      expect(await isOnline(agentId)).toBe(true);
-    } finally {
-      clearInterval(sending);
-    }
+      expect(await isOnline(paired.agentId)).toBe(true);
+    });
+
+    it('times out a scan the agent never answers, and accepts nothing afterwards', async () => {
+      const paired = await newAgent();
+      const agent = await connect(paired.credential);
+      heartbeating(agent);
+      await agent.hello();
+      const started = await startDiscovery(paired.agentId);
+      const request = await agent.next('server.discovery_request');
+      const failed = await waitFor(async () => {
+        const operation = await readDiscovery(paired.agentId);
+        return operation?.status === 'failed' ? operation : null;
+      }, 'the timeout');
+      expect(failed.failure?.code).toBe('timeout');
+
+      answer(agent, request.id, started.id);
+      // A heartbeat sent after the answer is handled after it, so its acknowledgement means the
+      // answer has been dealt with.
+      const beat = envelope('agent.heartbeat', {});
+      agent.send(beat);
+      const beatId = (JSON.parse(beat) as { id: string }).id;
+      await waitFor(
+        () =>
+          agent.received.some(
+            (message) =>
+              message.type === 'server.heartbeat_ack' && message.correlationId === beatId,
+          ),
+        'the acknowledgement of a later heartbeat',
+      );
+      expect(await readDiscovery(paired.agentId)).toMatchObject({ status: 'failed', vms: [] });
+    });
   });
 });
 
@@ -547,21 +618,6 @@ describe('discovery', () => {
     expect(agent.received.filter((message) => message.type === 'server.discovery_request')).toEqual(
       [],
     );
-  });
-
-  it('times out an agent that never answers, and accepts nothing afterwards', async () => {
-    const { agentId, agent, started, request } = await scanning();
-    const failed = await waitFor(async () => {
-      const operation = await readDiscovery(agentId);
-      return operation?.status === 'failed' ? operation : null;
-    }, 'the timeout');
-    expect(failed.failure?.code).toBe('timeout');
-
-    answer(agent, request.id, started.id);
-    agent.send(envelope('agent.heartbeat', {}));
-    await agent.next('server.heartbeat_ack');
-    const after = await readDiscovery(agentId);
-    expect(after).toMatchObject({ status: 'failed', vms: [] });
   });
 
   it('ignores a duplicate result', async () => {
