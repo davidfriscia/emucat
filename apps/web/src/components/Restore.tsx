@@ -51,6 +51,7 @@ const INELIGIBLE_TEXT: Record<RestoreIneligibleReason, string> = {
   repository_not_authorized: 'not associated with this repository',
   repository_not_configured: 'no local settings for this repository',
   local_copy_exists: 'it already holds a copy',
+  vm_running: 'the VM is running there',
   operation_in_progress: 'busy with another operation',
 };
 

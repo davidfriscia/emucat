@@ -16,6 +16,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::emulators::EmulatorType;
+use crate::execution::ExecutionSettings;
 use crate::extraction::ExtractionLimits;
 use crate::pairing::sanitize_agent_name;
 use crate::restore::RestoreSettings;
@@ -98,6 +99,8 @@ pub struct Config {
     /// How much the cache may hold. Zero turns it off.
     pub cache_max_bytes: u64,
     pub restore_limits: ExtractionLimits,
+    /// How emulators are stopped, and how long a new one must run to count as started.
+    pub execution: ExecutionSettings,
     pub repositories: BTreeMap<Uuid, RepositoryConfig>,
     pub media: MediaSettings,
     pub log_level: String,
@@ -154,6 +157,47 @@ struct FileConfig {
     repositories: BTreeMap<String, RepositorySection>,
     #[serde(default)]
     media: MediaSection,
+    #[serde(default)]
+    execution: ExecutionSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionSection {
+    stop_timeout_seconds: Option<u64>,
+    start_grace_seconds: Option<u64>,
+}
+
+fn resolve_execution(section: ExecutionSection) -> Result<ExecutionSettings, ConfigError> {
+    let defaults = ExecutionSettings::default();
+    let invalid = |field: &'static str, message: &str| ConfigError::Invalid {
+        field,
+        message: message.to_owned(),
+    };
+    let stop_timeout = match section.stop_timeout_seconds {
+        None => defaults.stop_timeout,
+        Some(seconds) if (5..=3600).contains(&seconds) => Duration::from_secs(seconds),
+        Some(_) => {
+            return Err(invalid(
+                "execution.stop_timeout_seconds",
+                "must be between 5 and 3600",
+            ));
+        }
+    };
+    let start_grace = match section.start_grace_seconds {
+        None => defaults.start_grace,
+        Some(seconds) if (1..=60).contains(&seconds) => Duration::from_secs(seconds),
+        Some(_) => {
+            return Err(invalid(
+                "execution.start_grace_seconds",
+                "must be between 1 and 60",
+            ));
+        }
+    };
+    Ok(ExecutionSettings {
+        stop_timeout,
+        start_grace,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -621,6 +665,7 @@ impl Config {
                 .cache_max_bytes
                 .unwrap_or(RestoreSettings::DEFAULT_CACHE_MAX_BYTES),
             restore_limits,
+            execution: resolve_execution(file.execution)?,
             repositories: resolve_repositories(file.repositories)?,
             log_level,
             log_format,
@@ -690,6 +735,7 @@ fn is_within(path: &Path, base: &Path) -> bool {
 /// Checks a loaded configuration against the machine. Reads metadata only.
 pub fn validate(config: &Config) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
+    let mut issues_later = Vec::new();
     let mut error = |message: String| {
         issues.push(ValidationIssue {
             severity: Severity::Error,
@@ -723,6 +769,13 @@ pub fn validate(config: &Config) -> Vec<ValidationIssue> {
                 "{emulator} executable is not a file: {}",
                 paths.executable.display()
             ));
+        } else if let Err(problem) = crate::launcher::check_executable(*emulator, &paths.executable)
+        {
+            // Not an error: discovery, registration and restore work without launching anything.
+            issues_later.push(ValidationIssue {
+                severity: Severity::Warning,
+                message: format!("{emulator} cannot be launched: {}", problem.message),
+            });
         }
     }
 
@@ -825,5 +878,6 @@ pub fn validate(config: &Config) -> Vec<ValidationIssue> {
         }
     }
 
+    issues.extend(issues_later);
     issues
 }

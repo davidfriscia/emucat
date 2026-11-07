@@ -5,6 +5,16 @@ import {
   discoveryRequestPayloadSchema,
   discoveryResultPayloadSchema,
 } from './discovery.js';
+import {
+  executionSyncPayloadSchema,
+  vmExecutionAckPayloadSchema,
+  vmExecutionStatusPayloadSchema,
+  vmLaunchPayloadSchema,
+  vmStopPayloadSchema,
+  vmVerifyAckPayloadSchema,
+  vmVerifyPayloadSchema,
+  vmVerifyResultPayloadSchema,
+} from './execution.js';
 import { mediaSyncStatusPayloadSchema } from './media.js';
 import { architectureSchema, platformSchema } from './platform.js';
 import {
@@ -148,6 +158,18 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.restore_error'),
     payload: restoreErrorPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.execution_sync'),
+    payload: executionSyncPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.vm_execution_status'),
+    payload: vmExecutionStatusPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.vm_verify_result'),
+    payload: vmVerifyResultPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -194,6 +216,17 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.restore_ack'),
     payload: restoreAckPayloadSchema,
+  }),
+  envelopeSchema.extend({ type: z.literal('server.vm_launch'), payload: vmLaunchPayloadSchema }),
+  envelopeSchema.extend({ type: z.literal('server.vm_stop'), payload: vmStopPayloadSchema }),
+  envelopeSchema.extend({
+    type: z.literal('server.vm_execution_ack'),
+    payload: vmExecutionAckPayloadSchema,
+  }),
+  envelopeSchema.extend({ type: z.literal('server.vm_verify'), payload: vmVerifyPayloadSchema }),
+  envelopeSchema.extend({
+    type: z.literal('server.vm_verify_ack'),
+    payload: vmVerifyAckPayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

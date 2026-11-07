@@ -497,6 +497,15 @@ async fn run_session<F: Future<Output = ()>>(
                         ) {
                             operations.refuse_invalid_restore(operation_id);
                         }
+                        if let (true, Some(operation_id), Some(operations)) = (
+                            message_type == "server.vm_verify",
+                            operation_id,
+                            &settings.operations,
+                        ) {
+                            operations.refuse_invalid_verification(operation_id);
+                        }
+                        // An invalid launch starts nothing. The server's session expires unanswered,
+                        // since a failed session cannot be described without the identities it lacks.
                         if let (true, Some(operation_id)) =
                             (message_type == "server.discovery_request", operation_id)
                         {
@@ -584,7 +593,12 @@ async fn run_session<F: Future<Output = ()>>(
                         | Message::ServerRegistrationRetryCleanup(_)
                         | Message::ServerRestoreRequest(_)
                         | Message::ServerRestoreCancel(_)
-                        | Message::ServerRestoreAck(_)) => {
+                        | Message::ServerRestoreAck(_)
+                        | Message::ServerVmLaunch(_)
+                        | Message::ServerVmStop(_)
+                        | Message::ServerVmExecutionAck(_)
+                        | Message::ServerVmVerify(_)
+                        | Message::ServerVmVerifyAck(_)) => {
                             match &settings.operations {
                                 Some(operations) if welcomed => operations.handle(message),
                                 _ => tracing::warn!("Ignored a repository command"),

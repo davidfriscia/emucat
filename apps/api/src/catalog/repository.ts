@@ -286,6 +286,8 @@ interface AdminVmRow extends RowDataPacket {
   main_media_visibility: MediaVisibility | null;
   media_count: number;
   version_count: number;
+  /** Only in the list, which shows a running badge. */
+  active_sessions?: number | string;
   created_at: Date;
   updated_at: Date;
 }
@@ -307,7 +309,10 @@ export async function listAdminVms(
     filter.values,
   );
   const [rows] = await pool.execute<AdminVmRow[]>(
-    `SELECT ${ADMIN_VM_COLUMNS}, LEFT(vm.description, ${CATALOG_SUMMARY_LENGTH}) AS summary
+    `SELECT ${ADMIN_VM_COLUMNS}, LEFT(vm.description, ${CATALOG_SUMMARY_LENGTH}) AS summary,
+       (SELECT COUNT(*) FROM vm_sessions AS session
+         WHERE session.emulator_type = vm.emulator_type AND session.vm_name = vm.vm_name
+           AND session.active_marker = 1) AS active_sessions
      FROM virtual_machines AS vm
      ${ADMIN_VM_JOIN}
      ${filter.clause}
@@ -325,6 +330,7 @@ export async function listAdminVms(
       mainMediaId: row.main_media_id,
       publicCover: publicCover(row),
       mediaCount: Number(row.media_count),
+      activeSessions: Number(row.active_sessions ?? 0),
       updatedAt: row.updated_at.toISOString(),
     })),
     pagination: paginate(query.page, query.pageSize, Number(counts[0]?.total)),

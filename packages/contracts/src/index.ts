@@ -5,6 +5,7 @@ export * from './auth.js';
 export * from './catalog.js';
 export * from './discovery.js';
 export * from './emulator.js';
+export * from './execution.js';
 export * from './media.js';
 export * from './operations.js';
 export * from './protocol.js';

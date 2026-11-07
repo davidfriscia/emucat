@@ -283,6 +283,18 @@ and it decides where the VM goes from its own base path. The full lifecycle is i
    **Neither ever asks the agent to delete a VM,** and no message can.
 4. `server.restore_cancel` asks it to stop. It has no effect once publication has begun, and a result that arrives after a cancellation is still recorded, since the directory exists.
 
+## Execution and verification
+
+Running a VM, and verifying a local copy. Commands name identities only; the agent builds every command line itself, refuses unknown fields, and checks conflicts again before acting. See [the launcher guide](launcher.md) and decisions 0028 to 0033.
+
+1. After each welcome, the agent sends `agent.execution_sync`: every session it has a journal for, what it can launch (`capabilities.emulators`, each `launchable` or with its `problem`, and `capabilities.modes`), and the verifications it has not closed. An agent that never sends it cannot launch or verify.
+2. `server.vm_launch` names a session, a VM and a mode. A repeated launch for a known session is answered with its state. The agent answers with `agent.vm_execution_status`: `starting`, `running`, `stopping`, and in the end `stopped`, `exited` or `failed`, or `unknown` when it cannot tell. Each carries the PID and the process's creation time once known.
+3. `server.vm_stop` asks for a stop. `force` is only ever set after an administrator typed the VM's name.
+4. A terminal status is repeated on each heartbeat until `server.vm_execution_ack`. The same acknowledgement for an `unknown` session is an administrator's dismissal.
+5. `server.vm_verify` names a master: version, repository, archive key, size and SHA-256, and the manifest's SHA-256. The agent answers with `agent.vm_verify_result`, repeated until `server.vm_verify_ack`.
+
+A remote mode is refused with `execution_mode_unavailable`, and never started locally.
+
 ## Screenshots
 
 Screenshot bytes never travel over this connection, and only a status does: see [the REST routes](api.md#agent-media).
@@ -328,4 +340,4 @@ session cookie, and a user's session cannot open this endpoint.
 
 - Credential rotation over the authenticated channel.
 - More control commands, each validated by the agent against local rules, such as `VmName`, whatever the server
-  sends: launching, stopping, snapshots.
+  sends: snapshots, and remote execution.

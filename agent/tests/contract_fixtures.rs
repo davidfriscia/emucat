@@ -421,3 +421,41 @@ fn a_restore_command_cannot_say_where_anything_goes() {
         );
     }
 }
+
+#[test]
+fn execution_messages_match_the_shared_fixtures() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in ["executionServerMessages", "executionAgentMessages"] {
+        let examples = wire[key].as_array().unwrap();
+        assert!(!examples.is_empty());
+        for example in examples {
+            let envelope: Envelope = serde_json::from_value(example.clone())
+                .unwrap_or_else(|error| panic!("{example}: {error}"));
+            let round_trip = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(round_trip["type"], example["type"]);
+            assert_eq!(round_trip["payload"], example["payload"], "{example}");
+        }
+    }
+}
+
+#[test]
+fn a_launch_command_cannot_carry_a_command_line_or_a_path() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for example in wire["executionRefusedByTheAgent"].as_array().unwrap() {
+        assert!(
+            serde_json::from_value::<Envelope>(example.clone()).is_err(),
+            "{example}"
+        );
+        // Refused before anything runs, naming the session or operation so that it can be answered.
+        match decode(&example.to_string()) {
+            Decoded::InvalidPayload {
+                message_type,
+                operation_id,
+            } => {
+                assert_eq!(Some(message_type.as_str()), example["type"].as_str());
+                assert!(operation_id.is_some(), "{example}");
+            }
+            other => panic!("{example}: {other:?}"),
+        }
+    }
+}

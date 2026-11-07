@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::archives::VersionId;
 use crate::config::EmulatorConfig;
 use crate::emulators::{EmulatorType, VmIdentity};
+use crate::execution::{ActivityProbe, ExecutionConfig, ExecutionManager, ExecutionSettings};
 use crate::media::is_watched_media_path;
 use crate::media_sync::MediaPreservation;
 use crate::packaging::{
@@ -57,6 +58,12 @@ const REMOTE_CLEANUP_ATTEMPTS: u32 = 6;
 const MEDIA_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// The code a removal blocked by a screenshot reports, which also keeps its journal for a retry.
 const MEDIA_BLOCKED_CODE: &str = "transfer_blocked_media";
+/// The code a removal refused because the VM is running reports. It is kept for a retry too.
+const RUNNING_BLOCKED_CODE: &str = "transfer_blocked_running";
+
+fn is_retryable_cleanup(code: Option<&str>) -> bool {
+    matches!(code, Some(MEDIA_BLOCKED_CODE | RUNNING_BLOCKED_CODE))
+}
 
 /// Finds a configured repository. A request can only name one by UUID.
 pub trait RepositoryProvider: Send + Sync {
@@ -81,6 +88,8 @@ pub struct OperationsConfig {
     pub media: Option<Arc<dyn MediaPreservation>>,
     /// Where restores keep things, and what they accept.
     pub restore: RestoreSettings,
+    /// How emulators are started and stopped.
+    pub execution: ExecutionSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,11 +150,14 @@ struct Inner {
     /// Set when the process is stopping. Work then ends without recording a failure: as far as the
     /// journal is concerned it was interrupted, and the next start handles that.
     stopping: CancelFlag,
+    /// Whether an emulator is running a VM. Nothing reads a VM for an archive, or removes it, then.
+    activity: OnceLock<ActivityProbe>,
 }
 
 pub struct AgentOperations {
     inner: Arc<Inner>,
     restores: Arc<RestoreManager>,
+    execution: Arc<ExecutionManager>,
     /// One session reads this at a time.
     outbound: tokio::sync::Mutex<mpsc::Receiver<Message>>,
 }
@@ -200,19 +212,63 @@ impl AgentOperations {
             Arc::clone(&running),
             stopping.clone(),
         )?;
+        let execution = ExecutionManager::load(
+            ExecutionConfig {
+                state_dir: config.state_dir.clone(),
+                emulators: Arc::clone(&config.emulators),
+                settings: config.execution,
+            },
+            outbound.clone(),
+            stopping.clone(),
+        )?;
         let inner = Arc::new(Inner {
             config,
             outbound,
             journals: Mutex::new(journals),
             running,
             stopping,
+            activity: OnceLock::new(),
         });
+
+        // Each side asks the other, so neither can start on a VM the other is using. Weak references, so
+        // that the managers can still be dropped.
+        let vm_activity: ActivityProbe = {
+            let execution = Arc::downgrade(&execution);
+            Arc::new(move |vm: &VmIdentity| {
+                execution
+                    .upgrade()
+                    .and_then(|execution| execution.activity(vm))
+            })
+        };
+        let _ = inner.activity.set(Arc::clone(&vm_activity));
+        restores.set_activity_probe(vm_activity);
+        let disk_work: ActivityProbe = {
+            let (inner, restores): (Weak<Inner>, Weak<RestoreManager>) =
+                (Arc::downgrade(&inner), Arc::downgrade(&restores));
+            Arc::new(move |vm: &VmIdentity| {
+                inner
+                    .upgrade()
+                    .and_then(|inner| inner.working_on(vm))
+                    .or_else(|| {
+                        restores
+                            .upgrade()
+                            .and_then(|restores| restores.working_on(vm))
+                    })
+            })
+        };
+        execution.set_busy_probe(disk_work);
+
         inner.recover_interrupted();
         Ok(Arc::new(Self {
             inner,
             restores,
+            execution,
             outbound: tokio::sync::Mutex::new(receiver),
         }))
+    }
+
+    pub fn execution(&self) -> &Arc<ExecutionManager> {
+        &self.execution
     }
 
     /// What a new connection must tell the server: which operations exist here, and every report the
@@ -232,6 +288,10 @@ impl AgentOperations {
             operations,
         })];
         messages.push(self.restores.sync_message());
+        messages.push(
+            self.execution
+                .sync_message(self.restores.open_verifications()),
+        );
         messages.extend(self.pending_reports());
         messages
     }
@@ -241,6 +301,7 @@ impl AgentOperations {
     pub fn pending_reports(&self) -> Vec<Message> {
         let mut reports = self.pending_registration_reports();
         reports.extend(self.restores.pending_reports());
+        reports.extend(self.execution.pending_reports());
         reports
     }
 
@@ -283,9 +344,19 @@ impl AgentOperations {
             Message::ServerRegistrationRetryCleanup(retry) => self.inner.retry_cleanup(&retry),
             message @ (Message::ServerRestoreRequest(_)
             | Message::ServerRestoreCancel(_)
-            | Message::ServerRestoreAck(_)) => self.restores.handle(message),
+            | Message::ServerRestoreAck(_)
+            | Message::ServerVmVerify(_)
+            | Message::ServerVmVerifyAck(_)) => self.restores.handle(message),
+            message @ (Message::ServerVmLaunch(_)
+            | Message::ServerVmStop(_)
+            | Message::ServerVmExecutionAck(_)) => self.execution.handle(message),
             _ => {}
         }
+    }
+
+    /// A verification that failed validation is answered as a failed one, so that it does not hang.
+    pub fn refuse_invalid_verification(&self, operation_id: Uuid) {
+        self.restores.refuse_invalid_verification(operation_id);
     }
 
     /// A request that failed validation still deserves an answer, if it can be identified.
@@ -304,6 +375,7 @@ impl AgentOperations {
 
     /// Stops running work. Blocking work notices within one read.
     pub fn shutdown(&self) {
+        self.execution.shutdown();
         self.inner.stopping.cancel();
         for flag in self.inner.running.lock().expect("poisoned").values() {
             flag.cancel();
@@ -515,10 +587,39 @@ impl Inner {
         self.send(Message::AgentRegistrationError(report));
     }
 
+    /// Why `vm` must not be launched now, if this module is working on it.
+    fn working_on(&self, vm: &VmIdentity) -> Option<String> {
+        let running = self.running.lock().expect("poisoned");
+        let journals = self.journals.lock().expect("poisoned");
+        running.keys().find_map(|operation_id| {
+            journals.get(operation_id).and_then(|journal| {
+                (journal.request.emulator_type == vm.emulator_type
+                    && journal.request.vm_name == vm.vm_name)
+                    .then(|| format!("A registration of {} is in progress", vm.vm_name))
+            })
+        })
+    }
+
+    fn vm_activity(&self, vm: &VmIdentity) -> Option<String> {
+        self.activity.get().and_then(|probe| probe(vm))
+    }
+
     fn start(self: &Arc<Self>, request: RegistrationRequest) {
         let operation_id = request.operation_id;
         if self.journal(operation_id).is_some() {
             tracing::debug!(%operation_id, "Ignored a repeated registration request");
+            return;
+        }
+        // An archive of a disk that an emulator is writing describes no moment of it.
+        if let Some(reason) = self.vm_activity(&VmIdentity {
+            emulator_type: request.emulator_type,
+            vm_name: request.vm_name.clone(),
+        }) {
+            self.send(Message::AgentRegistrationError(RegistrationFailure {
+                operation_id,
+                code: "vm_running".to_owned(),
+                message: bounded(&format!("{reason}. Stop it before registering it")),
+            }));
             return;
         }
         let cancel = CancelFlag::new();
@@ -898,7 +999,7 @@ impl Inner {
                 tracing::info!(%operation_id, "Registration closed");
                 let blocked = matches!(
                     &journal.report,
-                    Some(Report::Cleanup(report)) if report.code.as_deref() == Some(MEDIA_BLOCKED_CODE)
+                    Some(Report::Cleanup(report)) if is_retryable_cleanup(report.code.as_deref())
                 );
                 if blocked {
                     // The identity and the manifest are what a later retry has to check against.
@@ -1173,6 +1274,31 @@ impl Inner {
             // Registration succeeded. Local bookkeeping can be rebuilt by a later verification.
             tracing::warn!(%error, "Cannot record the local source version");
         }
+        // The kept copy is now a copy of this master, so its manifest lets a verification run without
+        // downloading anything. Only the manifest that was archived is kept.
+        if request.mode == RegistrationMode::Copy
+            && let Some(result) = &journal.result
+        {
+            let manifest = fs::read(self.manifest_path(request.operation_id))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+                .filter(|manifest| manifest.sha256() == result.manifest_sha256);
+            match manifest {
+                Some(manifest) => {
+                    if let Err(error) = crate::restore::keep_local_manifest(
+                        &self.config.state_dir,
+                        request.emulator_type,
+                        &request.vm_name,
+                        &manifest,
+                    ) {
+                        tracing::warn!(%error, "Cannot keep the manifest of the local copy");
+                    }
+                }
+                None => {
+                    tracing::warn!("The archived manifest cannot be kept for later verification")
+                }
+            }
+        }
         RegistrationCleanup {
             operation_id: request.operation_id,
             version_id: request.version_id,
@@ -1290,6 +1416,18 @@ impl Inner {
             request.vm_name.clone(),
             request.version_id,
         );
+        // Checked last, right before anything is removed. A launch is refused from here on, since this
+        // operation is in progress for this VM.
+        if let Some(reason) = self.vm_activity(&held_vm) {
+            if let Some(media) = &self.config.media {
+                media.hold(&held_vm, false);
+            }
+            tracing::warn!(%operation_id, %reason, "Local VM kept, since it is running");
+            return refused(
+                RUNNING_BLOCKED_CODE,
+                format!("{reason}, so the local VM was kept. Stop it, then retry the removal"),
+            );
+        }
         let removed = blocking(move || {
             remove_vm_directory(
                 &RemovalRequest {

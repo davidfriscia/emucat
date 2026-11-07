@@ -439,10 +439,46 @@ describe('schema rules', () => {
       await insert();
       await expect(insert()).rejects.toThrow(/Duplicate/);
       await pool.execute(
-        'UPDATE vm_sessions SET ended_at = CURRENT_TIMESTAMP(3) WHERE agent_id = ?',
+        "UPDATE vm_sessions SET execution_state = 'stopped', ended_at = CURRENT_TIMESTAMP(3) WHERE agent_id = ?",
         [agent],
       );
       await expect(insert()).resolves.toBeDefined();
+    });
+
+    it('keeps the state and the end in agreement, and one session per launch request', async () => {
+      const agent = randomUUID();
+      await pool.execute("INSERT INTO agents (id, name) VALUES (?, 'sessions-2')", [agent]);
+      const id = randomUUID();
+      const request = randomUUID();
+      await pool.execute(
+        "INSERT INTO vm_sessions (id, agent_id, request_id, emulator_type, vm_name) VALUES (?, ?, ?, 'qemu', 'Win98')",
+        [id, agent, request],
+      );
+      const [rows] = await pool.query<RowDataPacket[]>(
+        'SELECT execution_state, mode FROM vm_sessions WHERE id = ?',
+        [id],
+      );
+      expect(rows[0]).toMatchObject({ execution_state: 'requested', mode: 'local' });
+      // Ended, yet running: refused. Running is not a state that can end.
+      await expect(
+        pool.execute('UPDATE vm_sessions SET ended_at = CURRENT_TIMESTAMP(3) WHERE id = ?', [id]),
+      ).rejects.toThrow(/ck_vm_sessions_active/);
+      await expect(
+        pool.execute("UPDATE vm_sessions SET execution_state = 'exploded' WHERE id = ?", [id]),
+      ).rejects.toThrow(/ck_vm_sessions_state/);
+      await expect(
+        pool.execute("UPDATE vm_sessions SET mode = 'shell' WHERE id = ?", [id]),
+      ).rejects.toThrow(/ck_vm_sessions_mode/);
+      await pool.execute(
+        "UPDATE vm_sessions SET execution_state = 'failed', ended_at = CURRENT_TIMESTAMP(3) WHERE id = ?",
+        [id],
+      );
+      await expect(
+        pool.execute(
+          "INSERT INTO vm_sessions (id, agent_id, request_id, emulator_type, vm_name) VALUES (?, ?, ?, 'qemu', 'Win98')",
+          [randomUUID(), agent, request],
+        ),
+      ).rejects.toThrow(/Duplicate/);
     });
   });
 

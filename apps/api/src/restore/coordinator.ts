@@ -163,6 +163,8 @@ const INELIGIBLE_TEXT: Record<RestoreIneligibleReason, string> = {
   repository_not_authorized: 'This agent is not associated with this VM’s repository.',
   repository_not_configured: 'This agent has no local configuration for this VM’s repository.',
   local_copy_exists: 'This agent already holds a copy of this VM, and it is never overwritten.',
+  vm_running:
+    'This VM is running on this agent, or may be. Stop it, or dismiss the session, first.',
   operation_in_progress: 'This agent is busy with another operation.',
 };
 
@@ -170,6 +172,8 @@ interface EligibilityFacts {
   revoked: boolean;
   authorized: boolean;
   localState: string | null;
+  /** An active session of this VM on this agent. */
+  running: boolean;
   busy: boolean;
 }
 
@@ -201,6 +205,7 @@ export class RestoreCoordinator {
     }
     if (!facts.authorized) return 'repository_not_authorized';
     if (!capabilities.repositoryIds.includes(repositoryId)) return 'repository_not_configured';
+    if (facts.running) return 'vm_running';
     if (facts.localState !== null && facts.localState !== 'absent') return 'local_copy_exists';
     if (facts.busy) return 'operation_in_progress';
     return null;
@@ -231,14 +236,19 @@ export class RestoreCoordinator {
               (SELECT COUNT(*) FROM restore_operations AS op
                 WHERE op.agent_id = a.id AND op.active_marker = 1) +
               (SELECT COUNT(*) FROM registration_operations AS reg
-                WHERE reg.agent_id = a.id AND reg.active_marker = 1) AS active_operations
+                WHERE reg.agent_id = a.id AND reg.active_marker = 1) +
+              (SELECT COUNT(*) FROM vm_verifications AS v
+                WHERE v.agent_id = a.id AND v.active_marker = 1) AS active_operations,
+              (SELECT COUNT(*) FROM vm_sessions AS session
+                WHERE session.agent_id = a.id AND session.emulator_type = ? AND session.vm_name = ?
+                  AND session.active_marker = 1) AS active_sessions
        FROM agents AS a
        LEFT JOIN agent_repositories AS ar ON ar.agent_id = a.id AND ar.repository_id = ?
        LEFT JOIN agent_vm_state AS s
          ON s.agent_id = a.id AND s.emulator_type = ? AND s.vm_name = ?
        WHERE a.revoked_at IS NULL AND a.paired_at IS NOT NULL
        ORDER BY a.name, a.id`,
-      [repositoryId, vm.emulatorType, vm.vmName],
+      [vm.emulatorType, vm.vmName, repositoryId, vm.emulatorType, vm.vmName],
     );
 
     const agents: RestoreAgentOption[] = rows.map((row) => {
@@ -248,6 +258,7 @@ export class RestoreCoordinator {
         revoked: false,
         authorized: row.authorized !== null,
         localState: state,
+        running: Number(row.active_sessions) > 0,
         busy: Number(row.active_operations) > 0,
       });
       const capabilities = this.link.restoreCapabilities(agentId);
@@ -340,13 +351,21 @@ export class RestoreCoordinator {
         [agentId, emulatorType, canonicalName],
       );
       const [registrations] = await connection.execute<RowDataPacket[]>(
-        'SELECT 1 FROM registration_operations WHERE agent_id = ? AND active_marker = 1',
-        [agentId],
+        `SELECT 1 FROM registration_operations WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 1 FROM vm_verifications WHERE agent_id = ? AND active_marker = 1`,
+        [agentId, agentId],
+      );
+      // Launch takes this row's lock too, so no session can begin while this is decided.
+      const [sessions] = await connection.execute<RowDataPacket[]>(
+        `SELECT 1 FROM vm_sessions
+         WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1`,
+        [agentId, emulatorType, canonicalName],
       );
       const reason = this.ineligible(agentId, emulatorType, repositoryId, {
         revoked: agent.revoked_at !== null,
         authorized: version.authorized !== null,
         localState: (states[0]?.execution_state as string | undefined) ?? null,
+        running: sessions.length > 0,
         busy: registrations.length > 0,
       });
       if (reason) throw new ApiError(409, reason, INELIGIBLE_TEXT[reason]);

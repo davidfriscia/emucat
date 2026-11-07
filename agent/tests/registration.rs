@@ -314,6 +314,7 @@ impl World {
                 attempts: self.attempts,
             }),
             retry_delay: Duration::from_millis(1),
+            execution: emucat_agent::execution::ExecutionSettings::default(),
             media: self.media.clone(),
         })
         .unwrap()
@@ -1636,4 +1637,100 @@ async fn a_copy_starts_synchronization_and_never_waits_for_it() {
     assert_eq!(cleanup.local_copy, LocalCopyStatus::Preserved);
     assert!(fake.state.lock().unwrap().sync_requests >= 1);
     assert!(root.join("capture.ppm").exists());
+}
+
+/// A session an earlier run left without a process: whether its emulator runs cannot be told, so the
+/// VM is treated as running. It stands in for a running emulator without starting one.
+fn leave_unknown_session(world: &World, name: &str) -> Uuid {
+    let session = Uuid::new_v4();
+    let directory = world.state.join("executions");
+    fs::create_dir_all(&directory).unwrap();
+    let journal = serde_json::json!({
+        "request": {
+            "sessionId": session,
+            "emulatorType": "qemu",
+            "vmName": name,
+            "mode": "local",
+            "versionId": null,
+        },
+        "state": "running",
+        "process": null,
+        "graceful": null,
+        "startedAt": null,
+        "endedAt": null,
+        "exitCode": null,
+        "stopRequestedAt": null,
+        "code": null,
+        "message": null,
+    });
+    fs::write(
+        directory.join(format!("{session}.journal")),
+        serde_json::to_vec(&journal).unwrap(),
+    )
+    .unwrap();
+    session
+}
+
+#[tokio::test]
+async fn a_vm_that_may_be_running_is_neither_registered_nor_removed() {
+    let world = World::new();
+    let root = world.qemu_vm("Disposable");
+    let transfer = request("Disposable", RegistrationMode::Transfer);
+    {
+        let operations = world.start();
+        start(&operations, &transfer);
+        result_of(&operations).await;
+    }
+
+    // The VM is started between publication and the server's answer.
+    let session = leave_unknown_session(&world, "Disposable");
+    let operations = world.start();
+    let other = request("Disposable", RegistrationMode::Copy);
+    start(&operations, &other);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "vm_running");
+
+    operations.handle(committed(&transfer, true));
+    let cleanup = cleanup_of(&operations).await;
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::CleanupFailed);
+    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_running"));
+    assert!(root.join("disk.qcow2").is_file());
+
+    // Kept for a retry, which works once the session is over.
+    operations.handle(closed(&transfer));
+    assert_eq!(operations.open_operations(), vec![transfer.operation_id]);
+    operations.handle(Message::ServerVmExecutionAck(
+        emucat_agent::protocol::VmExecutionAck {
+            session_id: session,
+        },
+    ));
+    operations.handle(Message::ServerRegistrationRetryCleanup(
+        RegistrationRetryCleanup {
+            operation_id: transfer.operation_id,
+            version_id: transfer.version_id,
+        },
+    ));
+    let cleanup = cleanup_of(&operations).await;
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn a_kept_copy_keeps_the_archived_manifest_for_later_verification() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let operations = world.start();
+    let copy = request("Win98", RegistrationMode::Copy);
+    start(&operations, &copy);
+    let result = result_of(&operations).await;
+    operations.handle(committed(&copy, false));
+    cleanup_of(&operations).await;
+    let kept = world
+        .state
+        .join("local-manifests")
+        .join(format!("qemu-{}.json", VmName::new("Win98").unwrap().key()));
+    assert_eq!(
+        hex(&Sha256::digest(fs::read(&kept).unwrap())),
+        result.manifest_sha256
+    );
 }

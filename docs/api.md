@@ -224,6 +224,28 @@ Starting one answers 404 with `agent_not_found` or `version_not_found`, and 409 
 
 An operation's `error` has a `code`, from `RESTORE_ERROR_CODES`, and `recovery` says what can be done about it. `verified` says what the agent reports having verified, and the server has not read the archive.
 
+## Sessions and verification
+
+Administrators only, with the same-origin and CSRF rules as everything else here. A launch names an agent, a VM and a mode: no route accepts a command, a path, an argument or a process. Shapes are in
+[`execution.ts`](../packages/contracts/src/execution.ts), and the behavior in [the launcher guide](launcher.md).
+
+| Method and path                                          | What it does                                                                                                                           |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /admin/vms/:emulatorType/:vmName/execution-options` | The modes and whether each is available, and for each paired agent what it can do, its active session and its last verification        |
+| `POST /admin/sessions`                                   | Launches: `{ agentId, emulatorType, vmName, mode, requestId }`. 202, with the session. A repeated `requestId` returns the same session |
+| `GET /admin/sessions`                                    | The latest sessions, newest first. Filter with `agentId`, `emulatorType`, `vmName` and `limit` (at most 100)                           |
+| `GET /admin/sessions/:sessionId`                         | One session                                                                                                                            |
+| `POST /admin/sessions/:sessionId/stop`                   | `{ force: false }` asks for a graceful stop; `{ force: true, confirmVmName }` forces one. 202                                          |
+| `POST /admin/sessions/:sessionId/dismiss`                | `{ confirmVmName }` ends an `unknown` or never-started session on the server's side                                                    |
+| `POST /admin/verifications`                              | Verifies the agent's copy against the master: `{ agentId, emulatorType, vmName }`. 202                                                 |
+| `GET /admin/verifications/:verificationId`               | One verification, with its counts and the first paths of each kind                                                                     |
+
+Launching answers 409 with `execution_mode_unavailable`, `request_id_reused`, `agent_revoked`, `agent_offline`, `agent_cannot_launch`, `emulator_not_launchable`, `vm_not_on_agent`, `session_active` or `operation_in_progress`. Stopping answers 400 with
+`confirmation_mismatch`, and 409 with `session_ended`, `session_not_started`, `session_unknown` or `agent_offline`; a stop is never queued. Dismissing answers 409 with `session_not_dismissable`. Verifying answers 409 with `agent_cannot_verify`, `no_master`, `vm_not_on_agent`,
+`session_active` or `operation_in_progress`. Restores also answer 409 with `vm_running` while a session of the VM is active.
+
+The administrators' catalog cards carry `activeSessions`, for a running badge. Nothing about sessions appears in a public response.
+
 ## Repositories
 
 Administrators only, with the session and CSRF token. No response holds a credential, and no request can send one. See the

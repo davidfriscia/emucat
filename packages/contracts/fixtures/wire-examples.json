@@ -635,5 +635,266 @@
         "removeLocal": true
       }
     }
+  ],
+  "executionServerMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6310",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "86box",
+        "vmName": "DOS622",
+        "mode": "local",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6301"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6311",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_stop",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "86box",
+        "vmName": "DOS622",
+        "force": false
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6312",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_execution_ack",
+      "payload": { "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300" }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6313",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_verify",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6320",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6202",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201.zip",
+        "archiveSizeBytes": 2048,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6314",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_verify_ack",
+      "payload": { "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6320" }
+    }
+  ],
+  "executionAgentMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6330",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.execution_sync",
+      "payload": {
+        "sessions": [
+          {
+            "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+            "emulatorType": "86box",
+            "vmName": "DOS622",
+            "state": "running",
+            "pid": 4242,
+            "processStartedAt": "2026-01-31T15:29:58Z",
+            "startedAt": "2026-01-31T15:29:58Z",
+            "endedAt": null,
+            "exitCode": null,
+            "stopRequested": false,
+            "gracefulStopAvailable": true,
+            "code": null,
+            "message": null
+          }
+        ],
+        "capabilities": {
+          "emulators": [
+            { "emulatorType": "86box", "launchable": true, "problem": null },
+            {
+              "emulatorType": "qemu",
+              "launchable": false,
+              "problem": "qemu.exe is not named like a QEMU system emulator"
+            }
+          ],
+          "modes": ["local"]
+        },
+        "verifications": ["018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6320"]
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6331",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.vm_execution_status",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "86box",
+        "vmName": "DOS622",
+        "state": "stopped",
+        "pid": 4242,
+        "processStartedAt": "2026-01-31T15:29:58Z",
+        "startedAt": "2026-01-31T15:29:58Z",
+        "endedAt": "2026-01-31T16:01:12Z",
+        "exitCode": 0,
+        "stopRequested": true,
+        "gracefulStopAvailable": false,
+        "code": null,
+        "message": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6332",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.vm_execution_status",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6302",
+        "emulatorType": "qemu",
+        "vmName": "WinXP",
+        "state": "failed",
+        "pid": null,
+        "processStartedAt": null,
+        "startedAt": null,
+        "endedAt": "2026-01-31T15:30:00Z",
+        "exitCode": null,
+        "stopRequested": false,
+        "gracefulStopAvailable": false,
+        "code": "launch_configuration_required",
+        "message": "run.bat: -netdev hostfwd listens on every interface"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6333",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.vm_verify_result",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6320",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201",
+        "status": "modified",
+        "filesVerified": 41,
+        "bytesHashed": 1073741824,
+        "durationMs": 5321,
+        "missing": { "count": 0, "paths": [] },
+        "modified": { "count": 1, "paths": ["disk.qcow2"] },
+        "unexpected": { "count": 2, "paths": ["notes.txt", "saves/a.sav"] },
+        "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "manifestSource": "local",
+        "code": null,
+        "message": null
+      }
+    }
+  ],
+  "executionRefusedByTheAgent": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6340",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "local",
+        "versionId": null,
+        "command": "cmd.exe /c del C:\\x"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6341",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "local",
+        "versionId": null,
+        "executable": "C:\\Windows\\System32\\cmd.exe"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6342",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "local",
+        "versionId": null,
+        "args": ["-monitor", "stdio"]
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6343",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "qemu",
+        "vmName": "..\\..\\Windows",
+        "mode": "local",
+        "versionId": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6344",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "shell",
+        "versionId": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6345",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_stop",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6300",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "force": true,
+        "pid": 4
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6346",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_verify",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6320",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6202",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201.zip",
+        "archiveSizeBytes": 2048,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "manifestSha256": null,
+        "repair": true
+      }
+    }
   ]
 }

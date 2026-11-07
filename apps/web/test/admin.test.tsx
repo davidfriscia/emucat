@@ -65,6 +65,7 @@ describe('catalog management', () => {
     visibility: 'private',
     mainMediaId: null,
     publicCover: 'vm_private',
+    activeSessions: 0,
     mediaCount: 0,
     updatedAt: '2026-01-01T00:00:00.000Z',
   };

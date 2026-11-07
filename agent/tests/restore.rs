@@ -25,7 +25,8 @@ use emucat_agent::packaging::{
 };
 use emucat_agent::protocol::{
     LocalCopyCondition, Message, RepositoryConfigSummary, RestoreAck, RestoreAckOutcome,
-    RestoreCancel, RestoreRequest, RestoreResult, RestoreStage,
+    RestoreCancel, RestoreRequest, RestoreResult, RestoreStage, VerifyResultStatus, VmExecutionAck,
+    VmVerifyAck, VmVerifyRequest, VmVerifyResult,
 };
 use emucat_agent::registration::{AgentOperations, OperationsConfig, RepositoryProvider};
 use emucat_agent::repository::{
@@ -1213,6 +1214,7 @@ impl Harness {
                 attempts: self.attempts,
             }),
             retry_delay: Duration::from_millis(1),
+            execution: emucat_agent::execution::ExecutionSettings::default(),
             media: None,
             restore: RestoreSettings {
                 cache_dir: self.cache.clone(),
@@ -2151,4 +2153,262 @@ fn a_real_zip64_archive_of_more_than_4_gib_restores() {
         fs::metadata(target.join("disk.qcow2")).unwrap().len(),
         fs::metadata(root.join("disk.qcow2")).unwrap().len()
     );
+}
+
+// Verifying a local copy, which shares the restore's verified path to a master's manifest.
+
+impl Harness {
+    fn verify_request(&self) -> VmVerifyRequest {
+        VmVerifyRequest {
+            operation_id: Uuid::new_v4(),
+            emulator_type: EmulatorType::Qemu,
+            vm_name: self.vm_name.clone(),
+            version_id: self.version,
+            repository_id: REPOSITORY,
+            archive_key: archive_key(&self.vm_name, self.version),
+            archive_size_bytes: self.archive.len() as u64,
+            archive_sha256: sha256(&self.archive),
+            manifest_sha256: Some(self.manifest_sha256.clone()),
+        }
+    }
+
+    /// A session an earlier run left without a process: whether it runs cannot be told, so the VM is
+    /// treated as running. It stands in for a running emulator without starting one.
+    fn leave_unknown_session(&self) -> Uuid {
+        let session = Uuid::new_v4();
+        let directory = self.state.join("executions");
+        fs::create_dir_all(&directory).unwrap();
+        let journal = serde_json::json!({
+            "request": {
+                "sessionId": session,
+                "emulatorType": "qemu",
+                "vmName": self.vm_name.as_str(),
+                "mode": "local",
+                "versionId": null,
+            },
+            "state": "starting",
+            "process": null,
+            "graceful": null,
+            "startedAt": null,
+            "endedAt": null,
+            "exitCode": null,
+            "stopRequestedAt": null,
+            "code": null,
+            "message": null,
+        });
+        fs::write(
+            directory.join(format!("{session}.journal")),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        session
+    }
+}
+
+async fn verified(operations: &AgentOperations, operation_id: Uuid) -> VmVerifyResult {
+    let message = next_message(operations, |message| {
+        matches!(message, Message::AgentVmVerifyResult(result) if result.operation_id == operation_id)
+    })
+    .await;
+    match message {
+        Message::AgentVmVerifyResult(result) => result,
+        _ => unreachable!(),
+    }
+}
+
+fn verify(operations: &AgentOperations, request: &VmVerifyRequest) {
+    operations.handle(Message::ServerVmVerify(request.clone()));
+}
+
+#[tokio::test]
+async fn a_restored_copy_verifies_from_its_own_manifest_and_a_change_is_found() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let restore = harness.request();
+    start(&operations, &restore);
+    outcome(&operations).await.unwrap();
+    close(&operations, restore.operation_id);
+    let downloads = harness.repository.downloads();
+
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(result.status, VerifyResultStatus::Verified, "{result:?}");
+    assert_eq!(result.manifest_source.as_deref(), Some("local"));
+    assert_eq!(
+        result.manifest_sha256.as_deref(),
+        Some(harness.manifest_sha256.as_str())
+    );
+    assert_eq!(result.files_verified, 3);
+    assert_eq!(
+        result.bytes_hashed,
+        harness.manifest.total_uncompressed_bytes
+    );
+    // Nothing was downloaded or uploaded for it.
+    assert_eq!(harness.repository.downloads(), downloads);
+
+    fs::write(harness.destination().join("a/b/c.bin"), b"DEEP").unwrap();
+    fs::write(harness.destination().join("new.txt"), b"x").unwrap();
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(result.status, VerifyResultStatus::Modified);
+    assert_eq!(result.modified.paths, vec!["a/b/c.bin".to_owned()]);
+    assert_eq!(result.unexpected.paths, vec!["new.txt".to_owned()]);
+    // The VM is never repaired or changed by a verification.
+    assert_eq!(
+        fs::read(harness.destination().join("a/b/c.bin")).unwrap(),
+        b"DEEP"
+    );
+
+    fs::remove_file(harness.destination().join("disk.qcow2")).unwrap();
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    assert_eq!(
+        verified(&operations, request.operation_id).await.status,
+        VerifyResultStatus::Missing
+    );
+}
+
+#[tokio::test]
+async fn without_a_local_manifest_the_cache_and_then_the_repository_are_used() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let restore = harness.request();
+    start(&operations, &restore);
+    outcome(&operations).await.unwrap();
+    close(&operations, restore.operation_id);
+    fs::remove_dir_all(harness.state.join("local-manifests")).unwrap();
+
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(result.status, VerifyResultStatus::Verified, "{result:?}");
+    assert_eq!(result.manifest_source.as_deref(), Some("cache"));
+
+    // The verified manifest was kept, so the next one reads nothing remote.
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    assert_eq!(
+        verified(&operations, request.operation_id)
+            .await
+            .manifest_source
+            .as_deref(),
+        Some("local")
+    );
+
+    fs::remove_dir_all(harness.state.join("local-manifests")).unwrap();
+    fs::remove_dir_all(&harness.cache).unwrap();
+    let operations = harness.operations();
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(result.status, VerifyResultStatus::Verified, "{result:?}");
+    assert_eq!(result.manifest_source.as_deref(), Some("repository"));
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn a_verification_reports_what_it_cannot_do_and_repeats_until_answered() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+
+    // Not on this computer.
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(result.status, VerifyResultStatus::Missing);
+    assert_eq!(result.code.as_deref(), Some("vm_not_found"));
+
+    // A manifest hash other than the master's matches no copy of it.
+    fs::create_dir_all(harness.destination()).unwrap();
+    fs::write(harness.destination().join("run.bat"), b"x").unwrap();
+    let request = VmVerifyRequest {
+        manifest_sha256: Some("0".repeat(64)),
+        ..harness.verify_request()
+    };
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(
+        result.status,
+        VerifyResultStatus::VerificationFailed,
+        "{result:?}"
+    );
+    assert!(result.files_verified == 0 && result.manifest_sha256.is_none());
+
+    // A key for another VM.
+    let request = VmVerifyRequest {
+        archive_key: "qemu/other/versions/x.zip".to_owned(),
+        ..harness.verify_request()
+    };
+    verify(&operations, &request);
+    assert_eq!(
+        verified(&operations, request.operation_id)
+            .await
+            .code
+            .as_deref(),
+        Some("invalid_request")
+    );
+
+    // The repository cannot be reached, and the cache holds nothing: the earlier attempt cached the
+    // genuine archive, which is emptied here.
+    fs::remove_dir_all(&harness.cache).unwrap();
+    let operations = harness.operations();
+    harness.repository.fail(
+        "stat",
+        RepositoryError::new(Kind::Unreachable, "the server is down"),
+    );
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(result.status, VerifyResultStatus::Unavailable, "{result:?}");
+
+    // Results stay until answered, and survive a restart.
+    let pending = |operations: &AgentOperations| {
+        operations
+            .pending_reports()
+            .into_iter()
+            .filter(|message| matches!(message, Message::AgentVmVerifyResult(_)))
+            .count()
+    };
+    assert_eq!(pending(&operations), 4);
+    drop(operations);
+    let operations = harness.operations();
+    assert_eq!(pending(&operations), 4);
+    operations.handle(Message::ServerVmVerifyAck(VmVerifyAck {
+        operation_id: request.operation_id,
+    }));
+    assert_eq!(pending(&operations), 3);
+}
+
+#[tokio::test]
+async fn nothing_restores_or_verifies_a_vm_that_may_be_running() {
+    let harness = Harness::new();
+    let session = harness.leave_unknown_session();
+    let operations = harness.operations();
+
+    let request = harness.request();
+    start(&operations, &request);
+    let (code, _) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "vm_running");
+    assert!(!harness.destination().exists());
+
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    let result = verified(&operations, request.operation_id).await;
+    assert_eq!(result.status, VerifyResultStatus::Unavailable);
+    assert_eq!(result.code.as_deref(), Some("vm_running"));
+
+    // Dismissed by an administrator, and then the VM is free again.
+    let unknown = operations.execution().pending_reports();
+    assert!(
+        unknown.is_empty(),
+        "an unknown session is not an end: {unknown:?}"
+    );
+    operations.handle(Message::ServerVmExecutionAck(VmExecutionAck {
+        session_id: session,
+    }));
+    let request = harness.request();
+    start(&operations, &request);
+    outcome(&operations).await.unwrap();
 }

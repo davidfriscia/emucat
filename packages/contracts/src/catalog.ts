@@ -169,6 +169,8 @@ export const adminVmCardSchema = z.strictObject({
   mainMediaId: z.uuid().nullable(),
   publicCover: publicCoverStatusSchema,
   mediaCount: z.number().int().nonnegative(),
+  /** Sessions that may have an emulator running now, on any agent. Never in the public catalog. */
+  activeSessions: z.number().int().nonnegative(),
   updatedAt: timestampSchema,
 });
 export type AdminVmCard = z.infer<typeof adminVmCardSchema>;

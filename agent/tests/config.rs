@@ -319,8 +319,51 @@ fn warns_about_unencrypted_remote_servers() {
     let mut machine = machine();
     machine.config.api_url = "http://server.example:4000".parse().unwrap();
     let issues = validate(&machine.config);
-    assert_eq!(issues.len(), 1);
-    assert_eq!(issues[0].severity, Severity::Warning);
+    let unencrypted: Vec<_> = issues
+        .iter()
+        .filter(|issue| issue.message.contains("api_url"))
+        .collect();
+    assert_eq!(unencrypted.len(), 1);
+    assert_eq!(unencrypted[0].severity, Severity::Warning);
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue.severity == Severity::Warning)
+    );
+}
+
+#[test]
+fn an_executable_that_cannot_be_launched_is_only_a_warning() {
+    // The test machine's executables are empty files, which discovery accepts and a launch does not.
+    let machine = machine();
+    let issues = validate(&machine.config);
+    let launch: Vec<_> = issues
+        .iter()
+        .filter(|issue| issue.message.contains("cannot be launched"))
+        .collect();
+    assert_eq!(launch.len(), 1, "{issues:?}");
+    assert!(
+        launch
+            .iter()
+            .all(|issue| issue.severity == Severity::Warning)
+    );
+    assert!(error_messages(&machine.config).is_empty());
+}
+
+#[test]
+fn reads_execution_settings_and_refuses_out_of_range_ones() {
+    let machine = machine();
+    assert_eq!(
+        machine.config.execution,
+        emucat_agent::execution::ExecutionSettings::default()
+    );
+    let with = |section: &str| parse(&format!("{MINIMAL}\n[execution]\n{section}\n"));
+    let config = with("stop_timeout_seconds = 30\nstart_grace_seconds = 5").unwrap();
+    assert_eq!(config.execution.stop_timeout.as_secs(), 30);
+    assert_eq!(config.execution.start_grace.as_secs(), 5);
+    assert!(with("stop_timeout_seconds = 0").is_err());
+    assert!(with("start_grace_seconds = 600").is_err());
+    assert!(with("command = \"cmd.exe\"").is_err());
 }
 
 #[test]

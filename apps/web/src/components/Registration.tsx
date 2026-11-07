@@ -1,5 +1,6 @@
 import {
   isRegistrationCommitted,
+  isRetryableCleanup,
   isRegistrationTerminal,
   type LocalCopyStatus,
   type RegistrationMode,
@@ -216,8 +217,7 @@ export function RegistrationCard({
               Cancel
             </button>
           ) : null}
-          {operation.state === 'partial_success' &&
-          operation.error?.code === 'transfer_blocked_media' ? (
+          {operation.state === 'partial_success' && isRetryableCleanup(operation.error?.code) ? (
             <button
               type="button"
               className="btn btn-sm btn-outline-secondary theme-button"

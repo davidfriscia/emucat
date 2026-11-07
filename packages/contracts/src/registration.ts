@@ -59,6 +59,8 @@ export const REGISTRATION_ERROR_CODES = [
   'insufficient_staging_space',
   'staging_failed',
   'transfer_blocked_media',
+  'transfer_blocked_running',
+  'vm_running',
   // From the repository.
   'repository_not_configured',
   'repository_unreachable',
@@ -105,6 +107,9 @@ const RECOVERY: Partial<Record<string, string>> = {
   insufficient_staging_space:
     'Free up space on the staging disk, or point storage.staging_dir at a larger one.',
   staging_failed: 'Check the agent’s staging directory, and try again.',
+  transfer_blocked_running:
+    'The VM was running, or may have been, so the local VM was kept. Stop it, then choose Retry removal.',
+  vm_running: 'The VM is running. Stop it before registering it.',
   transfer_blocked_media:
     'Screenshots are not in the archive, and the server could not confirm that it holds all of them, so the local VM was kept. Check the VM’s Media page, and choose Retry removal once it is synchronized. A file that is not a supported image has to be moved out of the screenshots directory first. Copy never removes anything.',
   repository_not_configured:
@@ -153,6 +158,16 @@ const RECOVERY: Partial<Record<string, string>> = {
 /** What an administrator can do about a failure. */
 export function registrationRecovery(code: string): string | null {
   return RECOVERY[code] ?? null;
+}
+
+/** A transfer whose removal was refused for a reason that can pass: the agent kept its journal. */
+export const RETRYABLE_CLEANUP_CODES = [
+  'transfer_blocked_media',
+  'transfer_blocked_running',
+] as const;
+
+export function isRetryableCleanup(code: string | null | undefined): boolean {
+  return (RETRYABLE_CLEANUP_CODES as readonly string[]).includes(code ?? '');
 }
 
 const safeSizeSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

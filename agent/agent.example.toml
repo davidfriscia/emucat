@@ -92,6 +92,14 @@ executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
 # # How long a transfer waits for its screenshots to reach the server before keeping the local VM.
 # transfer_wait_seconds = 120
 
+# Running VMs. These are the defaults. See docs/launcher.md. The agent builds every command line itself,
+# from the emulator settings above and the VM's own directory, and never runs a batch file.
+# [execution]
+# # How long a graceful stop may take before it is reported as timed out. 5 to 3600.
+# stop_timeout_seconds = 120
+# # An emulator that exits sooner than this failed to start. 1 to 60.
+# start_grace_seconds = 3
+
 [logging]
 # An EnvFilter expression: error, warn, info, debug, trace, or per-module directives.
 level = "info"

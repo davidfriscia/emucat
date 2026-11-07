@@ -9,12 +9,14 @@ import type { PasswordHasher } from '../auth/passwords.js';
 import type { RateLimiter } from '../auth/rate-limiter.js';
 import type { SessionPolicy } from '../auth/sessions.js';
 import type { SetupToken } from '../auth/setup.js';
+import type { ExecutionCoordinator } from '../execution/coordinator.js';
 import type { MediaPolicy } from '../media/uploads.js';
 import type { RegistrationCoordinator, RegistrationPolicy } from '../registration/coordinator.js';
 import type { RestoreCoordinator } from '../restore/coordinator.js';
 import type { MediaStorage } from '../storage/media-storage.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
+import { registerAdminExecutionRoutes } from './admin-execution.js';
 import { registerAdminRegistrationRoutes } from './admin-registrations.js';
 import { registerAdminRestoreRoutes } from './admin-restores.js';
 import { registerAgentMediaRoutes } from './agent-media.js';
@@ -47,6 +49,7 @@ export async function registerBrowserRoutes(
   hub: AgentHub,
   registrations: RegistrationCoordinator,
   restores: RestoreCoordinator,
+  execution: ExecutionCoordinator,
   authenticateAgent: AgentAuthenticator,
 ): Promise<void> {
   await api.register(cookie);
@@ -63,4 +66,5 @@ export async function registerBrowserRoutes(
   registerAdminAgentRoutes(api, dependencies, hub);
   registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
   registerAdminRestoreRoutes(api, dependencies, restores);
+  registerAdminExecutionRoutes(api, dependencies, execution);
 }

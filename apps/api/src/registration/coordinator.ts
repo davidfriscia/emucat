@@ -3,6 +3,7 @@ import {
   archiveObjectKey,
   isRegistrationCommitted,
   isRegistrationTerminal,
+  isRetryableCleanup,
   registrationRecovery,
   type CreateRegistrationRequest,
   type RegistrationAckPayload,
@@ -218,14 +219,16 @@ export class RegistrationCoordinator {
       }
       // A restore creating itself holds this row's exclusive lock, so the two cannot start together.
       const [restores] = await connection.execute<RowDataPacket[]>(
-        'SELECT 1 FROM restore_operations WHERE agent_id = ? AND active_marker = 1',
-        [agentId],
+        `SELECT 'restore' AS kind FROM restore_operations WHERE agent_id = ? AND active_marker = 1
+         UNION ALL
+         SELECT 'verification' FROM vm_verifications WHERE agent_id = ? AND active_marker = 1`,
+        [agentId, agentId],
       );
       if (restores.length > 0) {
         throw new ApiError(
           409,
           'registration_in_progress',
-          'A restore is running on this agent. Wait for it to finish.',
+          `A ${restores[0]?.kind as string} is running on this agent. Wait for it to finish.`,
         );
       }
       const [repositories] = await connection.execute<RowDataPacket[]>(
@@ -447,23 +450,33 @@ export class RegistrationCoordinator {
     if (
       before.state !== 'partial_success' ||
       before.mode !== 'transfer' ||
-      before.error?.code !== 'transfer_blocked_media'
+      !isRetryableCleanup(before.error?.code)
     ) {
       throw new ApiError(
         409,
         'registration_not_retryable',
-        'Only a transfer whose removal was blocked by a screenshot can be retried.',
+        'Only a transfer whose removal was blocked by a screenshot or a running VM can be retried.',
       );
     }
     if (!this.link.isOnline(before.agentId)) {
       throw new ApiError(409, 'agent_offline', 'This agent is offline.');
+    }
+    // The agent checks again right before removing anything. This only spares it a request it refuses.
+    const [sessions] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT 1 FROM vm_sessions
+       WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1`,
+      [before.agentId, before.emulatorType, before.vmName],
+    );
+    if (sessions.length > 0) {
+      throw new ApiError(409, 'vm_running', 'The VM is running on this agent. Stop it first.');
     }
     try {
       const [result] = await this.pool.execute<ResultSetHeader>(
         `UPDATE registration_operations
          SET state = 'cleaning_local', local_copy = NULL, error_code = NULL, error_message = NULL,
              finished_at = NULL, progress_done_bytes = NULL, progress_total_bytes = NULL
-         WHERE id = ? AND state = 'partial_success' AND error_code = 'transfer_blocked_media'`,
+         WHERE id = ? AND state = 'partial_success'
+           AND error_code IN ('transfer_blocked_media', 'transfer_blocked_running')`,
         [operationId],
       );
       if (result.affectedRows === 0) {

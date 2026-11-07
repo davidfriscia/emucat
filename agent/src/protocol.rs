@@ -114,6 +114,22 @@ pub enum Message {
     ServerRestoreCancel(RestoreCancel),
     #[serde(rename = "server.restore_ack")]
     ServerRestoreAck(RestoreAck),
+    #[serde(rename = "agent.execution_sync")]
+    AgentExecutionSync(ExecutionSync),
+    #[serde(rename = "agent.vm_execution_status")]
+    AgentVmExecutionStatus(VmExecutionStatus),
+    #[serde(rename = "agent.vm_verify_result")]
+    AgentVmVerifyResult(VmVerifyResult),
+    #[serde(rename = "server.vm_launch")]
+    ServerVmLaunch(VmLaunchRequest),
+    #[serde(rename = "server.vm_stop")]
+    ServerVmStop(VmStopRequest),
+    #[serde(rename = "server.vm_execution_ack")]
+    ServerVmExecutionAck(VmExecutionAck),
+    #[serde(rename = "server.vm_verify")]
+    ServerVmVerify(VmVerifyRequest),
+    #[serde(rename = "server.vm_verify_ack")]
+    ServerVmVerifyAck(VmVerifyAck),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -584,6 +600,7 @@ pub fn decode(text: &str) -> Decoded {
         Err(_) => Decoded::InvalidPayload {
             operation_id: value
                 .pointer("/payload/operationId")
+                .or_else(|| value.pointer("/payload/sessionId"))
                 .and_then(|v| v.as_str())
                 .and_then(|id| Uuid::parse_str(id).ok()),
             message_type,
@@ -621,5 +638,181 @@ fn is_known_type(message_type: &str) -> bool {
             | "server.restore_request"
             | "server.restore_cancel"
             | "server.restore_ack"
+            | "agent.execution_sync"
+            | "agent.vm_execution_status"
+            | "agent.vm_verify_result"
+            | "server.vm_launch"
+            | "server.vm_stop"
+            | "server.vm_execution_ack"
+            | "server.vm_verify"
+            | "server.vm_verify_ack"
     )
+}
+
+/// Where a VM runs from. Only `local` is implemented: the others are refused, never treated as `local`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Local,
+    RemoteVolatile,
+    RemoteSnapshot,
+}
+
+/// Starts a VM that this agent holds. It names a session and a VM, and nothing about how: the executable,
+/// the arguments and the directory all come from this agent's configuration and the VM's own files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmLaunchRequest {
+    pub session_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub mode: ExecutionMode,
+    /// The version the local copy is believed to come from, for the record. Never used to find files.
+    pub version_id: Option<Uuid>,
+}
+
+/// Asks a session's emulator to stop. `force` ends the process at once, and the server only sends it after
+/// an administrator confirmed exactly that.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmStopRequest {
+    pub session_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub force: bool,
+}
+
+/// The server has recorded a session's end. The agent can forget it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmExecutionAck {
+    pub session_id: Uuid,
+}
+
+/// What the agent knows about a session's process. The server alone records `requested` and
+/// `interrupted`, which an agent cannot know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecutionState {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Exited,
+    Failed,
+    /// The agent cannot tell whether the process still runs. Nothing destructive may happen to the VM.
+    Unknown,
+}
+
+impl AgentExecutionState {
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Stopped | Self::Exited | Self::Failed)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmExecutionStatus {
+    pub session_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub state: AgentExecutionState,
+    pub pid: Option<u32>,
+    /// When the operating system says the process was created. With the PID, it identifies the process.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub process_started_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub started_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub ended_at: Option<OffsetDateTime>,
+    pub exit_code: Option<i64>,
+    pub stop_requested: bool,
+    /// Whether a graceful stop can be asked for at the moment.
+    pub graceful_stop_available: bool,
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionEmulator {
+    pub emulator_type: EmulatorType,
+    pub launchable: bool,
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionCapabilities {
+    pub emulators: Vec<ExecutionEmulator>,
+    pub modes: Vec<ExecutionMode>,
+}
+
+/// Sent after every welcome. It says what this agent can launch, every session it still knows of, and
+/// which verifications it is running. Sending it is also what tells a server that this agent can launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionSync {
+    pub sessions: Vec<VmExecutionStatus>,
+    pub capabilities: ExecutionCapabilities,
+    pub verifications: Vec<Uuid>,
+}
+
+/// Verifies a local copy against a master. The identities let the agent find and check the manifest: its
+/// SHA-256 must match, whichever copy of it the agent reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmVerifyRequest {
+    pub operation_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub version_id: Uuid,
+    pub repository_id: Uuid,
+    pub archive_key: String,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+    pub manifest_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VmVerifyAck {
+    pub operation_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyResultStatus {
+    Verified,
+    Modified,
+    Missing,
+    Unavailable,
+    VerificationFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyPathList {
+    pub count: u64,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmVerifyResult {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+    pub status: VerifyResultStatus,
+    pub files_verified: u64,
+    pub bytes_hashed: u64,
+    pub duration_ms: u64,
+    pub missing: VerifyPathList,
+    pub modified: VerifyPathList,
+    pub unexpected: VerifyPathList,
+    /// The manifest the files were compared with, once it was found and checked.
+    pub manifest_sha256: Option<String>,
+    /// Where it came from: `local`, `cache` or `repository`.
+    pub manifest_source: Option<String>,
+    pub code: Option<String>,
+    pub message: Option<String>,
 }

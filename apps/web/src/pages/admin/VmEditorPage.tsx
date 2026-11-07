@@ -19,6 +19,7 @@ import {
   updateVmVisibility,
 } from '../../api';
 import { EmulatorBadge, VisibilityBadge } from '../../components/Catalog';
+import { VmExecutionSection } from '../../components/Execution';
 import { VmRestoreSection } from '../../components/Restore';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
 import { VmMediaGrid } from '../../components/VmMediaGrid';
@@ -287,6 +288,7 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
             </div>
           </section>
           <VmRestoreSection vm={identity} />
+          <VmExecutionSection vm={identity} />
           <section className="card">
             <div className="card-body">
               <h2 className="h6 card-title">Identity</h2>

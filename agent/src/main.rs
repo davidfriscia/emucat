@@ -29,6 +29,7 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::CheckConfig => check_config(&cli),
+        Command::LaunchCheck { emulator, vm } => launch_check(&cli, emulator, vm),
         Command::Run => run(&cli),
         Command::Pair { name, force } => pair(&cli, name.as_deref(), *force),
         Command::Unpair => unpair(&cli),
@@ -221,6 +222,7 @@ fn operations(
         emulators: Arc::clone(&settings.emulators),
         retry_delay: Duration::from_secs(5),
         media: Some(media),
+        execution: config.execution,
     })
 }
 
@@ -390,5 +392,35 @@ fn discover(cli: &Cli) -> Result<(), String> {
     let report = discovery::scan(&config.emulators, host, &ScanLimits::default());
     let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
     println!("{json}");
+    Ok(())
+}
+
+/// Everything a launch checks, and the command it would run. Starts nothing.
+fn launch_check(cli: &Cli, emulator: &str, vm: &str) -> Result<(), String> {
+    use emucat_agent::emulators::{EmulatorType, VmName};
+    let config = load(cli).map_err(|error| error.to_string())?;
+    let emulator: EmulatorType = emulator
+        .parse()
+        .map_err(|_| format!("unknown emulator {emulator:?}; use 86box or qemu"))?;
+    let vm_name = VmName::new(vm).map_err(|error| format!("invalid VM name: {error}"))?;
+    let paths = config
+        .emulators
+        .get(&emulator)
+        .ok_or_else(|| format!("{emulator} is not configured"))?;
+    let plan = emucat_agent::launcher::plan_launch(
+        emulator,
+        &paths.executable,
+        &paths.base_path,
+        &vm_name,
+    )
+    .map_err(|error| format!("{}: {}", error.kind.code(), error.message))?;
+    println!("program: {}", plan.spawn.program.display());
+    println!("working directory: {}", plan.spawn.working_dir.display());
+    println!("from: {}", plan.source);
+    println!("arguments:");
+    for argument in &plan.spawn.args {
+        println!("  {}", argument.to_string_lossy());
+    }
+    println!("graceful stop: {:?}", plan.graceful);
     Ok(())
 }

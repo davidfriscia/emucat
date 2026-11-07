@@ -21,9 +21,13 @@ use crate::protocol::PROTOCOL_VERSION;
         verifies its SHA-256 there. It restores a registered master when an administrator asks: it \
         downloads the ZIP straight from the repository, verifies its SHA-256 and manifest, extracts it \
         safely, and publishes the VM under the configured base path, never over an existing \
-        directory. It keeps verified ZIPs in a local cache. It has no listener and launches no \
-        emulators. It removes a local VM only for an explicitly confirmed transfer, after the server \
-        has committed a verified master. Pair it once with `pair`, then keep it running with `run`."
+        directory. It keeps verified ZIPs in a local cache. It launches a VM in 86Box or QEMU when an \
+        administrator asks, from a command line it builds and checks itself, without a shell, tracks \
+        the process by PID and creation time, and stops it gracefully, or forcibly only when \
+        explicitly confirmed. It verifies a local VM against its master's manifest, read-only. It has \
+        no listener. It removes a local VM only for an explicitly confirmed transfer, after the server \
+        has committed a verified master, and never while it runs. Pair it once with `pair`, then keep \
+        it running with `run`."
 )]
 pub struct Cli {
     /// Configuration file [env: EMUCAT_AGENT_CONFIG]
@@ -74,6 +78,15 @@ pub enum Command {
         /// The repository's UUID, as shown on the Repositories page
         #[arg(long, value_name = "UUID")]
         repository: Uuid,
+    },
+    /// Print the command a launch of a VM would run, after every check, without running it
+    LaunchCheck {
+        /// 86box or qemu
+        #[arg(long, value_name = "EMULATOR")]
+        emulator: String,
+        /// The VM's directory name under the emulator's base path
+        #[arg(long, value_name = "NAME")]
+        vm: String,
     },
     /// Validate the configuration and exit
     CheckConfig,

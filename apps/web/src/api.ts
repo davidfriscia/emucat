@@ -12,6 +12,7 @@ import {
   CSRF_HEADER,
   discoveryOperationSchema,
   discoveryStateResponseSchema,
+  executionOptionsResponseSchema,
   infoResponseSchema,
   pairingRequestListResponseSchema,
   pairingRequestReviewSchema,
@@ -30,6 +31,9 @@ import {
   sessionListResponseSchema,
   sessionStateResponseSchema,
   setupStatusResponseSchema,
+  vmSessionListResponseSchema,
+  vmSessionSchema,
+  vmVerificationSchema,
   type AdminCatalogResponse,
   type AdminMediaListResponse,
   type AdminMediaSyncResponse,
@@ -43,6 +47,13 @@ import {
   type DiscoveryOperation,
   type DiscoveryStateResponse,
   type EmulatorType,
+  type ExecutionOptionsResponse,
+  type LaunchRequest,
+  type StopSessionRequest,
+  type VerifyRequest,
+  type VmSession,
+  type VmSessionListResponse,
+  type VmVerification,
   type InfoResponse,
   type MediaVisibility,
   type PairingRequestListResponse,
@@ -575,5 +586,53 @@ export function startRestore(request: CreateRestoreRequest): Promise<RestoreOper
 export function cancelRestore(operationId: string): Promise<RestoreOperation> {
   return requestJson(`/admin/restores/${operationId}/cancel`, restoreOperationSchema, {
     method: 'POST',
+  });
+}
+
+// Running VMs, and verifying local copies
+
+export function fetchExecutionOptions(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<ExecutionOptionsResponse> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/execution-options`,
+    executionOptionsResponseSchema,
+    { signal },
+  );
+}
+
+export function fetchVmSessions(
+  filter: { agentId?: string; emulatorType?: EmulatorType; vmName?: string; limit?: number },
+  signal?: AbortSignal,
+): Promise<VmSessionListResponse> {
+  return requestJson(`/admin/sessions${queryString(filter)}`, vmSessionListResponseSchema, {
+    signal,
+  });
+}
+
+/** Names an agent, a VM and a mode, and nothing else: the agent builds the command itself. */
+export function launchVm(request: LaunchRequest): Promise<VmSession> {
+  return requestJson('/admin/sessions', vmSessionSchema, { method: 'POST', body: request });
+}
+
+export function stopSession(sessionId: string, request: StopSessionRequest): Promise<VmSession> {
+  return requestJson(`/admin/sessions/${sessionId}/stop`, vmSessionSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function dismissSession(sessionId: string, confirmVmName: string): Promise<VmSession> {
+  return requestJson(`/admin/sessions/${sessionId}/dismiss`, vmSessionSchema, {
+    method: 'POST',
+    body: { confirmVmName },
+  });
+}
+
+export function verifyLocalCopy(request: VerifyRequest): Promise<VmVerification> {
+  return requestJson('/admin/verifications', vmVerificationSchema, {
+    method: 'POST',
+    body: request,
   });
 }

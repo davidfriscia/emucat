@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import { AgentHub, NO_PRESENCE } from './agents/hub.js';
 import type { AgentAuthenticator } from './auth/agent-auth.js';
 import { registerErrorHandling } from './errors.js';
+import { ExecutionCoordinator } from './execution/coordinator.js';
 import { RegistrationCoordinator } from './registration/coordinator.js';
 import { RestoreCoordinator } from './restore/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
@@ -75,6 +76,16 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           app.log,
         );
         hub.setRestores(restores);
+        const execution = new ExecutionCoordinator(
+          browser.pool,
+          {
+            isOnline: (agentId) => hub.isOnline(agentId),
+            executionCapabilities: (agentId) => hub.executionCapabilities(agentId),
+            send: (agentId, message) => hub.sendToAgent(agentId, message),
+          },
+          app.log,
+        );
+        hub.setExecution(execution);
         await api.register(async (scope) =>
           registerBrowserRoutes(
             scope,
@@ -82,6 +93,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             hub,
             registrations,
             restores,
+            execution,
             dependencies.authenticateAgent,
           ),
         );

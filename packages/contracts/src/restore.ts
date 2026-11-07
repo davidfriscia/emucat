@@ -334,6 +334,7 @@ export const RESTORE_INELIGIBLE_REASONS = [
   'repository_not_authorized',
   'repository_not_configured',
   'local_copy_exists',
+  'vm_running',
   'operation_in_progress',
 ] as const;
 export type RestoreIneligibleReason = (typeof RESTORE_INELIGIBLE_REASONS)[number];

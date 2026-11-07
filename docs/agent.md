@@ -14,6 +14,7 @@ is committed.
 | `discover`                                | Scans the configured directories, read-only, and prints the report |
 | `media-status`                            | Prints what the screenshot queue holds, without connecting         |
 | `cache-status`                            | Prints what the archive cache holds, without connecting            |
+| `launch-check --emulator E --vm NAME`     | Prints the command line the agent would use, and starts nothing    |
 | `repository-check --repository UUID`      | Tests a configured repository directly                             |
 | `repository-passphrase --repository UUID` | Stores the passphrase of a repository's key, protected with DPAPI  |
 | `check-config`, `info`                    | Validates the configuration, or prints versions and default paths  |
@@ -211,6 +212,10 @@ An administrator restores a registered master from the VM's page, by choosing an
 
 **After a restart,** a restore in progress is reported as failed and cleaned up, and it is safe to try again. One stopped exactly at the rename is recognized by checking the directory itself: if it is the one that was assembled, it was published. Anything the agent cannot identify is left alone and reported. See decisions [0021](decisions/0021-restore-lifecycle.md),
 [0022](decisions/0022-safe-zip-extraction.md), [0023](decisions/0023-atomic-local-publication.md) and [0024](decisions/0024-local-archive-cache.md).
+
+## Running and verifying VMs
+
+An administrator can launch a VM the agent holds, stop it, and verify its copy against the master, from the VM's page. The agent builds every command line itself, never runs a batch file, tracks the emulator by its PID and creation time, and refuses to restore, remove or verify a VM while it may be running. Everything is in [the launcher guide](launcher.md).
 
 ## Screenshots
 

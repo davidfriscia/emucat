@@ -9,11 +9,11 @@
 //! The agent decides where a VM goes, from its own configuration, and it recomputes the archive key. The
 //! server names identities only.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ use crate::archive_cache::{ArchiveCache, CachePin};
 use crate::archives::VersionId;
 use crate::config::EmulatorConfig;
 use crate::emulators::{EmulatorType, VmIdentity, VmName};
+use crate::execution::ActivityProbe;
 use crate::extraction::{
     ArchiveError, ArchiveErrorKind, ArchiveExpectation, ExtractionLimits, InspectedArchive,
     Publication, archive_error, check_base_path, check_destination_free, extract_archive,
@@ -38,13 +39,15 @@ use crate::packaging::{
 use crate::protocol::{
     LocalCopyCondition, LocalCopyReport, Message, RestoreAck, RestoreCache, RestoreCancel,
     RestoreCapabilities, RestoreEmulator, RestoreFailure, RestorePhase, RestoreProgress,
-    RestoreRequest, RestoreResult, RestoreStage, RestoreSync, RestoreSyncEntry,
+    RestoreRequest, RestoreResult, RestoreStage, RestoreSync, RestoreSyncEntry, VerifyPathList,
+    VerifyResultStatus, VmVerifyAck, VmVerifyRequest, VmVerifyResult,
 };
 use crate::registration::RepositoryProvider;
 use crate::repository::{
     ArchiveRepository, CancelFlag, ProgressFn, RepositoryError, RepositoryErrorKind, RepositoryKey,
 };
 use crate::state::{local_source_entries, record_local_source};
+use crate::verification::{PathList, VerifyStatus, verify_local_copy};
 
 /// Progress is informational, so it is thinned out to well below the server's message limit.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
@@ -157,6 +160,41 @@ fn local_manifest_path(state_dir: &Path, emulator: EmulatorType, vm_name: &VmNam
         .join(format!("{emulator}-{}.json", vm_name.key()))
 }
 
+/// Keeps the manifest of the master a local VM is a copy of, replacing an older one atomically.
+pub fn keep_local_manifest(
+    state_dir: &Path,
+    emulator: EmulatorType,
+    vm_name: &VmName,
+    manifest: &Manifest,
+) -> std::io::Result<()> {
+    let path = local_manifest_path(state_dir, emulator, vm_name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, manifest.canonical_bytes())?;
+    fs::rename(&temporary, &path)
+}
+
+fn verification_directory(state_dir: &Path) -> PathBuf {
+    state_dir.join("verifications")
+}
+
+/// A verification, kept until the server has its result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifyJournal {
+    request: VmVerifyRequest,
+    result: Option<VmVerifyResult>,
+}
+
+fn path_list(list: PathList) -> VerifyPathList {
+    VerifyPathList {
+        count: list.count,
+        paths: list.paths,
+    }
+}
+
 /// A download's name while it is being written, unique to the attempt: a failed attempt's file can stay
 /// locked for a moment on Windows, and that must not stop the next one.
 fn download_path(staging_dir: &Path, operation_id: Uuid, attempt: u32) -> PathBuf {
@@ -265,6 +303,11 @@ pub struct RestoreManager {
     running: Arc<Mutex<HashMap<Uuid, CancelFlag>>>,
     /// Set when the process is stopping. Work then ends as a crash would leave it, for the next start.
     stopping: CancelFlag,
+    /// Whether an emulator is running a VM, which no restore or verification may touch then.
+    activity: OnceLock<ActivityProbe>,
+    verifications: Mutex<HashMap<Uuid, VerifyJournal>>,
+    /// Operations whose progress nobody asked for: verifications, which reuse the archive download.
+    quiet: Mutex<HashSet<Uuid>>,
 }
 
 impl RestoreManager {
@@ -300,6 +343,28 @@ impl RestoreManager {
             journals.insert(journal.request.operation_id, journal);
         }
 
+        let directory = verification_directory(&config.state_dir);
+        fs::create_dir_all(&directory)
+            .map_err(|error| format!("Cannot create {}: {error}", directory.display()))?;
+        let mut verifications = HashMap::new();
+        for item in fs::read_dir(&directory)
+            .map_err(|error| format!("Cannot read {}: {error}", directory.display()))?
+            .flatten()
+        {
+            let path = item.path();
+            if path.extension().and_then(|text| text.to_str()) != Some("journal") {
+                continue;
+            }
+            let Some(journal) = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<VerifyJournal>(&bytes).ok())
+            else {
+                tracing::error!(path = %path.display(), "Ignored a verification journal that cannot be read");
+                continue;
+            };
+            verifications.insert(journal.request.operation_id, journal);
+        }
+
         let cache = ArchiveCache::open(
             config.settings.cache_dir.clone(),
             config.settings.cache_max_bytes,
@@ -311,9 +376,44 @@ impl RestoreManager {
             journals: Mutex::new(journals),
             running,
             stopping,
+            activity: OnceLock::new(),
+            verifications: Mutex::new(verifications),
+            quiet: Mutex::new(HashSet::new()),
         });
         manager.recover_interrupted();
+        manager.recover_verifications();
         Ok(manager)
+    }
+
+    pub fn set_activity_probe(&self, probe: ActivityProbe) {
+        let _ = self.activity.set(probe);
+    }
+
+    fn vm_activity(&self, vm: &VmIdentity) -> Option<String> {
+        self.activity.get().and_then(|probe| probe(vm))
+    }
+
+    /// Why `vm` must not be launched now, if a restore or verification is working on it.
+    pub fn working_on(&self, vm: &VmIdentity) -> Option<String> {
+        let running = self.running.lock().expect("poisoned");
+        let journals = self.journals.lock().expect("poisoned");
+        let verifications = self.verifications.lock().expect("poisoned");
+        let same = |emulator: EmulatorType, name: &VmName| {
+            emulator == vm.emulator_type && *name == vm.vm_name
+        };
+        running.keys().find_map(|operation_id| {
+            if let Some(journal) = journals.get(operation_id)
+                && same(journal.request.emulator_type, &journal.request.vm_name)
+            {
+                return Some(format!("A restore of {} is in progress", vm.vm_name));
+            }
+            if let Some(journal) = verifications.get(operation_id)
+                && same(journal.request.emulator_type, &journal.request.vm_name)
+            {
+                return Some(format!("{} is being verified", vm.vm_name));
+            }
+            None
+        })
     }
 
     pub fn cache(&self) -> &ArchiveCache {
@@ -616,15 +716,29 @@ impl RestoreManager {
 
     /// Reports that have no answer yet. Sent again on each heartbeat, as registration's are.
     pub fn pending_reports(&self) -> Vec<Message> {
-        let journals = self.journals.lock().expect("poisoned");
-        journals
-            .values()
-            .filter_map(|journal| match &journal.report {
-                Some(Report::Failure(report)) => Some(Message::AgentRestoreError(report.clone())),
-                Some(Report::Result(result)) => Some(Message::AgentRestoreResult(result.clone())),
-                None => None,
-            })
-            .collect()
+        let mut reports: Vec<Message> = {
+            let journals = self.journals.lock().expect("poisoned");
+            journals
+                .values()
+                .filter_map(|journal| match &journal.report {
+                    Some(Report::Failure(report)) => {
+                        Some(Message::AgentRestoreError(report.clone()))
+                    }
+                    Some(Report::Result(result)) => {
+                        Some(Message::AgentRestoreResult(result.clone()))
+                    }
+                    None => None,
+                })
+                .collect()
+        };
+        reports.extend(
+            self.verifications
+                .lock()
+                .expect("poisoned")
+                .values()
+                .filter_map(|journal| journal.result.clone().map(Message::AgentVmVerifyResult)),
+        );
+        reports
     }
 
     /// Acts on a message for this module. Anything else is ignored.
@@ -633,6 +747,8 @@ impl RestoreManager {
             Message::ServerRestoreRequest(request) => self.start(request),
             Message::ServerRestoreCancel(cancel) => self.cancel(&cancel),
             Message::ServerRestoreAck(ack) => self.acknowledged(&ack),
+            Message::ServerVmVerify(request) => self.verify(request),
+            Message::ServerVmVerifyAck(ack) => self.verification_acknowledged(&ack),
             _ => {}
         }
     }
@@ -663,6 +779,17 @@ impl RestoreManager {
             } else {
                 tracing::debug!(%operation_id, "Ignored a repeated restore request");
             }
+            return;
+        }
+        if let Some(reason) = self.vm_activity(&VmIdentity {
+            emulator_type: request.emulator_type,
+            vm_name: request.vm_name.clone(),
+        }) {
+            self.send(Message::AgentRestoreError(RestoreFailure {
+                operation_id,
+                code: "vm_running".to_owned(),
+                message: bounded(&format!("{reason}. Nothing was restored")),
+            }));
             return;
         }
         let cancel = CancelFlag::new();
@@ -784,6 +911,9 @@ impl RestoreManager {
         total_bytes: Option<u64>,
         cache_hit: Option<bool>,
     ) {
+        if self.quiet.lock().expect("poisoned").contains(&operation_id) {
+            return;
+        }
         self.send(Message::AgentRestoreProgress(RestoreProgress {
             operation_id,
             stage,
@@ -1246,4 +1376,473 @@ where
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|error| failure("internal_error", format!("The work stopped: {error}")))
+}
+
+/// Where a verification found the manifest it compared with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestSource {
+    Local,
+    Cache,
+    Repository,
+}
+
+impl ManifestSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Cache => "cache",
+            Self::Repository => "repository",
+        }
+    }
+}
+
+type VerifyRefusal = (VerifyResultStatus, String, String);
+
+/// Verifying a local copy. It only reads the VM, and holds the one-disk slot while it does, so that
+/// nothing launches, restores or removes the VM meanwhile. See decision 0032.
+impl RestoreManager {
+    fn verification_path(&self, operation_id: Uuid) -> PathBuf {
+        verification_directory(&self.config.state_dir).join(format!("{operation_id}.journal"))
+    }
+
+    fn persist_verification(&self, journal: &VerifyJournal) -> std::io::Result<()> {
+        let path = self.verification_path(journal.request.operation_id);
+        let temporary = path.with_extension("tmp");
+        let bytes = serde_json::to_vec_pretty(journal).expect("a journal always serializes");
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        fs::rename(&temporary, &path)?;
+        self.verifications
+            .lock()
+            .expect("poisoned")
+            .insert(journal.request.operation_id, journal.clone());
+        Ok(())
+    }
+
+    /// The verifications this agent has not closed yet. Listed on each connection.
+    pub fn open_verifications(&self) -> Vec<Uuid> {
+        self.verifications
+            .lock()
+            .expect("poisoned")
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    fn empty_result(
+        request: &VmVerifyRequest,
+        status: VerifyResultStatus,
+        code: &str,
+        message: String,
+    ) -> VmVerifyResult {
+        VmVerifyResult {
+            operation_id: request.operation_id,
+            version_id: request.version_id,
+            status,
+            files_verified: 0,
+            bytes_hashed: 0,
+            duration_ms: 0,
+            missing: VerifyPathList::default(),
+            modified: VerifyPathList::default(),
+            unexpected: VerifyPathList::default(),
+            manifest_sha256: None,
+            manifest_source: None,
+            code: Some(code.to_owned()),
+            message: Some(bounded(&message)),
+        }
+    }
+
+    fn finish_verification(&self, request: VmVerifyRequest, result: VmVerifyResult) {
+        let operation_id = request.operation_id;
+        let journal = VerifyJournal {
+            request,
+            result: Some(result.clone()),
+        };
+        if let Err(error) = self.persist_verification(&journal) {
+            tracing::error!(%error, %operation_id, "Cannot record a verification result");
+            self.verifications
+                .lock()
+                .expect("poisoned")
+                .insert(operation_id, journal);
+        }
+        tracing::info!(%operation_id, status = ?result.status, files = result.files_verified, "Verification finished");
+        self.send(Message::AgentVmVerifyResult(result));
+    }
+
+    /// A verification that never finished has no result to trust, so it says it failed.
+    fn recover_verifications(&self) {
+        let unfinished: Vec<VerifyJournal> = self
+            .verifications
+            .lock()
+            .expect("poisoned")
+            .values()
+            .filter(|journal| journal.result.is_none())
+            .cloned()
+            .collect();
+        for journal in unfinished {
+            remove_staging_files(&self.config.staging_dir, journal.request.operation_id);
+            let result = Self::empty_result(
+                &journal.request,
+                VerifyResultStatus::VerificationFailed,
+                "agent_restarted",
+                "The agent restarted during the verification. Verify again".to_owned(),
+            );
+            self.finish_verification(journal.request, result);
+        }
+    }
+
+    pub fn refuse_invalid_verification(&self, operation_id: Uuid) {
+        self.send(Message::AgentVmVerifyResult(VmVerifyResult {
+            operation_id,
+            version_id: Uuid::nil(),
+            status: VerifyResultStatus::VerificationFailed,
+            files_verified: 0,
+            bytes_hashed: 0,
+            duration_ms: 0,
+            missing: VerifyPathList::default(),
+            modified: VerifyPathList::default(),
+            unexpected: VerifyPathList::default(),
+            manifest_sha256: None,
+            manifest_source: None,
+            code: Some("invalid_request".to_owned()),
+            message: Some("The request failed validation".to_owned()),
+        }));
+    }
+
+    fn verification_acknowledged(&self, ack: &VmVerifyAck) {
+        let operation_id = ack.operation_id;
+        let mut verifications = self.verifications.lock().expect("poisoned");
+        if verifications
+            .get(&operation_id)
+            .is_some_and(|journal| journal.result.is_some())
+        {
+            verifications.remove(&operation_id);
+            let _ = fs::remove_file(self.verification_path(operation_id));
+        }
+    }
+
+    fn verify(self: &Arc<Self>, request: VmVerifyRequest) {
+        let operation_id = request.operation_id;
+        let existing = self
+            .verifications
+            .lock()
+            .expect("poisoned")
+            .get(&operation_id)
+            .cloned();
+        if let Some(existing) = existing {
+            if existing.request != request {
+                tracing::error!(%operation_id, "Refused a repeated verification with other identities");
+            } else if let Some(result) = existing.result {
+                self.send(Message::AgentVmVerifyResult(result));
+            }
+            return;
+        }
+        // Recorded, so that the answer repeats until the server has it, like any other.
+        let refuse = |status: VerifyResultStatus, code: &str, message: String| {
+            let result = Self::empty_result(&request, status, code, message);
+            self.finish_verification(request.clone(), result);
+        };
+
+        let vm = VmIdentity {
+            emulator_type: request.emulator_type,
+            vm_name: request.vm_name.clone(),
+        };
+        let key = RepositoryKey::for_version(&vm, VersionId(request.version_id));
+        if key.as_str() != request.archive_key
+            || !is_lowercase_sha256(&request.archive_sha256)
+            || request
+                .manifest_sha256
+                .as_deref()
+                .is_some_and(|sha256| !is_lowercase_sha256(sha256))
+        {
+            return refuse(
+                VerifyResultStatus::VerificationFailed,
+                "invalid_request",
+                "The request does not describe this VM's master".to_owned(),
+            );
+        }
+        if let Some(reason) = self.vm_activity(&vm) {
+            return refuse(
+                VerifyResultStatus::Unavailable,
+                "vm_running",
+                format!("{reason}. Stop it, then verify again"),
+            );
+        }
+        let cancel = CancelFlag::new();
+        let busy = {
+            let mut running = self.running.lock().expect("poisoned");
+            if running.is_empty() {
+                running.insert(operation_id, cancel.clone());
+                false
+            } else {
+                true
+            }
+        };
+        if busy {
+            return refuse(
+                VerifyResultStatus::Unavailable,
+                "agent_busy",
+                "This agent is already running another operation".to_owned(),
+            );
+        }
+        let journal = VerifyJournal {
+            request: request.clone(),
+            result: None,
+        };
+        if let Err(error) = self.persist_verification(&journal) {
+            self.running.lock().expect("poisoned").remove(&operation_id);
+            tracing::error!(%error, %operation_id, "Cannot create a verification journal");
+            self.send(Message::AgentVmVerifyResult(Self::empty_result(
+                &request,
+                VerifyResultStatus::VerificationFailed,
+                "state_unwritable",
+                "The agent cannot write to its state directory".to_owned(),
+            )));
+            return;
+        }
+        self.quiet.lock().expect("poisoned").insert(operation_id);
+
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            tracing::info!(%operation_id, vm = %vm.vm_name, "Verification started");
+            let started = Instant::now();
+            let mut result = this.run_verification(&request, &vm, &cancel).await;
+            this.running.lock().expect("poisoned").remove(&operation_id);
+            this.quiet.lock().expect("poisoned").remove(&operation_id);
+            remove_staging_files(&this.config.staging_dir, operation_id);
+            if this.stopping.is_cancelled() {
+                return;
+            }
+            if result.duration_ms == 0 {
+                result.duration_ms = started.elapsed().as_millis() as u64;
+            }
+            this.finish_verification(request, result);
+        });
+    }
+
+    /// The manifest, from wherever a copy with the expected hash is found first.
+    async fn verification_manifest(
+        self: &Arc<Self>,
+        request: &VmVerifyRequest,
+        vm: &VmIdentity,
+        cancel: &CancelFlag,
+    ) -> Result<(Manifest, String, ManifestSource), VerifyRefusal> {
+        let unavailable = |code: &str, message: String| {
+            (VerifyResultStatus::Unavailable, code.to_owned(), message)
+        };
+        // Kept by a restore or a copy registration. Only trusted if its hash is the registered one.
+        if let Some(expected) = &request.manifest_sha256 {
+            let path = local_manifest_path(&self.config.state_dir, vm.emulator_type, &vm.vm_name);
+            if let Some(manifest) = fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+                .filter(|manifest| manifest.sha256() == *expected)
+            {
+                return Ok((manifest, expected.clone(), ManifestSource::Local));
+            }
+        }
+
+        // Otherwise the master itself, through the same verified path a restore uses.
+        let repository = self
+            .config
+            .repositories
+            .open(request.repository_id)
+            .map_err(|error| {
+                unavailable(
+                    error.kind.code(),
+                    format!("The repository cannot be opened: {}", error.message),
+                )
+            })?;
+        let key = RepositoryKey::for_version(vm, VersionId(request.version_id));
+        fs::create_dir_all(&self.config.staging_dir).map_err(|error| {
+            (
+                VerifyResultStatus::VerificationFailed,
+                "restore_staging_failed".to_owned(),
+                format!("Cannot create the staging directory: {error}"),
+            )
+        })?;
+        let as_restore = RestoreRequest {
+            operation_id: request.operation_id,
+            emulator_type: request.emulator_type,
+            vm_name: request.vm_name.clone(),
+            repository_id: request.repository_id,
+            version_id: request.version_id,
+            archive_key: request.archive_key.clone(),
+            archive_size_bytes: request.archive_size_bytes,
+            archive_sha256: request.archive_sha256.clone(),
+            manifest_sha256: request.manifest_sha256.clone(),
+            expected_uncompressed_bytes: None,
+        };
+        let obtained = self
+            .obtain_archive(&as_restore, &*repository, &key, cancel)
+            .await
+            .map_err(|failed| {
+                unavailable(
+                    &failed.code,
+                    format!("The master's manifest cannot be read: {}", failed.message),
+                )
+            })?;
+        let ObtainedArchive {
+            file,
+            path,
+            cached,
+            hit,
+            _pin,
+            ..
+        } = obtained;
+        let (emulator, name, manifest_sha256, limits) = (
+            request.emulator_type,
+            request.vm_name.clone(),
+            request.manifest_sha256.clone(),
+            self.config.settings.limits,
+        );
+        let inspected = blocking(move || {
+            let mut file = file;
+            inspect_archive(
+                &mut file,
+                &ArchiveExpectation {
+                    emulator,
+                    vm_name: &name,
+                    manifest_sha256: manifest_sha256.as_deref(),
+                },
+                &limits,
+            )
+        })
+        .await
+        .map_err(|failed| {
+            (
+                VerifyResultStatus::VerificationFailed,
+                failed.code,
+                failed.message,
+            )
+        })?;
+        drop(_pin);
+        if !cached {
+            let _ = fs::remove_file(&path);
+        }
+        let inspected = inspected.map_err(|error| {
+            let failed = JobFailure::from(error);
+            (
+                VerifyResultStatus::VerificationFailed,
+                failed.code,
+                format!("The master's archive failed its checks: {}", failed.message),
+            )
+        })?;
+        let source = if hit {
+            ManifestSource::Cache
+        } else {
+            ManifestSource::Repository
+        };
+        Ok((inspected.manifest, inspected.manifest_sha256, source))
+    }
+
+    async fn run_verification(
+        self: &Arc<Self>,
+        request: &VmVerifyRequest,
+        vm: &VmIdentity,
+        cancel: &CancelFlag,
+    ) -> VmVerifyResult {
+        let failed = |status: VerifyResultStatus, code: &str, message: String| {
+            Self::empty_result(request, status, code, message)
+        };
+        let Some(base) = self.base_path(request.emulator_type) else {
+            return failed(
+                VerifyResultStatus::Unavailable,
+                "emulator_not_configured",
+                format!("{} is not configured on this agent", request.emulator_type),
+            );
+        };
+        let root = {
+            let (name, emulator) = (request.vm_name.clone(), request.emulator_type);
+            match blocking(move || resolve_vm_root(&base, &name, emulator)).await {
+                Ok(Ok(root)) => root,
+                Ok(Err(error)) if error.kind == crate::packaging::SourceErrorKind::Missing => {
+                    return failed(
+                        VerifyResultStatus::Missing,
+                        "vm_not_found",
+                        format!("{} is not on this computer", request.vm_name),
+                    );
+                }
+                Ok(Err(error)) => {
+                    return failed(
+                        VerifyResultStatus::VerificationFailed,
+                        error.kind.code(),
+                        error.message,
+                    );
+                }
+                Err(error) => {
+                    return failed(
+                        VerifyResultStatus::VerificationFailed,
+                        &error.code,
+                        error.message,
+                    );
+                }
+            }
+        };
+        let (manifest, manifest_sha256, source) =
+            match self.verification_manifest(request, vm, cancel).await {
+                Ok(found) => found,
+                Err((status, code, message)) => return failed(status, &code, message),
+            };
+
+        // Checked again right before reading, from the process itself. A launch is refused from here on.
+        if let Some(reason) = self.vm_activity(vm) {
+            return failed(
+                VerifyResultStatus::Unavailable,
+                "vm_running",
+                format!("{reason}. Stop it, then verify again"),
+            );
+        }
+        let (emulator, cancel) = (request.emulator_type, cancel.clone());
+        let compared = manifest.clone();
+        let outcome =
+            match blocking(move || verify_local_copy(&root, emulator, &compared, &cancel)).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return failed(
+                        VerifyResultStatus::VerificationFailed,
+                        &error.code,
+                        error.message,
+                    );
+                }
+            };
+        let status = match outcome.status {
+            VerifyStatus::Verified => VerifyResultStatus::Verified,
+            VerifyStatus::Modified => VerifyResultStatus::Modified,
+            VerifyStatus::Missing => VerifyResultStatus::Missing,
+            VerifyStatus::VerificationFailed => VerifyResultStatus::VerificationFailed,
+        };
+        // A verified copy is a copy of this master, so its manifest is worth keeping for next time.
+        if status == VerifyResultStatus::Verified
+            && source != ManifestSource::Local
+            && let Err(error) = keep_local_manifest(
+                &self.config.state_dir,
+                vm.emulator_type,
+                &vm.vm_name,
+                &manifest,
+            )
+        {
+            tracing::warn!(%error, "Cannot keep the verified manifest");
+        }
+        VmVerifyResult {
+            operation_id: request.operation_id,
+            version_id: request.version_id,
+            status,
+            files_verified: outcome.files_verified,
+            bytes_hashed: outcome.bytes_hashed,
+            duration_ms: outcome.duration_ms,
+            missing: path_list(outcome.missing),
+            modified: path_list(outcome.modified),
+            unexpected: path_list(outcome.unexpected),
+            manifest_sha256: Some(manifest_sha256),
+            manifest_source: Some(source.as_str().to_owned()),
+            code: (status == VerifyResultStatus::VerificationFailed)
+                .then(|| "verification_failed".to_owned()),
+            message: outcome.message.map(|message| bounded(&message)),
+        }
+    }
 }

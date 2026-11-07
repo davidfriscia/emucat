@@ -24,10 +24,16 @@
 //! - [`media_queue`]: the durable record of what has to reach the server.
 //! - [`media_sync`]: the watcher, reconciliation and upload to the API over HTTP(S).
 //! - [`state`]: local state, operation types and execution states.
+//! - [`launcher`]: turns a VM into a checked emulator command line, without a shell.
+//! - [`process`]: starts emulator processes, and knows them again by PID and creation time.
+//! - [`execution`]: durable VM sessions: launch, watch, stop, and recovery after a restart.
+//! - [`verification`]: compares a local VM with the manifest of its master, read-only.
 //!
-//! The agent has no inbound listener and does not launch emulators. It removes a VM directory in one case
-//! only: a transfer an administrator confirmed, after the server has committed a verified master. It
-//! creates one in one case only: a restore an administrator asked for, and never over an existing one.
+//! The agent has no inbound listener. It starts an emulator only for a session an administrator asked for,
+//! from a command line it built itself, and stops only a process whose identity it verified. It removes a
+//! VM directory in one case only: a transfer an administrator confirmed, after the server has committed a
+//! verified master. It creates one in one case only: a restore an administrator asked for, and never over
+//! an existing one. Neither happens to a VM that is running.
 
 pub mod archive_cache;
 pub mod archives;
@@ -37,8 +43,10 @@ pub mod connectivity;
 pub mod credentials;
 pub mod discovery;
 pub mod emulators;
+pub mod execution;
 pub mod extraction;
 pub mod filesystem;
+pub mod launcher;
 pub mod logging;
 pub mod media;
 pub mod media_queue;
@@ -46,6 +54,7 @@ pub mod media_sync;
 pub mod packaging;
 pub mod pairing;
 pub mod platform;
+pub mod process;
 pub mod protocol;
 pub mod registration;
 pub mod removal;
@@ -54,4 +63,5 @@ pub mod restore;
 pub mod sftp;
 pub mod shutdown;
 pub mod state;
+pub mod verification;
 pub mod zip_directory;

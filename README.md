@@ -150,7 +150,7 @@ Copy [`agent/agent.example.toml`](agent/agent.example.toml), fill in your paths,
 ```
 
 `discover` scans the configured directories and prints the report, with no server involved. `repository-check` tests a
-configured repository the same way, and `cache-status` prints what the archive cache holds. The agent only connects out and has no listener. It launches no emulator. It removes a
+configured repository the same way, and `cache-status` prints what the archive cache holds. The agent only connects out and has no listener. It launches 86Box and QEMU only when an administrator asks, from a command line it builds and checks itself, never through a shell: see [the launcher guide](docs/launcher.md). It removes a
 VM directory in one case only: a transfer an administrator confirmed, after a verified master is committed. It creates one in one case only: a restore an administrator asked for, never over an existing
 directory. Its credential is protected with DPAPI. The [agent guide](docs/agent.md) covers configuration, pairing, credential recovery, discovery,
 registration, restoring and troubleshooting, and the [repository guide](docs/repositories.md) covers setting up SSH.
@@ -159,11 +159,14 @@ After upgrading from an earlier milestone, run `pnpm db:migrate`.
 
 ## Known limitations
 
-- **Restored VMs cannot be launched from here yet.** Launching and snapshots arrive in later milestones, and a restored VM is started by hand. There is no way to delete a registered VM, a local copy or
-  an archive through the app.
+- **Only local execution.** Remote volatile and remote snapshot modes are shown but refused, never replaced by a local launch. Snapshots arrive in Milestone 7. Launching is implemented in the Windows agent only. There is no way to delete a registered VM, a local copy or
+  an archive through the app. See [the launcher guide](docs/launcher.md).
+- **Some QEMU launchers need a profile.** A `run.bat` that is more than one plain QEMU command, or that forwards a port on every interface, is refused until an `emucat-launch.json` describes the VM.
+- **A graceful QEMU stop needs a guest that handles ACPI.** Otherwise it times out, and a forced stop is the administrator's choice. After an agent restart, QEMU can only be force-stopped.
+- **Verification reads the whole VM,** and reports only its final counts. A VM that has been run is expected to verify as modified.
 - **Remote HTTPS uploads are not integration-tested.** Remote agents must use HTTPS, and the agent enforces that, but screenshot uploads have only been exercised end to end over loopback HTTP. This test is deferred by decision.
 - **Restoring only restores masters,** and an interrupted download starts over rather than resuming. See [decision 0021](docs/decisions/0021-restore-lifecycle.md).
-- **"Modified" is only as good as names and sizes.** A local change that keeps every size goes unnoticed, so the interface says "not verified" rather than "unchanged". See [decision 0021](docs/decisions/0021-restore-lifecycle.md#local-state).
+- **"Modified" is only as good as names and sizes between verifications.** A same-size change is caught by "Verify local copy", which hashes every file, but not by the cheaper check on reconnection. See [decision 0032](docs/decisions/0032-local-verification.md).
 - **A transfer of a VM with screenshots can end as a partial success.** Screenshots are not in archives, so the VM is only removed once the
   server holds every one of them. If that cannot be proved, the master and the local VM both stay, and the removal can be retried.
 - **Archiving is not a filesystem snapshot.** Changes during archiving are detected and fail the operation, and Windows also

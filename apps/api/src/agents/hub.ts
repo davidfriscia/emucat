@@ -28,6 +28,9 @@ import type {
   RestoreProgressPayload,
   RestoreResultPayload,
   RestoreSyncPayload,
+  ExecutionSyncPayload,
+  VmExecutionStatusPayload,
+  VmVerifyResultPayload,
 } from '@emucat/contracts';
 import { DiscoveryCoordinator, type DiscoveryRecord } from './discovery.js';
 
@@ -76,6 +79,14 @@ export interface AgentRestoresHandler {
   agentRevoked(agentId: string): Promise<void>;
 }
 
+/** What is done with execution and verification messages. Every call is for the active connection. */
+export interface AgentExecutionHandler {
+  synced(agentId: string, payload: ExecutionSyncPayload): Promise<void>;
+  status(agentId: string, payload: VmExecutionStatusPayload): Promise<void>;
+  verifyResult(agentId: string, payload: VmVerifyResultPayload): Promise<void>;
+  agentRevoked(agentId: string): Promise<void>;
+}
+
 export interface AgentHubOptions {
   presence: AgentPresence;
   heartbeatIntervalSeconds: number;
@@ -121,6 +132,8 @@ interface Connection {
   registrationCapable: boolean;
   /** What `agent.restore_sync` said this connection's agent can do. Older agents never send it. */
   restoreCapabilities: RestoreSyncPayload['capabilities'] | null;
+  /** What `agent.execution_sync` said this connection's agent can launch. Older agents never send it. */
+  executionCapabilities: ExecutionSyncPayload['capabilities'] | null;
 }
 
 /** What `ws` calls a frame over its `maxPayload`. */
@@ -153,6 +166,7 @@ export class AgentHub {
   private readonly pendingPresence = new Set<Promise<unknown>>();
   private operations: AgentOperationsHandler | null = null;
   private restores: AgentRestoresHandler | null = null;
+  private execution: AgentExecutionHandler | null = null;
   /** What each agent last said about its screenshots. Stale once it is offline, and says when it spoke. */
   private readonly mediaStatuses = new Map<
     string,
@@ -177,6 +191,14 @@ export class AgentHub {
 
   setRestores(restores: AgentRestoresHandler): void {
     this.restores = restores;
+  }
+
+  setExecution(execution: AgentExecutionHandler): void {
+    this.execution = execution;
+  }
+
+  executionCapabilities(agentId: string): ExecutionSyncPayload['capabilities'] | null {
+    return this.active.get(agentId)?.executionCapabilities ?? null;
   }
 
   restoreCapabilities(agentId: string): RestoreSyncPayload['capabilities'] | null {
@@ -232,6 +254,7 @@ export class AgentHub {
       closed: false,
       registrationCapable: false,
       restoreCapabilities: null,
+      executionCapabilities: null,
     };
     this.connections.add(connection);
     log.info({ agentId, connectionId: connection.id }, 'Agent connected');
@@ -462,6 +485,11 @@ export class AgentHub {
       case 'agent.restore_error':
         await this.handleRestoreMessage(connection, message);
         break;
+      case 'agent.execution_sync':
+      case 'agent.vm_execution_status':
+      case 'agent.vm_verify_result':
+        await this.handleExecutionMessage(connection, message);
+        break;
     }
   }
 
@@ -558,7 +586,55 @@ export class AgentHub {
     }
   }
 
+  /** As for restores: a stale connection counts for nothing, and a database failure gets no answer. */
+  private async handleExecutionMessage(
+    connection: Connection,
+    message: Extract<
+      AgentMessage,
+      { type: 'agent.execution_sync' | 'agent.vm_execution_status' | 'agent.vm_verify_result' }
+    >,
+  ): Promise<void> {
+    const { agentId, log } = connection;
+    if (this.active.get(agentId) !== connection || !this.execution) {
+      log.warn({ agentId, type: message.type }, 'Ignored a message from an inactive connection');
+      return;
+    }
+    const execution = this.execution;
+    try {
+      switch (message.type) {
+        case 'agent.execution_sync':
+          connection.executionCapabilities = message.payload.capabilities;
+          await execution.synced(agentId, message.payload);
+          break;
+        case 'agent.vm_execution_status':
+          await execution.status(agentId, message.payload);
+          break;
+        case 'agent.vm_verify_result':
+          await execution.verifyResult(agentId, message.payload);
+          break;
+      }
+    } catch (error) {
+      log.error({ agentId, type: message.type, err: error }, 'Cannot handle an agent report');
+    }
+  }
+
   private operationsRevoked(agentId: string): void {
+    if (this.execution) {
+      const ended = this.execution
+        .agentRevoked(agentId)
+        .catch((error: unknown) => {
+          for (const connection of this.connections) {
+            if (connection.agentId === agentId) {
+              connection.log.error(
+                { agentId, err: error },
+                'Cannot end a revoked agent’s sessions',
+              );
+            }
+          }
+        })
+        .finally(() => this.pendingPresence.delete(ended));
+      this.pendingPresence.add(ended);
+    }
     if (this.restores) {
       const ended = this.restores
         .agentRevoked(agentId)

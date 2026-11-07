@@ -32,3 +32,9 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0025](0025-bounded-image-decoders.md)           | The hand-written decoders are limited by input, by allocation and by time     |
 | [0026](0026-media-retry-classification.md)       | Refusals about authorization wait for a change, not a timer                   |
 | [0027](0027-catalog-detail-and-public-covers.md) | Why a public VM can have no cover, and saying so                              |
+| [0028](0028-launcher-architecture.md)            | Only the agent builds a command line                                          |
+| [0029](0029-process-identity.md)                 | A process is its PID, its creation time and its image                         |
+| [0030](0030-session-durability.md)               | Sessions are durable on both sides, and the agent's word wins                 |
+| [0031](0031-graceful-and-forced-shutdown.md)     | Graceful by default, forced only when an administrator confirms               |
+| [0032](0032-local-verification.md)               | Verifying a local copy hashes every file on the agent                         |
+| [0033](0033-remote-execution-modes.md)           | Remote modes exist in the contract, and are refused                           |

@@ -160,6 +160,21 @@ Browser ─► API ─► MariaDB          who may restore what, operation state
 Screenshots are not in archives, and are not restored: they stay on the server, and keep arriving through the API from a VM once it is held locally.
 See decisions [0021](decisions/0021-restore-lifecycle.md) to [0024](decisions/0024-local-archive-cache.md).
 
+## Running VMs
+
+```
+Browser ─► API ─► MariaDB          vm_sessions, vm_verifications: names, states, results
+            ▲
+            │ WebSocket            launch, stop, verify: identities only
+            ▼
+          Agent ─► journal          written before the process starts
+            │
+            └─► 86Box / qemu-system-*   argument vector built and checked by the agent, no shell,
+                   tracked by PID + creation time + image; QMP over stdio for QEMU
+```
+
+The API never executes anything, and the browser never supplies a command or a path. Conflicts are checked by the API, so it can explain, and again by the agent, whose check counts. See [the launcher guide](launcher.md) and decisions [0028](decisions/0028-launcher-architecture.md) to [0033](decisions/0033-remote-execution-modes.md).
+
 ## Reliability behavior
 
 - `GET /api/v1/health` means the process is running. It does not touch the database.
