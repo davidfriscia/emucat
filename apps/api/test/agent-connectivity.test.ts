@@ -187,13 +187,18 @@ describe('timeouts', () => {
 
   it('keeps a connection that sends heartbeats', async () => {
     const { agentId, agent } = await online();
-    for (let index = 0; index < 5; index += 1) {
-      agent.send(envelope('agent.heartbeat', {}));
-      await agent.next('server.heartbeat_ack');
-      await new Promise((resolve) => setTimeout(resolve, 300));
+    // Like a real agent, on its own schedule rather than after each answer. Waiting for answers
+    // would make the gaps depend on how fast the server records them, which is not what this tests.
+    const sending = setInterval(() => agent.send(envelope('agent.heartbeat', {})), 300);
+    try {
+      for (let index = 0; index < 5; index += 1) {
+        await agent.next('server.heartbeat_ack');
+      }
+      expect(agent.closeCode).toBeUndefined();
+      expect(await isOnline(agentId)).toBe(true);
+    } finally {
+      clearInterval(sending);
     }
-    expect(agent.closeCode).toBeUndefined();
-    expect(await isOnline(agentId)).toBe(true);
   });
 });
 
