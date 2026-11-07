@@ -11,6 +11,7 @@
 #   EMUCAT_AGENT_QEMU_EXECUTABLE       [emulators.qemu] executable
 #   EMUCAT_AGENT_STATE_DIR             [state] dir
 #   EMUCAT_AGENT_STAGING_DIR           [storage] staging_dir
+#   EMUCAT_AGENT_CACHE_DIR             [storage] cache_dir
 #   EMUCAT_AGENT_LOG_LEVEL             [logging] level
 #   EMUCAT_AGENT_LOG_FORMAT            [logging] format
 #
@@ -46,6 +47,14 @@ executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
 # Where archives are built while a VM is being registered. It needs room for the whole VM, and must be
 # outside every VM directory. Defaults to `staging` in the state directory.
 # staging_dir = 'D:\EmuCat\staging'
+# Where verified master ZIPs are kept, so that restoring again does not download them again. Must be
+# outside every VM directory. Defaults to `archive-cache` in the state directory.
+# cache_dir = 'D:\EmuCat\cache'
+# How much the cache may hold, in bytes. The least recently used ZIPs go first. Zero turns it off.
+# cache_max_bytes = 21474836480
+# What a restore accepts from an archive, whatever the archive says about itself.
+# restore_max_files = 1000000
+# restore_max_expanded_bytes = 4398046511104
 
 # How to reach an SSH repository. The section name is the repository's UUID, from the Repositories page.
 # Only a repository named here can be used, whatever the server asks for. See docs/repositories.md.

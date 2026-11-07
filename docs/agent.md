@@ -13,6 +13,7 @@ is committed.
 | `pair`, `unpair`                          | Pairs with a server, or removes the local credential               |
 | `discover`                                | Scans the configured directories, read-only, and prints the report |
 | `media-status`                            | Prints what the screenshot queue holds, without connecting         |
+| `cache-status`                            | Prints what the archive cache holds, without connecting            |
 | `repository-check --repository UUID`      | Tests a configured repository directly                             |
 | `repository-passphrase --repository UUID` | Stores the passphrase of a repository's key, protected with DPAPI  |
 | `check-config`, `info`                    | Validates the configuration, or prints versions and default paths  |
@@ -22,14 +23,18 @@ is committed.
 Copy [`agent/agent.example.toml`](../agent/agent.example.toml) to the path `emucat-agent info` shows, or pass
 `--config`. Command-line options override the environment, and the environment overrides the file.
 
-| Setting                     | Environment variable                          | Meaning                                        |
-| --------------------------- | --------------------------------------------- | ---------------------------------------------- |
-| `[server] api_url`          | `EMUCAT_AGENT_API_URL`                        | The server. `https`, or `http` for this PC     |
-| `[agent] name`              | `EMUCAT_AGENT_NAME`                           | The name to pair under. Default: computer name |
-| `[emulators.86box]`         | `EMUCAT_AGENT_86BOX_BASE_PATH`, `_EXECUTABLE` | Base VM directory and executable               |
-| `[emulators.qemu]`          | `EMUCAT_AGENT_QEMU_BASE_PATH`, `_EXECUTABLE`  | Base VM directory and executable               |
-| `[state] dir`               | `EMUCAT_AGENT_STATE_DIR`                      | The agent's own data, including its credential |
-| `[logging] level`, `format` | `EMUCAT_AGENT_LOG_LEVEL`, `_FORMAT`           | Filter, and `text` or `json`                   |
+| Setting                                                     | Environment variable                          | Meaning                                        |
+| ----------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------- |
+| `[server] api_url`                                          | `EMUCAT_AGENT_API_URL`                        | The server. `https`, or `http` for this PC     |
+| `[agent] name`                                              | `EMUCAT_AGENT_NAME`                           | The name to pair under. Default: computer name |
+| `[emulators.86box]`                                         | `EMUCAT_AGENT_86BOX_BASE_PATH`, `_EXECUTABLE` | Base VM directory and executable               |
+| `[emulators.qemu]`                                          | `EMUCAT_AGENT_QEMU_BASE_PATH`, `_EXECUTABLE`  | Base VM directory and executable               |
+| `[state] dir`                                               | `EMUCAT_AGENT_STATE_DIR`                      | The agent's own data, including its credential |
+| `[storage] staging_dir`                                     | `EMUCAT_AGENT_STAGING_DIR`                    | Archives being built or downloaded             |
+| `[storage] cache_dir`                                       | `EMUCAT_AGENT_CACHE_DIR`                      | Verified master ZIPs                           |
+| `[storage] cache_max_bytes`                                 |                                               | The cache's limit. 20 GiB by default, 0 is off |
+| `[storage] restore_max_files`, `restore_max_expanded_bytes` |                                               | What a restore accepts from an archive         |
+| `[logging] level`, `format`                                 | `EMUCAT_AGENT_LOG_LEVEL`, `_FORMAT`           | Filter, and `text` or `json`                   |
 
 The base directory is the folder that _holds_ the VM folders. It is often not where the emulator is installed, and
 the agent never guesses it from the executable's location.
@@ -186,6 +191,27 @@ Restart whichever side stopped. An unfinished registration fails with `agent_res
 continues, and is committed once the server is back. Nothing is deleted by a restart alone. Local journals are in `registrations` in the
 state directory, and hold no secrets and no VM contents.
 
+## Restoring VMs
+
+An administrator restores a registered master from the VM's page, by choosing an agent and confirming. This creates a local copy of the immutable master. It does not start the VM, and it does not change the master.
+
+**What it needs on the agent:** a base path configured for that emulator, local settings for the VM's repository, the agent associated with that repository, and no directory with the VM's name in the base path, in any capitalization. The page says which of these is missing.
+
+**What happens**, all of it on the agent, with the API only told how it is going:
+
+1. It checks the request against its own configuration, and refuses a VM that is already there. It checks free space, for the download and the extracted files together when they share a disk.
+2. It looks in the cache. A hit is hashed before it counts, and a bad entry is deleted. Otherwise it downloads the ZIP straight from the repository, over the same SSH connection and with the same host-key checks as registration, into the staging directory.
+3. It hashes the file, reads the central directory and the manifest, and checks every entry. It extracts into `.emucat-restoring-{operation}` in the base path, hashing each file as it is written.
+4. It renames that directory to the VM's name, which fails rather than replace anything.
+5. It reports what it verified, and the server records a verified local copy. The next discovery shows the VM as already registered.
+
+**If it fails** at any point before step 4, nothing has been published, and what it wrote is removed. An existing directory is never touched. The operation says what went wrong, and what to do about it.
+
+**The cache** keeps verified ZIPs in `storage.cache_dir`, named by version and hash, up to `storage.cache_max_bytes`, removing the least recently used first. `emucat-agent cache-status` shows what it holds. To empty it, stop the agent and delete the directory. It is only ever a copy: nothing is lost.
+
+**After a restart,** a restore in progress is reported as failed and cleaned up, and it is safe to try again. One stopped exactly at the rename is recognized by checking the directory itself: if it is the one that was assembled, it was published. Anything the agent cannot identify is left alone and reported. See decisions [0021](decisions/0021-restore-lifecycle.md),
+[0022](decisions/0022-safe-zip-extraction.md), [0023](decisions/0023-atomic-local-publication.md) and [0024](decisions/0024-local-archive-cache.md).
+
 ## Screenshots
 
 While it runs, the agent keeps the screenshots of the VMs it registered on the server, whether or not they are running. It needs nothing
@@ -231,3 +257,19 @@ but the `[media]` section's defaults. `emucat-agent media-status` shows what its
 
 Problems reaching the repository are in the [repository guide](repositories.md#troubleshooting). The agent's log says more, and
 `--log-level debug` adds detail. It never contains a private key, a passphrase or a credential.
+
+### Restoring
+
+| What you see                                      | What it means, and what to do                                                                                                                                             |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `restore_destination_exists`                      | A directory with this name is already in the base path, in some capitalization. It is yours, and was not touched. Move it away if you want to restore here                |
+| `local_copy_exists`, when starting                | The server believes this agent holds a copy. If you removed it by hand, run discovery on the agent first, which notices                                                   |
+| `agent_cannot_restore`                            | The agent's version predates restoring. Update it                                                                                                                         |
+| `restore_integrity_failed`, `hash_mismatch`       | The archive is not what was registered. Nothing was published. Look at the repository's disk, and compare `sha256sum` of the object with the version's hash               |
+| `restore_unsafe_archive`                          | The archive holds a path, a link or a special file that cannot be extracted safely. Nothing was created. A registration would not have written this, so find out what did |
+| `restore_ambiguous_directory`                     | The agent stopped during publication, and cannot tell what `.emucat-restoring-…` is. It left it alone. Look at it, and delete it by hand if it is not needed              |
+| `restore_insufficient_space`                      | The download and the extracted files need room, and this check errs on the side of refusing. Free some, or lower `cache_max_bytes`                                        |
+| `restore_destination_unsafe`                      | The base path is a link or a junction, or something replaced a directory during the restore. Use a plain directory                                                        |
+| The copy says "not verified"                      | Normal after the agent reconnects. A VM can change while nothing is watching, so verified only lasts until then                                                           |
+| The copy says it differs from the master          | Its names or sizes no longer match what was restored, which is expected of a VM that has been used. Nothing happens automatically                                         |
+| `.emucat-restoring-…` in discovery's skipped list | An operation is running, or the case above. Discovery never treats it as a VM                                                                                             |

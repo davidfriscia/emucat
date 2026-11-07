@@ -43,16 +43,18 @@ never deletes anything on the server:** the agent only stops tracking the file. 
 ## The queue
 
 `media/queue.json` in the agent's state directory, replaced atomically and durably. It holds one entry for each file, with a state
-of `pending`, `uploading`, `retry_wait`, `completed` or `failed`. It holds no secret and no image.
+of `pending`, `uploading`, `retry_wait`, `blocked`, `completed` or `failed`. It holds no secret and no image.
 
-| What happens                 | What the agent does                                                                                     |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
-| The agent restarts           | Unchanged files are skipped without being read. What was uploading goes back to pending                 |
-| The connection comes back    | Everything waiting goes at once, and the server is asked again what it holds                            |
-| The queue file is lost       | Everything is hashed once, the server says what it has, and only what it lacks is sent                  |
-| The queue file is damaged    | It is kept as `queue.damaged`, and the same applies                                                     |
-| The API is away, 5xx, 401... | `retry_wait`, doubling from `retry_initial_seconds` to `retry_ceiling_seconds` with jitter, without end |
-| The image is refused         | `failed`, and it is not sent again unless the file changes                                              |
+| What happens                | What the agent does                                                                                                         |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| The agent restarts          | Unchanged files are skipped without being read. What was uploading goes back to pending                                     |
+| The connection comes back   | Everything waiting goes at once, and the server is asked again what it holds                                                |
+| The queue file is lost      | Everything is hashed once, the server says what it has, and only what it lacks is sent                                      |
+| The queue file is damaged   | It is kept as `queue.damaged`, and the same applies                                                                         |
+| The API is away, 5xx, 429   | `retry_wait`, doubling from `retry_initial_seconds` to `retry_ceiling_seconds` with jitter, without end                     |
+| 401, the credential refused | `blocked`, and nothing is sent until a connection proves that it works                                                      |
+| 403, or an unknown VM       | `blocked`, until the server lists this VM for this agent. See [decision 0026](decisions/0026-media-retry-classification.md) |
+| The image is refused        | `failed`, and it is not sent again unless the file changes                                                                  |
 
 Before sending anything the agent asks the server about the hash, so identical content under another name costs one small request.
 
@@ -139,9 +141,22 @@ Media are private by default. Nothing is published automatically, and nothing is
 The public can fetch the thumbnail and the full JPEG of an image that passes that test, and never an original. Administrators can
 fetch all three, through routes that check the session on each request, and originals are served as downloads.
 
+**A public VM does not make its screenshots public.** A VM can be public with a main image selected and still show a placeholder, because that image is private. The VM's page says so, and offers one explicit action to publish it. See [decision 0027](decisions/0027-catalog-detail-and-public-covers.md).
+
 **The main image** is `vm_media.is_main`, with at most one per VM as [decision 0004](decisions/0004-schema-invariants.md) describes.
 New screenshots never change it. Unpublishing the main image keeps the selection and shows the placeholder, and nothing is promoted in
 its place.
+
+## The gallery
+
+A VM's page shows the main screenshot prominently, and thumbnails of every screenshot the viewer may see. The public sees what is published, and administrators see everything, with the controls to set or clear the main image and to publish or unpublish. Selecting a
+thumbnail opens the full JPEG in a viewer: the arrow keys move, Escape closes, Tab stays inside, and focus returns to the thumbnail of the image it ended on. Thumbnails load lazily and 24 at a time, and originals are never displayed, only offered to administrators as a download. See
+[decision 0027](decisions/0027-catalog-detail-and-public-covers.md).
+
+## Decoding limits
+
+PNG and JPEG go through `sharp`, and PPM and BMP through two small decoders in the API. Both have limits on size, dimensions and pixels, checked before any pixel is decoded or any large buffer allocated, and a deadline, `MEDIA_PROCESSING_TIMEOUT_SECONDS`. Decoding yields regularly, so a large image does not hold up other
+requests. See [decision 0025](decisions/0025-bounded-image-decoders.md).
 
 ## Transfers
 

@@ -396,3 +396,28 @@ fn registration_messages_match_the_shared_fixtures() {
         );
     }
 }
+
+#[test]
+fn restore_messages_match_the_shared_fixtures() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in ["restoreServerMessages", "restoreAgentMessages"] {
+        for example in wire[key].as_array().unwrap() {
+            let envelope: Envelope = serde_json::from_value(example.clone())
+                .unwrap_or_else(|error| panic!("{example}: {error}"));
+            let round_trip = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(round_trip["type"], example["type"]);
+            assert_eq!(round_trip["payload"], example["payload"], "{example}");
+        }
+    }
+}
+
+#[test]
+fn a_restore_command_cannot_say_where_anything_goes() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for example in wire["restoreRefusedByTheAgent"].as_array().unwrap() {
+        assert!(
+            serde_json::from_value::<Envelope>(example.clone()).is_err(),
+            "{example}"
+        );
+    }
+}

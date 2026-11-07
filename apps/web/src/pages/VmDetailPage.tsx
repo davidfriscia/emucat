@@ -1,10 +1,22 @@
-import { adminVmRoute, publicMediaPath, vmPathParamsSchema, vmTitle } from '@emucat/contracts';
-import type { VmIdentity } from '@emucat/contracts';
-import { useCallback } from 'react';
-import { Link, useParams } from 'react-router';
+import {
+  adminVmRoute,
+  publicMediaPath,
+  vmPathParamsSchema,
+  vmTitle,
+  type PublicMedia,
+  type VmIdentity,
+} from '@emucat/contracts';
+import { useCallback, useMemo } from 'react';
+import { Link, Navigate, useParams } from 'react-router';
 import { ApiRequestError, fetchPublicVm } from '../api';
 import { useAuth } from '../auth';
-import { EmulatorBadge, VmImage } from '../components/Catalog';
+import { EmulatorBadge } from '../components/Catalog';
+import {
+  MainScreenshot,
+  ThumbnailGrid,
+  useImageViewer,
+  type GalleryItem,
+} from '../components/Gallery';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { useAsync } from '../useAsync';
 
@@ -26,6 +38,55 @@ function MissingVm() {
   );
 }
 
+function PublicGallery({
+  title,
+  gallery,
+  mainImage,
+}: {
+  title: string;
+  gallery: readonly PublicMedia[];
+  mainImage: PublicMedia | null;
+}) {
+  const items = useMemo<GalleryItem[]>(
+    () =>
+      gallery.map((image, index) => ({
+        id: image.id,
+        label:
+          image.id === mainImage?.id
+            ? `Screenshot of ${title}`
+            : `Screenshot ${index + 1} of ${title}`,
+        thumbnailSrc: publicMediaPath(image.id, 'thumbnail'),
+        fullSrc: publicMediaPath(image.id, 'full'),
+        widthPx: image.widthPx,
+        heightPx: image.heightPx,
+      })),
+    [gallery, mainImage, title],
+  );
+  const { open, registerThumbnail, viewer, openId } = useImageViewer(items);
+  const main = items.find((item) => item.id === mainImage?.id) ?? null;
+  return (
+    <>
+      <MainScreenshot item={main} onOpen={open} />
+      {items.length > 0 ? (
+        <section className="mt-4" aria-labelledby="screenshots-heading">
+          <h2 id="screenshots-heading" className="h5">
+            Screenshots
+          </h2>
+          <ThumbnailGrid
+            items={items}
+            onOpen={open}
+            registerThumbnail={registerThumbnail}
+            openId={openId}
+          />
+        </section>
+      ) : (
+        <p className="small text-body-secondary">No screenshots have been published yet.</p>
+      )}
+      {viewer}
+    </>
+  );
+}
+
 function VmDetail({ identity }: { identity: VmIdentity }) {
   const { emulatorType, vmName } = identity;
   const load = useCallback(
@@ -34,16 +95,21 @@ function VmDetail({ identity }: { identity: VmIdentity }) {
   );
   const { state, reload } = useAsync(load);
   const { state: auth } = useAuth();
+  const isAdmin = auth.status === 'authenticated' && auth.session.user.role === 'admin';
 
   if (state.status === 'loading') return <LoadingState label="Loading the virtual machine" />;
   if (state.status === 'error') {
-    if (state.error instanceof ApiRequestError && state.error.status === 404) return <MissingVm />;
+    if (state.error instanceof ApiRequestError && state.error.status === 404) {
+      // A private VM is still this administrator's to see, on the page that checks that they may.
+      if (auth.status === 'loading') return <LoadingState label="Loading the virtual machine" />;
+      if (isAdmin) return <Navigate to={adminVmRoute(identity)} replace />;
+      return <MissingVm />;
+    }
     return <ErrorState error={state.error} onRetry={reload} />;
   }
 
   const vm = state.data;
   const title = vmTitle(vm);
-  const others = vm.gallery.filter((item) => item.id !== vm.mainImage?.id);
   return (
     <article>
       <title>{`${title} · EmuCat`}</title>
@@ -55,40 +121,15 @@ function VmDetail({ identity }: { identity: VmIdentity }) {
         <EmulatorBadge emulatorType={vm.emulatorType} />
       </div>
       <p className="small text-body-secondary vm-identity">{vm.vmName}</p>
-      {auth.status === 'authenticated' && auth.session.user.role === 'admin' ? (
+      {isAdmin ? (
         <p>
           <Link to={adminVmRoute(vm)} className="btn btn-sm btn-outline-primary">
             Manage this VM
           </Link>
         </p>
       ) : null}
-      <div className="vm-detail-media rounded-3 overflow-hidden border mb-3">
-        <VmImage
-          src={vm.mainImage ? publicMediaPath(vm.mainImage.id, 'full') : null}
-          alt={`Screenshot of ${title}`}
-          markSize={96}
-        />
-      </div>
       {vm.description ? <p className="vm-description">{vm.description}</p> : null}
-      {others.length > 0 ? (
-        <section className="mt-4">
-          <h2 className="h5">More images</h2>
-          <div className="gallery-grid">
-            {others.map((item, index) => (
-              <a
-                key={item.id}
-                href={publicMediaPath(item.id, 'full')}
-                className="rounded-2 overflow-hidden border d-block"
-              >
-                <VmImage
-                  src={publicMediaPath(item.id, 'thumbnail')}
-                  alt={`Screenshot ${index + 1} of ${title}`}
-                />
-              </a>
-            ))}
-          </div>
-        </section>
-      ) : null}
+      <PublicGallery title={title} gallery={vm.gallery} mainImage={vm.mainImage} />
     </article>
   );
 }
@@ -96,5 +137,8 @@ function VmDetail({ identity }: { identity: VmIdentity }) {
 export function VmDetailPage() {
   const params = vmPathParamsSchema.safeParse(useParams());
   if (!params.success) return <MissingVm />;
-  return <VmDetail identity={params.data} />;
+  // Remounted for another VM, so that nothing from the previous one lingers.
+  return (
+    <VmDetail key={`${params.data.emulatorType}/${params.data.vmName}`} identity={params.data} />
+  );
 }

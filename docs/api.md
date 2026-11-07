@@ -74,7 +74,7 @@ must be revalidated (`Cache-Control: no-cache`), so making something private tak
 | `GET /catalog/vms/:emulatorType/:vmName`      | Adds `description` and `gallery`; `summary` goes                       |
 | `GET /catalog/media/:mediaId/thumbnail\|full` | The JPEG                                                               |
 
-`mainImage` is `{ id, widthPx, heightPx }`, or `null` meaning "show the placeholder". `displayName` may be
+`mainImage` is `{ id, widthPx, heightPx }`, or `null` meaning "show the placeholder". `gallery` lists every published image, with the main one first, then by when it was captured, in a stable order. `/original` does not exist here, for anyone. `displayName` may be
 `null`, in which case the title is the VM name (`vmTitle` in the contracts). `summary` is the first 240
 characters of the description.
 
@@ -206,6 +206,24 @@ private key: archives go directly between agent and repository. See the [protoco
 `POST /admin/registrations/:operationId/retry-cleanup` tries again to remove a local VM, after a screenshot blocked it. It only applies to
 a transfer in `partial_success` with the code `transfer_blocked_media`, with the agent online, and the agent checks everything again.
 
+## Restores
+
+Administrators only, with the same-origin and CSRF rules as everything else here. None of these routes accepts or returns archive bytes, and none accepts a filesystem path. Shapes are in
+[`restore.ts`](../packages/contracts/src/restore.ts).
+
+| Method and path                                        | What it does                                                                                              |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `GET /admin/vms/:emulatorType/:vmName/restore-options` | The master, and for each paired agent whether it is eligible, what it holds and where it would restore to |
+| `POST /admin/restores`                                 | Starts one: `{ agentId, emulatorType, vmName, versionId }`. 202, with the operation                       |
+| `GET /admin/restores`                                  | The latest 100. Filter with `agentId`, `emulatorType` and `vmName`                                        |
+| `GET /admin/restores/:operationId`                     | One operation                                                                                             |
+| `POST /admin/restores/:operationId/cancel`             | Cancels one, until publication has begun                                                                  |
+
+Starting one answers 404 with `agent_not_found` or `version_not_found`, and 409 with `version_not_master`, `repository_disabled`, `agent_revoked`, `agent_offline`, `agent_cannot_restore`, `emulator_not_configured`, `repository_not_authorized`,
+`repository_not_configured`, `local_copy_exists` or `operation_in_progress`. Cancelling answers 409 with `restore_too_late` or `restore_finished`.
+
+An operation's `error` has a `code`, from `RESTORE_ERROR_CODES`, and `recovery` says what can be done about it. `verified` says what the agent reports having verified, and the server has not read the archive.
+
 ## Repositories
 
 Administrators only, with the session and CSRF token. No response holds a credential, and no request can send one. See the
@@ -222,16 +240,16 @@ Administrators only, with the session and CSRF token. No response holds a creden
 
 ## Browser pages
 
-| Route                              | Audience      | Page                               |
-| ---------------------------------- | ------------- | ---------------------------------- |
-| `/`                                | Public        | Catalog                            |
-| `/vms/:emulatorType/:vmName`       | Public        | VM detail                          |
-| `/login`, `/setup`                 | Public        | Sign in, first-run setup           |
-| `/admin`                           | Administrator | Dashboard                          |
-| `/admin/catalog`                   | Administrator | Catalog management                 |
-| `/admin/agents`                    | Administrator | Agents, pairing                    |
-| `/admin/agents/:agentId`           | Administrator | One agent, discovery, registration |
-| `/admin/repositories`              | Administrator | Repositories, connectivity tests   |
-| `/admin/vms/:emulatorType/:vmName` | Administrator | VM metadata editor                 |
-| `…/media`                          | Administrator | Media management                   |
-| `/account`, `/settings`            | Signed in     | Password, sessions, theme          |
+| Route                              | Audience      | Page                                                                           |
+| ---------------------------------- | ------------- | ------------------------------------------------------------------------------ |
+| `/`                                | Public        | Catalog                                                                        |
+| `/vms/:emulatorType/:vmName`       | Public        | VM detail                                                                      |
+| `/login`, `/setup`                 | Public        | Sign in, first-run setup                                                       |
+| `/admin`                           | Administrator | Dashboard                                                                      |
+| `/admin/catalog`                   | Administrator | Catalog management                                                             |
+| `/admin/agents`                    | Administrator | Agents, pairing                                                                |
+| `/admin/agents/:agentId`           | Administrator | One agent, discovery, registration                                             |
+| `/admin/repositories`              | Administrator | Repositories, connectivity tests                                               |
+| `/admin/vms/:emulatorType/:vmName` | Administrator | VM detail: metadata, visibility, cover, gallery, master, local copies, restore |
+| `…/media`                          | Administrator | Media management                                                               |
+| `/account`, `/settings`            | Signed in     | Password, sessions, theme                                                      |

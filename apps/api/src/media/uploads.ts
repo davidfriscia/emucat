@@ -217,6 +217,7 @@ export async function storeUpload(
         maxPixels: policy.maxPixels,
         maxDimension: policy.maxDimension,
         timeoutSeconds: policy.processingTimeoutSeconds,
+        maxInputBytes: policy.maxUploadBytes,
       });
     } catch (error) {
       if (error instanceof ImageRejectedError) {

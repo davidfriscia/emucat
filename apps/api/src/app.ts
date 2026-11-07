@@ -6,6 +6,7 @@ import { AgentHub, NO_PRESENCE } from './agents/hub.js';
 import type { AgentAuthenticator } from './auth/agent-auth.js';
 import { registerErrorHandling } from './errors.js';
 import { RegistrationCoordinator } from './registration/coordinator.js';
+import { RestoreCoordinator } from './restore/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
 import { registerBrowserRoutes, type BrowserDependencies } from './routes/browser.js';
@@ -64,8 +65,25 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           browser.registrationPolicy,
         );
         hub.setOperations(registrations);
+        const restores = new RestoreCoordinator(
+          browser.pool,
+          {
+            isOnline: (agentId) => hub.isOnline(agentId),
+            restoreCapabilities: (agentId) => hub.restoreCapabilities(agentId),
+            send: (agentId, message) => hub.sendToAgent(agentId, message),
+          },
+          app.log,
+        );
+        hub.setRestores(restores);
         await api.register(async (scope) =>
-          registerBrowserRoutes(scope, browser, hub, registrations, dependencies.authenticateAgent),
+          registerBrowserRoutes(
+            scope,
+            browser,
+            hub,
+            registrations,
+            restores,
+            dependencies.authenticateAgent,
+          ),
         );
       }
     },

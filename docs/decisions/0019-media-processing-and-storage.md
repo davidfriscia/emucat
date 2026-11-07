@@ -1,6 +1,6 @@
 # 0019: `sharp`, two small decoders, and files named by UUID
 
-**Status:** Accepted
+**Status:** Accepted. Its last sentence, on the time spent decoding, is replaced by [0025](0025-bounded-image-decoders.md).
 
 **`sharp`.** It runs libvips off the main thread, handles limits and timeouts itself, and ships prebuilt binaries for Windows and Linux.
 Its install script only verifies the platform binary, so it joins esbuild in `allowBuilds`.

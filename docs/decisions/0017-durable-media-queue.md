@@ -1,6 +1,6 @@
 # 0017: The media queue is one JSON file, and a cache of what the server says
 
-**Status:** Accepted
+**Status:** Accepted. What it says about 401 and 403 is superseded by [0026](0026-media-retry-classification.md).
 
 **A file like the other state files.** The agent already keeps registration journals as files, replaced atomically and durably. A
 database engine inside the agent would add a dependency and a recovery story of its own for a list of thousands of entries at most.

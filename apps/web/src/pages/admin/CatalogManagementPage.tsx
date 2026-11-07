@@ -65,7 +65,14 @@ export function CatalogManagementPage() {
                 emulatorType={vm.emulatorType}
                 summary={vm.summary}
                 imageSrc={vm.mainMediaId ? adminMediaPath(vm, vm.mainMediaId, 'thumbnail') : null}
-                badges={<VisibilityBadge visibility={vm.visibility} />}
+                badges={
+                  <>
+                    <VisibilityBadge visibility={vm.visibility} />
+                    {vm.publicCover === 'main_private' || vm.publicCover === 'no_main_image' ? (
+                      <span className="badge text-bg-warning">No public cover</span>
+                    ) : null}
+                  </>
+                }
               />
             ))}
           </div>

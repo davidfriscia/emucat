@@ -125,6 +125,7 @@ export function adminVm(overrides: Partial<AdminVmDetail> = {}): AdminVmDetail {
     description: 'A retro machine',
     visibility: 'private',
     mainMediaId: null,
+    publicCover: 'vm_private',
     mediaCount: 0,
     versionCount: 1,
     createdAt: PAST,

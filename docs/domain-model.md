@@ -101,8 +101,20 @@ For each VM it holds, an agent tracks:
 
 Registration sets the first of these: a copy makes the master the VM's local source version, as `idle` and `verified`. A
 completed transfer leaves `absent`, with no source version. A transfer whose local cleanup failed leaves `error` and
-`unverified`. `lastVerifiedSha256` is the manifest's hash, since that is what describes a local copy. The rest are
-declared for future use, with no behavior yet:
+`unverified`. `lastVerifiedSha256` is the manifest's hash, since that is what describes a local copy.
+
+A **restore** sets the same fields a copy does, because it means the same thing: this directory came from this master, and was verified at this moment. After that:
+
+| What is known                                     | `executionState`    | `contentStatus` | How it is known                                   |
+| ------------------------------------------------- | ------------------- | --------------- | ------------------------------------------------- |
+| A registered master, and no local copy here       | No row, or `absent` |                 | Registration, or a discovery that did not find it |
+| A verified local copy, as of a moment             | `idle`              | `verified`      | A restore or a copy that just finished            |
+| A local copy, not checked since it last connected | `idle` or `unknown` | `unverified`    | The next connection, or a discovery that found it |
+| A local copy that differs from what was restored  | `idle`              | `modified`      | Names or sizes differ from its manifest           |
+
+Nothing is ever reported as unchanged without having been verified. See [decision 0021](decisions/0021-restore-lifecycle.md#local-state).
+
+The rest are declared for future use, with no behavior yet:
 
 - **Execution states:** `unknown`, `absent`, `idle`, `downloading`, `extracting`, `verifying`,
   `starting`, `running`, `stopping`, `archiving`, `uploading`, `error`.
@@ -152,6 +164,12 @@ operation, with a new version UUID.
 An archive is a complete standalone ZIP of the VM's directory, ending with a deterministic manifest. Media are excluded. See
 [decision 0014](decisions/0014-archive-and-manifest.md).
 
+## Restore
+
+An operation restores one immutable master onto one agent. It holds the operation's UUID, the VM's identity, the version's UUID, the repository's and the agent's UUIDs, the administrator who asked, its state and its
+progress, and it keeps the archive's key, size and hash as they were when it was created. The destination is not in the request: the agent derives it from its own base path, as `{base_path}/{vm_name}`. Only masters are restored for now.
+See [decision 0021](decisions/0021-restore-lifecycle.md).
+
 ## Database tables
 
 | Table                     | Holds                                    | Key                                  |
@@ -168,6 +186,7 @@ An archive is a complete standalone ZIP of the VM's directory, ending with a det
 | `agent_pairing_requests`  | Pairing requests, as digests             | `id`                                 |
 | `agent_repositories`      | Which agents may use which repository    | `(agent_id, repository_id)`          |
 | `registration_operations` | Registrations, kept after they end       | `id`                                 |
+| `restore_operations`      | Restores, kept after they end            | `id`                                 |
 | `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                       |
 | `schema_migrations`       | Migration history, managed by the runner | `version`                            |
 

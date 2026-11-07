@@ -11,10 +11,12 @@ import type { SessionPolicy } from '../auth/sessions.js';
 import type { SetupToken } from '../auth/setup.js';
 import type { MediaPolicy } from '../media/uploads.js';
 import type { RegistrationCoordinator, RegistrationPolicy } from '../registration/coordinator.js';
+import type { RestoreCoordinator } from '../restore/coordinator.js';
 import type { MediaStorage } from '../storage/media-storage.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
 import { registerAdminRegistrationRoutes } from './admin-registrations.js';
+import { registerAdminRestoreRoutes } from './admin-restores.js';
 import { registerAgentMediaRoutes } from './agent-media.js';
 import { registerAgentPairingRoutes, type PairingRateLimits } from './agent-pairing.js';
 import { registerAuthRoutes, type AuthRateLimits } from './auth.js';
@@ -44,6 +46,7 @@ export async function registerBrowserRoutes(
   dependencies: BrowserDependencies,
   hub: AgentHub,
   registrations: RegistrationCoordinator,
+  restores: RestoreCoordinator,
   authenticateAgent: AgentAuthenticator,
 ): Promise<void> {
   await api.register(cookie);
@@ -59,4 +62,5 @@ export async function registerBrowserRoutes(
   registerAgentPairingRoutes(api, dependencies);
   registerAdminAgentRoutes(api, dependencies, hub);
   registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
+  registerAdminRestoreRoutes(api, dependencies, restores);
 }

@@ -849,3 +849,83 @@ async fn a_missing_object_is_reported_precisely() {
         .await
         .expect("deleting nothing is fine");
 }
+
+#[tokio::test]
+#[ignore = "needs Docker. Run by pnpm test:sftp"]
+async fn a_download_refuses_the_wrong_key_and_the_wrong_host_key_before_writing_anything() {
+    let server = Server::start();
+    let content = pseudo_random(1024 * 1024);
+    let source = server.local_file("source.zip", &content);
+    let repository = server.repository();
+    let staging = RepositoryKey::staging(Uuid::new_v4());
+    let key = final_key("download-identity");
+    repository
+        .upload(&staging, &source, no_progress(), &CancelFlag::new())
+        .await
+        .unwrap();
+    repository.publish(&staging, &key).await.unwrap();
+
+    let destination = server.directory.path().join("refused.zip");
+    let mut wrong_client = server.settings();
+    wrong_client.private_key = generate_key(server.directory.path(), "other", "");
+    let error = SftpArchiveRepository::new(wrong_client)
+        .unwrap()
+        .download(&key, &destination, no_progress(), &CancelFlag::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, Kind::AuthenticationFailed, "{error}");
+    assert!(!destination.exists());
+
+    let mut wrong_host = server.settings();
+    let elsewhere = generate_key(server.directory.path(), "elsewhere", "");
+    wrong_host.host_keys.pinned_fingerprints = vec![fingerprint_of(&elsewhere)];
+    let error = SftpArchiveRepository::new(wrong_host)
+        .unwrap()
+        .download(&key, &destination, no_progress(), &CancelFlag::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, Kind::HostKeyChanged, "{error}");
+    assert!(!destination.exists());
+
+    let received = repository
+        .download(&key, &destination, no_progress(), &CancelFlag::new())
+        .await
+        .unwrap();
+    assert_eq!(received.sha256, sha(&content));
+    assert_eq!(fs::read(&destination).unwrap(), content);
+}
+
+#[tokio::test]
+#[ignore = "needs Docker. Run by pnpm test:sftp"]
+async fn a_cancelled_download_stops_and_leaves_no_file() {
+    let server = Server::start();
+    let content = pseudo_random(48 * 1024 * 1024);
+    let source = server.local_file("source.zip", &content);
+    let repository = server.repository();
+    let staging = RepositoryKey::staging(Uuid::new_v4());
+    let key = final_key("download-cancelled");
+    repository
+        .upload(&staging, &source, no_progress(), &CancelFlag::new())
+        .await
+        .unwrap();
+    repository.publish(&staging, &key).await.unwrap();
+
+    let destination = server.directory.path().join("cancelled.zip");
+    let cancel = CancelFlag::new();
+    let trigger = cancel.clone();
+    let error = repository
+        .download(
+            &key,
+            &destination,
+            Arc::new(move |done, _| {
+                if done > 1024 * 1024 {
+                    trigger.cancel();
+                }
+            }),
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, Kind::Cancelled);
+    assert!(!destination.exists());
+}

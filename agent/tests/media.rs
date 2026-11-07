@@ -16,8 +16,8 @@ use emucat_agent::media::{
 };
 use emucat_agent::media_queue::{EntryState, MediaQueue, QueueEntry, queue_path, retry_delay};
 use emucat_agent::media_sync::{
-    AgentMediaVms, ApiFailure, MediaApi, MediaPreservation, MediaSync, MediaSyncConfig,
-    bounded_status, classify_response, relevant_vm,
+    AgentMediaVms, ApiFailure, BlockReason, MediaApi, MediaPreservation, MediaSync,
+    MediaSyncConfig, bounded_status, classify_response, relevant_vm,
 };
 use emucat_agent::protocol::Message;
 use futures_util::future::BoxFuture;
@@ -1032,4 +1032,155 @@ fn the_largest_status_message_fits_in_a_protocol_message() {
     let message = Envelope::new(Message::AgentMediaSyncStatus(status));
     let size = serde_json::to_string(&message).unwrap().len();
     assert!(size < AGENT_MAX_MESSAGE_BYTES, "{size}");
+}
+
+#[test]
+fn authorization_failures_wait_for_a_change_instead_of_a_timer() {
+    let reason = |status, code| classify_response(status, code, "").block_reason();
+    // The credential: a revoked agent stops on its connection, and an expired one recovers there.
+    assert_eq!(reason(401, "unauthorized"), Some(BlockReason::Credential));
+    // The association: only the server listing the VM makes another attempt worth anything.
+    assert_eq!(reason(403, "vm_not_assigned"), Some(BlockReason::Vm));
+    assert_eq!(reason(404, "vm_not_registered"), Some(BlockReason::Vm));
+    // A 404 without the API's own code is a proxy having a bad day, and that passes.
+    assert_eq!(reason(404, "unreachable"), None);
+    assert!(!classify_response(404, "unreachable", "").is_permanent());
+    // Passing problems keep their backoff.
+    for status in [408, 429, 500, 502, 503, 504] {
+        assert_eq!(reason(status, "busy"), None, "{status}");
+        assert!(!classify_response(status, "busy", "").is_permanent());
+    }
+    // None of these say anything about the bytes, so none of them can end an entry for good.
+    for (status, code) in [(401, "x"), (403, "x"), (404, "vm_not_registered")] {
+        assert!(!classify_response(status, code, "").is_permanent());
+    }
+}
+
+fn blocked(code: &str, reason: BlockReason) -> ApiFailure {
+    ApiFailure::Blocked {
+        code: code.to_owned(),
+        message: "refused".to_owned(),
+        reason,
+    }
+}
+
+fn queue_refusals(world: &World, failure: &ApiFailure, count: usize) {
+    let mut state = world.server.state.lock().unwrap();
+    for _ in 0..count {
+        state.upload_failures.push_back(failure.clone());
+    }
+}
+
+fn refusals_left(world: &World) -> usize {
+    world.server.state.lock().unwrap().upload_failures.len()
+}
+
+#[tokio::test]
+async fn a_forbidden_vm_is_not_retried_on_a_timer_and_the_file_stays() {
+    let world = World::new();
+    let root = world.qemu_vm("Dos");
+    fs::write(root.join("one.ppm"), b"one").unwrap();
+    queue_refusals(&world, &blocked("vm_not_assigned", BlockReason::Vm), 3);
+    let running = world.start();
+    world
+        .until("the refusal", |_| running.sync.counts().3 == 1)
+        .await;
+    let left = refusals_left(&world);
+    assert_eq!(left, 2, "one attempt so far");
+
+    // With a retry delay of a few milliseconds, a timer would have used these up long before this ends.
+    quiet_period().await;
+    assert_eq!(refusals_left(&world), left, "it was sent again on a timer");
+    assert!(world.uploads().is_empty());
+    assert!(root.join("one.ppm").exists(), "the file is not discarded");
+
+    // The status says why, and a transfer would see it as a reason to keep the VM.
+    let Some(Message::AgentMediaSyncStatus(status)) = running.sync.status_message() else {
+        panic!("a status was due");
+    };
+    assert_eq!(status.vms[0].failed, 1);
+    assert_eq!(
+        status.vms[0].last_error.as_ref().unwrap().code,
+        "vm_not_assigned"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn an_unknown_vm_goes_when_the_server_lists_it_again() {
+    let mut world = World::new();
+    world.settings.reconcile_interval = Duration::from_millis(150);
+    let root = world.qemu_vm("Dos");
+    fs::write(root.join("one.ppm"), b"one").unwrap();
+    queue_refusals(&world, &blocked("vm_not_registered", BlockReason::Vm), 1);
+    let running = world.start();
+    // Listed by the server, which is the change it was waiting for. It takes one attempt, and it works.
+    world.until_uploaded(1).await;
+    assert_eq!(refusals_left(&world), 0);
+    assert_eq!(running.sync.counts().3, 0);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_refused_credential_stops_every_upload_until_the_connection_proves_it_works() {
+    let world = World::new();
+    let root = world.qemu_vm("Dos");
+    for name in ["one.ppm", "two.ppm", "three.ppm"] {
+        fs::write(root.join(name), name.as_bytes()).unwrap();
+    }
+    world.server.state.lock().unwrap().upload_delay = Duration::from_millis(20);
+    queue_refusals(&world, &blocked("unauthorized", BlockReason::Credential), 2);
+    let running = world.start();
+    world
+        .until("the refusals", |_| refusals_left(&world) == 0)
+        .await;
+    quiet_period().await;
+    let sent_before = world.uploads().len();
+    fs::write(root.join("four.ppm"), b"four").unwrap();
+    quiet_period().await;
+    assert_eq!(
+        world.uploads().len(),
+        sent_before,
+        "nothing goes while the credential is refused"
+    );
+
+    // Recovery: the connection worked, which is what this was waiting for. Nothing was lost.
+    running.sync.on_connected();
+    world.until_uploaded(4).await;
+    assert_eq!(running.sync.counts().3, 0);
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_blocked_entry_survives_a_restart_and_goes_on_the_next_connection() {
+    let world = World::new();
+    let root = world.qemu_vm("Dos");
+    fs::write(root.join("one.ppm"), b"one").unwrap();
+    queue_refusals(&world, &blocked("vm_not_assigned", BlockReason::Vm), 1);
+    let running = world.start();
+    world
+        .until("the refusal", |_| running.sync.counts().3 == 1)
+        .await;
+    running.stop().await;
+
+    let restarted = world.start();
+    world.until_uploaded(1).await;
+    assert_eq!(world.uploaded_paths(), ["one.ppm"]);
+    restarted.stop().await;
+}
+
+#[tokio::test]
+async fn a_busy_server_is_still_retried_with_backoff() {
+    let world = World::new();
+    let root = world.qemu_vm("Dos");
+    fs::write(root.join("one.ppm"), b"one").unwrap();
+    for (status, code) in [(503, "media_busy"), (500, "x"), (429, "x"), (408, "x")] {
+        let failure = classify_response(status, code, "");
+        assert!(failure.block_reason().is_none() && !failure.is_permanent());
+        queue_refusals(&world, &failure, 1);
+    }
+    let running = world.start();
+    world.until_uploaded(1).await;
+    assert_eq!(refusals_left(&world), 0);
+    running.stop().await;
 }

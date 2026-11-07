@@ -35,6 +35,7 @@ import {
   type RegistrationTarget,
 } from '../../components/Registration';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
+import { AgentRestores } from '../../components/Restore';
 import { usePolledData } from '../../usePolledData';
 import { NotFoundPage } from '../NotFoundPage';
 
@@ -531,6 +532,7 @@ export function AgentDetailPage() {
       </dl>
       <RevokeControl agent={agent} onRevoked={refresh} />
       <DiscoveryPanel agent={agent} />
+      <AgentRestores agentId={agent.id} />
     </>
   );
 }

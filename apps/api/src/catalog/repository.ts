@@ -12,6 +12,7 @@ import {
   type MediaVisibility,
   type Pagination,
   type PublicCatalogQuery,
+  type PublicCoverStatus,
   type PublicMedia,
   type PublicVmCard,
   type PublicVmDetail,
@@ -266,7 +267,7 @@ export async function agentsHoldingVm(
 
 const ADMIN_VM_COLUMNS = `
   vm.emulator_type, vm.vm_name, vm.display_name, vm.visibility, vm.created_at, vm.updated_at,
-  main.id AS main_media_id,
+  main.id AS main_media_id, main.visibility AS main_media_visibility,
   (SELECT COUNT(*) FROM vm_media AS media
     WHERE media.emulator_type = vm.emulator_type AND media.vm_name = vm.vm_name) AS media_count`;
 
@@ -282,10 +283,18 @@ interface AdminVmRow extends RowDataPacket {
   description: string | null;
   visibility: VmVisibility;
   main_media_id: string | null;
+  main_media_visibility: MediaVisibility | null;
   media_count: number;
   version_count: number;
   created_at: Date;
   updated_at: Date;
+}
+
+/** The same rule as the `public_catalog_card_media` view, stated as a reason. */
+function publicCover(row: AdminVmRow): PublicCoverStatus {
+  if (row.visibility !== 'public') return 'vm_private';
+  if (!row.main_media_id) return 'no_main_image';
+  return row.main_media_visibility === 'published' ? 'shown' : 'main_private';
 }
 
 export async function listAdminVms(
@@ -314,6 +323,7 @@ export async function listAdminVms(
       summary: row.summary,
       visibility: row.visibility,
       mainMediaId: row.main_media_id,
+      publicCover: publicCover(row),
       mediaCount: Number(row.media_count),
       updatedAt: row.updated_at.toISOString(),
     })),
@@ -341,6 +351,7 @@ export async function getAdminVm(pool: Pool, vm: VmIdentity): Promise<AdminVmDet
     description: row.description,
     visibility: row.visibility,
     mainMediaId: row.main_media_id,
+    publicCover: publicCover(row),
     mediaCount: Number(row.media_count),
     versionCount: Number(row.version_count),
     createdAt: row.created_at.toISOString(),

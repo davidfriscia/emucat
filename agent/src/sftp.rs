@@ -930,6 +930,10 @@ impl RepositoryProvider for ConfiguredRepositories {
             })
     }
 
+    fn repository_ids(&self) -> Vec<Uuid> {
+        self.repositories.keys().copied().collect()
+    }
+
     fn upload_attempts(&self, repository_id: Uuid) -> u32 {
         self.repositories
             .get(&repository_id)

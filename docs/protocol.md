@@ -92,26 +92,33 @@ handshake, so a client without a valid one gets a plain 401 and never has an ope
 
 ## Messages
 
-| Type                               | From   | Payload                                                                                                                                                   | Response                                                 |
-| ---------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `agent.hello`                      | Agent  | `agentVersion`, `platform`, `architecture`                                                                                                                | `server.welcome`                                         |
-| `agent.heartbeat`                  | Agent  | Empty                                                                                                                                                     | `server.heartbeat_ack`                                   |
-| `agent.discovery_result`           | Agent  | `operationId`, `hostPlatform`, `emulators`, `vms`, `skipped`                                                                                              |                                                          |
-| `agent.discovery_error`            | Agent  | `operationId`, `code`, `message`                                                                                                                          |                                                          |
-| `server.welcome`                   | Server | `agentId`, `heartbeatIntervalSeconds`                                                                                                                     |                                                          |
-| `server.heartbeat_ack`             | Server | Empty                                                                                                                                                     |                                                          |
-| `server.error`                     | Server | `code`, `message`                                                                                                                                         |                                                          |
-| `server.discovery_request`         | Server | `operationId`                                                                                                                                             | `agent.discovery_result`                                 |
-| `server.registration_request`      | Server | `operationId`, `emulatorType`, `vmName`, `mode`, `repositoryId`, `versionId`, `archiveKey`                                                                | `agent.registration_progress`, then a result or an error |
-| `server.registration_cancel`       | Server | `operationId`                                                                                                                                             | `agent.registration_error`                               |
-| `server.registration_ack`          | Server | `operationId`, `outcome`, `versionId`, `removeLocal`, `deletePublished`                                                                                   |                                                          |
-| `server.repository_health_request` | Server | `operationId`, `repositoryId`                                                                                                                             | `agent.repository_health_result`                         |
-| `agent.registration_sync`          | Agent  | `operations`: `operationId`, `phase`                                                                                                                      |                                                          |
-| `agent.registration_progress`      | Agent  | `operationId`, `stage`, `doneBytes`, `totalBytes`                                                                                                         |                                                          |
-| `agent.registration_result`        | Agent  | `operationId`, `versionId`, `archiveKey`, `archiveSizeBytes`, `archiveSha256`, `manifestVersion`, `manifestSha256`, `fileCount`, `totalUncompressedBytes` | `server.registration_ack`                                |
-| `agent.registration_error`         | Agent  | `operationId`, `code`, `message`                                                                                                                          | `server.registration_ack`                                |
-| `agent.registration_cleanup`       | Agent  | `operationId`, `versionId`, `localCopy`, `code`, `message`                                                                                                | `server.registration_ack`                                |
-| `agent.repository_health_result`   | Agent  | `operationId`, `repositoryId`, `ok`, `code`, `message`, `configuration`, `hostKeyFingerprint`, `freeBytes`                                                |                                                          |
+| Type                               | From   | Payload                                                                                                                                                                | Response                                                 |
+| ---------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `agent.hello`                      | Agent  | `agentVersion`, `platform`, `architecture`                                                                                                                             | `server.welcome`                                         |
+| `agent.heartbeat`                  | Agent  | Empty                                                                                                                                                                  | `server.heartbeat_ack`                                   |
+| `agent.discovery_result`           | Agent  | `operationId`, `hostPlatform`, `emulators`, `vms`, `skipped`                                                                                                           |                                                          |
+| `agent.discovery_error`            | Agent  | `operationId`, `code`, `message`                                                                                                                                       |                                                          |
+| `server.welcome`                   | Server | `agentId`, `heartbeatIntervalSeconds`                                                                                                                                  |                                                          |
+| `server.heartbeat_ack`             | Server | Empty                                                                                                                                                                  |                                                          |
+| `server.error`                     | Server | `code`, `message`                                                                                                                                                      |                                                          |
+| `server.discovery_request`         | Server | `operationId`                                                                                                                                                          | `agent.discovery_result`                                 |
+| `server.registration_request`      | Server | `operationId`, `emulatorType`, `vmName`, `mode`, `repositoryId`, `versionId`, `archiveKey`                                                                             | `agent.registration_progress`, then a result or an error |
+| `server.registration_cancel`       | Server | `operationId`                                                                                                                                                          | `agent.registration_error`                               |
+| `server.registration_ack`          | Server | `operationId`, `outcome`, `versionId`, `removeLocal`, `deletePublished`                                                                                                |                                                          |
+| `server.repository_health_request` | Server | `operationId`, `repositoryId`                                                                                                                                          | `agent.repository_health_result`                         |
+| `agent.registration_sync`          | Agent  | `operations`: `operationId`, `phase`                                                                                                                                   |                                                          |
+| `agent.registration_progress`      | Agent  | `operationId`, `stage`, `doneBytes`, `totalBytes`                                                                                                                      |                                                          |
+| `agent.registration_result`        | Agent  | `operationId`, `versionId`, `archiveKey`, `archiveSizeBytes`, `archiveSha256`, `manifestVersion`, `manifestSha256`, `fileCount`, `totalUncompressedBytes`              | `server.registration_ack`                                |
+| `agent.registration_error`         | Agent  | `operationId`, `code`, `message`                                                                                                                                       | `server.registration_ack`                                |
+| `agent.registration_cleanup`       | Agent  | `operationId`, `versionId`, `localCopy`, `code`, `message`                                                                                                             | `server.registration_ack`                                |
+| `agent.repository_health_result`   | Agent  | `operationId`, `repositoryId`, `ok`, `code`, `message`, `configuration`, `hostKeyFingerprint`, `freeBytes`                                                             |                                                          |
+| `server.restore_request`           | Server | `operationId`, `emulatorType`, `vmName`, `repositoryId`, `versionId`, `archiveKey`, `archiveSizeBytes`, `archiveSha256`, `manifestSha256`, `expectedUncompressedBytes` | `agent.restore_progress`, then a result or an error      |
+| `server.restore_cancel`            | Server | `operationId`                                                                                                                                                          | `agent.restore_error`                                    |
+| `server.restore_ack`               | Server | `operationId`, `outcome`                                                                                                                                               |                                                          |
+| `agent.restore_sync`               | Agent  | `operations`, `capabilities`, `localCopies`                                                                                                                            |                                                          |
+| `agent.restore_progress`           | Agent  | `operationId`, `stage`, `doneBytes`, `totalBytes`, `cacheHit`                                                                                                          |                                                          |
+| `agent.restore_result`             | Agent  | `operationId`, `versionId`, `archiveSizeBytes`, `archiveSha256`, `manifestVersion`, `manifestSha256`, `fileCount`, `totalUncompressedBytes`, `localDirectory`, `cache` | `server.restore_ack`                                     |
+| `agent.restore_error`              | Agent  | `operationId`, `code`, `message`                                                                                                                                       | `server.restore_ack`                                     |
 
 Commands say which identities are involved, and never where anything is. They have no path, host or option, and the agent
 refuses one with any extra field, so a server cannot aim a scan or a transfer at anything but what the agent's own
@@ -264,6 +271,18 @@ The agent runs the check described in [the repository guide](repositories.md#7-t
 that repository, without anything secret. The server compares them with its own record, and reports a difference. An answer
 counts only for the check in progress, from the agent it was asked of. A check that gets no answer in two minutes fails.
 
+## Restore
+
+A command that restores a master. As with every other command, it names identities and never a place: there is no field for a path or a host, the agent refuses a request with any extra field, it recomputes the key from the VM and the version,
+and it decides where the VM goes from its own base path. The full lifecycle is in [decision 0021](decisions/0021-restore-lifecycle.md).
+
+1. After each welcome, the agent sends `agent.restore_sync`. Its `capabilities` say which emulators have a base path, which repositories have local settings, and how the cache is doing. An agent that never sends it cannot restore. Its `operations` are its journals,
+   which the server compares with its own view, as for registration. Its `localCopies` say `unverified`, `modified` or `absent` about each local copy it knows of.
+2. The server sends `server.restore_request`, and the agent answers with `agent.restore_progress` for each stage: `validating`, `downloading`, `verifying`, `extracting`, `publishing_local`. Only real measurements are sent, and without a known total there is no total.
+3. It ends with `agent.restore_result` or `agent.restore_error`, repeated on each heartbeat and after each welcome, until `server.restore_ack` answers it. `closed` means that the server has recorded everything. `rejected` means it does not recognize the operation.
+   **Neither ever asks the agent to delete a VM,** and no message can.
+4. `server.restore_cancel` asks it to stop. It has no effect once publication has begun, and a result that arrives after a cancellation is still recorded, since the directory exists.
+
 ## Screenshots
 
 Screenshot bytes never travel over this connection, and only a status does: see [the REST routes](api.md#agent-media).
@@ -297,7 +316,7 @@ version is refused at the pairing request.
 Adding a message that older peers can ignore is not breaking. **Milestones 2 and 3 added discovery and registration
 under version 1 for this reason:** an agent ignores message types it does not know. A server refuses unknown types from an
 agent, so adding a message an agent sends requires a server that knows it first. A server only registers through an agent that
-has shown it can, with `agent.registration_sync`.
+has shown it can, with `agent.registration_sync`. **Milestone 5 added restoring the same way:** a server only restores through an agent that has sent `agent.restore_sync`.
 
 ## User authentication
 
@@ -309,4 +328,4 @@ session cookie, and a user's session cannot open this endpoint.
 
 - Credential rotation over the authenticated channel.
 - More control commands, each validated by the agent against local rules, such as `VmName`, whatever the server
-  sends: launching, stopping, snapshots, downloads.
+  sends: launching, stopping, snapshots.

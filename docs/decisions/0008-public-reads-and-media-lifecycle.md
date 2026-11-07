@@ -1,6 +1,6 @@
 # 0008: Public reads, and the lifecycle of media files
 
-**Status:** Accepted
+**Status:** Accepted. See also [0027](0027-catalog-detail-and-public-covers.md), on telling administrators what this means for a cover.
 
 ## Explicit shapes on every public response
 

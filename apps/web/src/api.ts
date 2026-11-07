@@ -23,6 +23,9 @@ import {
   registrationOperationSchema,
   repositoryListResponseSchema,
   repositorySummarySchema,
+  restoreListResponseSchema,
+  restoreOperationSchema,
+  restoreOptionsResponseSchema,
   revokedSessionsResponseSchema,
   sessionListResponseSchema,
   sessionStateResponseSchema,
@@ -36,6 +39,7 @@ import {
   type AgentSummary,
   type AuthenticatedSession,
   type CreateRegistrationRequest,
+  type CreateRestoreRequest,
   type DiscoveryOperation,
   type DiscoveryStateResponse,
   type EmulatorType,
@@ -49,6 +53,9 @@ import {
   type RegistrationOperation,
   type RepositoryListResponse,
   type RepositorySummary,
+  type RestoreListResponse,
+  type RestoreOperation,
+  type RestoreOptionsResponse,
   type SaveRepositoryRequest,
   type RevokedSessionsResponse,
   type SessionListResponse,
@@ -534,4 +541,39 @@ export function checkRepository(repositoryId: string, agentId: string): Promise<
     repositorySummarySchema,
     { method: 'POST' },
   );
+}
+
+// Restores
+
+export function fetchRestoreOptions(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<RestoreOptionsResponse> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/restore-options`,
+    restoreOptionsResponseSchema,
+    { signal },
+  );
+}
+
+export function fetchRestores(
+  filter: { agentId?: string; emulatorType?: EmulatorType; vmName?: string },
+  signal?: AbortSignal,
+): Promise<RestoreListResponse> {
+  return requestJson(`/admin/restores${queryString(filter)}`, restoreListResponseSchema, {
+    signal,
+  });
+}
+
+export function startRestore(request: CreateRestoreRequest): Promise<RestoreOperation> {
+  return requestJson('/admin/restores', restoreOperationSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function cancelRestore(operationId: string): Promise<RestoreOperation> {
+  return requestJson(`/admin/restores/${operationId}/cancel`, restoreOperationSchema, {
+    method: 'POST',
+  });
 }

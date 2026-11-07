@@ -16,7 +16,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::emulators::EmulatorType;
+use crate::extraction::ExtractionLimits;
 use crate::pairing::sanitize_agent_name;
+use crate::restore::RestoreSettings;
 
 pub const CONFIG_PATH_ENV: &str = "EMUCAT_AGENT_CONFIG";
 
@@ -91,6 +93,11 @@ pub struct Config {
     pub state_dir: Option<PathBuf>,
     /// Where archives are built. Defaults to `staging` in the state directory.
     pub staging_dir: Option<PathBuf>,
+    /// Where verified master ZIPs are kept. Defaults to `archive-cache` in the state directory.
+    pub cache_dir: Option<PathBuf>,
+    /// How much the cache may hold. Zero turns it off.
+    pub cache_max_bytes: u64,
+    pub restore_limits: ExtractionLimits,
     pub repositories: BTreeMap<Uuid, RepositoryConfig>,
     pub media: MediaSettings,
     pub log_level: String,
@@ -206,6 +213,10 @@ fn resolve_media(section: MediaSection) -> Result<MediaSettings, ConfigError> {
 #[serde(deny_unknown_fields)]
 struct StorageSection {
     staging_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    cache_max_bytes: Option<u64>,
+    restore_max_files: Option<u64>,
+    restore_max_expanded_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +469,22 @@ impl Config {
             .or_else(|| self.state_dir.as_ref().map(|dir| dir.join("staging")))
     }
 
+    /// Where verified master ZIPs are kept, if that is known.
+    pub fn effective_cache_dir(&self) -> Option<PathBuf> {
+        self.cache_dir
+            .clone()
+            .or_else(|| self.state_dir.as_ref().map(|dir| dir.join("archive-cache")))
+    }
+
+    /// What restores use, if the state directory is known.
+    pub fn restore_settings(&self) -> Option<RestoreSettings> {
+        Some(RestoreSettings {
+            cache_dir: self.effective_cache_dir()?,
+            cache_max_bytes: self.cache_max_bytes,
+            limits: self.restore_limits,
+        })
+    }
+
     /// Loads the configuration. An explicitly chosen file must exist. The default file is
     /// optional, so that an agent can be configured through the environment alone.
     pub fn load(
@@ -553,6 +580,27 @@ impl Config {
             })
             .transpose()?;
 
+        let mut restore_limits = ExtractionLimits::default();
+        if let Some(files) = file.storage.restore_max_files {
+            if files == 0 {
+                return Err(ConfigError::Invalid {
+                    field: "storage.restore_max_files",
+                    message: "must be above zero".to_owned(),
+                });
+            }
+            restore_limits.max_entries = files;
+        }
+        if let Some(bytes) = file.storage.restore_max_expanded_bytes {
+            if bytes == 0 {
+                return Err(ConfigError::Invalid {
+                    field: "storage.restore_max_expanded_bytes",
+                    message: "must be above zero".to_owned(),
+                });
+            }
+            restore_limits.max_total_bytes = bytes;
+            restore_limits.max_file_bytes = bytes;
+        }
+
         Ok(Self {
             api_url: parse_api_url(&api_url)?,
             agent_name,
@@ -565,6 +613,14 @@ impl Config {
             staging_dir: env("EMUCAT_AGENT_STAGING_DIR")
                 .map(PathBuf::from)
                 .or(file.storage.staging_dir),
+            cache_dir: env("EMUCAT_AGENT_CACHE_DIR")
+                .map(PathBuf::from)
+                .or(file.storage.cache_dir),
+            cache_max_bytes: file
+                .storage
+                .cache_max_bytes
+                .unwrap_or(RestoreSettings::DEFAULT_CACHE_MAX_BYTES),
+            restore_limits,
             repositories: resolve_repositories(file.repositories)?,
             log_level,
             log_format,
@@ -702,6 +758,23 @@ pub fn validate(config: &Config) -> Vec<ValidationIssue> {
                 error(format!(
                     "staging directory must not be inside the {emulator} base path: {}",
                     staging.display()
+                ));
+            }
+        }
+    }
+
+    if let Some(cache) = &config.cache_dir {
+        if !cache.is_absolute() {
+            error(format!(
+                "cache directory must be absolute: {}",
+                cache.display()
+            ));
+        }
+        for (emulator, paths) in &config.emulators {
+            if is_within(cache, &paths.base_path) {
+                error(format!(
+                    "cache directory must not be inside the {emulator} base path: {}",
+                    cache.display()
                 ));
             }
         }

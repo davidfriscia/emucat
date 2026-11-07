@@ -291,7 +291,7 @@ describe('VM detail', () => {
     ],
   };
 
-  it('shows the main image, the description and the rest of the gallery', async () => {
+  it('shows the main image, the description and every screenshot in the gallery', async () => {
     mockApi({ 'GET /catalog/vms/qemu/Win98': detail });
     renderAt('/vms/qemu/Win98');
     expect(await screen.findByRole('heading', { name: 'Windows 98 SE' })).toBeTruthy();
@@ -299,12 +299,13 @@ describe('VM detail', () => {
       `/api/v1/catalog/media/${MEDIA_ID}/full`,
     );
     expect(screen.getByText(/Line one/)).toBeTruthy();
-    const gallery = screen.getByRole('heading', { name: 'More images' })
+    const gallery = screen.getByRole('heading', { name: 'Screenshots' })
       .parentElement as HTMLElement;
-    const sources = within(gallery)
-      .getAllByRole('img')
-      .map((image) => image.getAttribute('src'));
-    expect(sources).toEqual([`/api/v1/catalog/media/${OTHER_MEDIA_ID}/thumbnail`]);
+    const sources = [...gallery.querySelectorAll('img')].map((image) => image.getAttribute('src'));
+    expect(sources).toEqual([
+      `/api/v1/catalog/media/${MEDIA_ID}/thumbnail`,
+      `/api/v1/catalog/media/${OTHER_MEDIA_ID}/thumbnail`,
+    ]);
   });
 
   it('shows the placeholder without promoting a gallery image', async () => {

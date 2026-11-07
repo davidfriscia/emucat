@@ -490,6 +490,13 @@ async fn run_session<F: Future<Output = ()>>(
                         ) {
                             operations.refuse_invalid(operation_id);
                         }
+                        if let (true, Some(operation_id), Some(operations)) = (
+                            message_type == "server.restore_request",
+                            operation_id,
+                            &settings.operations,
+                        ) {
+                            operations.refuse_invalid_restore(operation_id);
+                        }
                         if let (true, Some(operation_id)) =
                             (message_type == "server.discovery_request", operation_id)
                         {
@@ -574,7 +581,10 @@ async fn run_session<F: Future<Output = ()>>(
                         | Message::ServerRegistrationCancel(_)
                         | Message::ServerRegistrationAck(_)
                         | Message::ServerRepositoryHealthRequest(_)
-                        | Message::ServerRegistrationRetryCleanup(_)) => {
+                        | Message::ServerRegistrationRetryCleanup(_)
+                        | Message::ServerRestoreRequest(_)
+                        | Message::ServerRestoreCancel(_)
+                        | Message::ServerRestoreAck(_)) => {
                             match &settings.operations {
                                 Some(operations) if welcomed => operations.handle(message),
                                 _ => tracing::warn!("Ignored a repository command"),

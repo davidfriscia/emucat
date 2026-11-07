@@ -44,6 +44,7 @@ use crate::repository::{
     ArchiveRepository, CancelFlag, ProgressFn, RepositoryError, RepositoryErrorKind, RepositoryKey,
     RepositoryResult,
 };
+use crate::restore::{RestoreConfig, RestoreManager, RestoreSettings};
 use crate::state::record_local_source;
 
 const OUTBOUND_CAPACITY: usize = 64;
@@ -61,8 +62,10 @@ const MEDIA_BLOCKED_CODE: &str = "transfer_blocked_media";
 pub trait RepositoryProvider: Send + Sync {
     fn open(&self, repository_id: Uuid) -> RepositoryResult<Arc<dyn ArchiveRepository>>;
     fn summary(&self, repository_id: Uuid) -> Option<RepositoryConfigSummary>;
-    /// How many times an upload is tried before giving up.
+    /// How many times a transfer is tried before giving up.
     fn upload_attempts(&self, repository_id: Uuid) -> u32;
+    /// The repositories this agent has local settings for. No secrets, only UUIDs.
+    fn repository_ids(&self) -> Vec<Uuid>;
 }
 
 pub struct OperationsConfig {
@@ -76,6 +79,8 @@ pub struct OperationsConfig {
     /// Screenshot synchronization. Without it a transfer of a VM with screenshots is refused up front,
     /// since nothing could ever prove that they are preserved.
     pub media: Option<Arc<dyn MediaPreservation>>,
+    /// Where restores keep things, and what they accept.
+    pub restore: RestoreSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,8 +136,8 @@ struct Inner {
     config: OperationsConfig,
     outbound: mpsc::Sender<Message>,
     journals: Mutex<HashMap<Uuid, Journal>>,
-    /// Work in progress, and how to stop it.
-    running: Mutex<HashMap<Uuid, CancelFlag>>,
+    /// Work in progress, restores included, and how to stop it.
+    running: Arc<Mutex<HashMap<Uuid, CancelFlag>>>,
     /// Set when the process is stopping. Work then ends without recording a failure: as far as the
     /// journal is concerned it was interrupted, and the next start handles that.
     stopping: CancelFlag,
@@ -140,6 +145,7 @@ struct Inner {
 
 pub struct AgentOperations {
     inner: Arc<Inner>,
+    restores: Arc<RestoreManager>,
     /// One session reads this at a time.
     outbound: tokio::sync::Mutex<mpsc::Receiver<Message>>,
 }
@@ -177,16 +183,34 @@ impl AgentOperations {
             journals.insert(journal.request.operation_id, journal);
         }
 
+        let running: Arc<Mutex<HashMap<Uuid, CancelFlag>>> = Arc::default();
+        let stopping = CancelFlag::new();
+        let restores = RestoreManager::load(
+            RestoreConfig {
+                agent_id: config.agent_id,
+                state_dir: config.state_dir.clone(),
+                staging_dir: config.staging_dir.clone(),
+                emulators: Arc::clone(&config.emulators),
+                repositories: Arc::clone(&config.repositories),
+                retry_delay: config.retry_delay,
+                media: config.media.clone(),
+                settings: config.restore.clone(),
+            },
+            outbound.clone(),
+            Arc::clone(&running),
+            stopping.clone(),
+        )?;
         let inner = Arc::new(Inner {
             config,
             outbound,
             journals: Mutex::new(journals),
-            running: Mutex::new(HashMap::new()),
-            stopping: CancelFlag::new(),
+            running,
+            stopping,
         });
         inner.recover_interrupted();
         Ok(Arc::new(Self {
             inner,
+            restores,
             outbound: tokio::sync::Mutex::new(receiver),
         }))
     }
@@ -207,6 +231,7 @@ impl AgentOperations {
         let mut messages = vec![Message::AgentRegistrationSync(RegistrationSync {
             operations,
         })];
+        messages.push(self.restores.sync_message());
         messages.extend(self.pending_reports());
         messages
     }
@@ -214,6 +239,12 @@ impl AgentOperations {
     /// Reports that have no answer yet. Sent again on each heartbeat, so a lost message or a failed
     /// database commit on the server is recovered without any further coordination.
     pub fn pending_reports(&self) -> Vec<Message> {
+        let mut reports = self.pending_registration_reports();
+        reports.extend(self.restores.pending_reports());
+        reports
+    }
+
+    fn pending_registration_reports(&self) -> Vec<Message> {
         let journals = self.inner.journals.lock().expect("poisoned");
         let running = self.inner.running.lock().expect("poisoned");
         journals
@@ -250,6 +281,9 @@ impl AgentOperations {
             Message::ServerRegistrationAck(ack) => self.inner.acknowledged(ack),
             Message::ServerRepositoryHealthRequest(request) => self.inner.health_check(request),
             Message::ServerRegistrationRetryCleanup(retry) => self.inner.retry_cleanup(&retry),
+            message @ (Message::ServerRestoreRequest(_)
+            | Message::ServerRestoreCancel(_)
+            | Message::ServerRestoreAck(_)) => self.restores.handle(message),
             _ => {}
         }
     }
@@ -264,12 +298,21 @@ impl AgentOperations {
             }));
     }
 
+    pub fn refuse_invalid_restore(&self, operation_id: Uuid) {
+        self.restores.refuse_invalid(operation_id);
+    }
+
     /// Stops running work. Blocking work notices within one read.
     pub fn shutdown(&self) {
         self.inner.stopping.cancel();
         for flag in self.inner.running.lock().expect("poisoned").values() {
             flag.cancel();
         }
+    }
+
+    /// The restores this agent has not closed yet, for tests and diagnostics.
+    pub fn open_restores(&self) -> Vec<Uuid> {
+        self.restores.open_operations()
     }
 
     /// Whether this agent has anything unresolved, for tests and diagnostics.

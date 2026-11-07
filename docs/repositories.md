@@ -137,6 +137,8 @@ repo/
 The directory is the lowercase VM name. The file name is the version's UUID, so nothing ever collides. Nothing overwrites or
 modifies an archive once it is there. Never edit them by hand: the database holds their hashes.
 
+Restoring only reads these. The agent downloads over the same connection, with the same host-key checks and the same key, and needs no more access than registration does. A damaged object is noticed by its hash, and fails the restore without changing anything on the agent.
+
 ## LAN use and security
 
 SSH protects the transfer itself, so a LAN is fine. The EmuCat connection is separate, and its rules are in the

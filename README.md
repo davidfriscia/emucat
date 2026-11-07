@@ -3,13 +3,15 @@
 Self-hosted web catalog and local launcher for [86Box](https://86box.net/) and
 [QEMU](https://www.qemu.org/) virtual machines.
 
-**Status: Milestone 4 (screenshot and media pipeline).** There is a first-administrator
+**Status: Milestone 5 (restore, local cache and VM details).** There is a first-administrator
 setup, local sign-in with persistent sessions, a public catalog, and an administration area. A native agent pairs with
 the server, stays connected over an authenticated WebSocket, and reports the VMs it finds. An administrator can register
 one, with **Copy** or **Transfer**: the agent builds a standalone ZIP with a manifest, uploads it directly to an SSH/SFTP
 repository, verifies its SHA-256 there, and publishes it immutably, after which the server records one private master.
-Screenshots synchronize by themselves from registered VMs to the server, and stay private until published: see [the media guide](docs/media.md). Launching, snapshots and restoring are **not** implemented yet. See
-[known limitations](#known-limitations).
+Screenshots synchronize by themselves from registered VMs to the server, and stay private until published: see [the media guide](docs/media.md).
+An administrator can **restore** a master onto an agent: it downloads the ZIP directly from the repository, verifies its SHA-256 and manifest, extracts it safely, and
+publishes the VM under the emulator's base path, never over an existing directory, keeping verified ZIPs in a local cache. Selecting a VM in the catalog opens its page, with a screenshot gallery that
+shows each viewer what they may see. Launching and snapshots are **not** implemented yet. See [known limitations](#known-limitations).
 
 | Part                                       | Technology                                       |
 | ------------------------------------------ | ------------------------------------------------ |
@@ -148,17 +150,20 @@ Copy [`agent/agent.example.toml`](agent/agent.example.toml), fill in your paths,
 ```
 
 `discover` scans the configured directories and prints the report, with no server involved. `repository-check` tests a
-configured repository the same way. The agent only connects out and has no listener. It launches no emulator, and it changes a
-VM directory in one case only: a transfer an administrator confirmed, after a verified master is committed. Its credential
-is protected with DPAPI. The [agent guide](docs/agent.md) covers configuration, pairing, credential recovery, discovery,
-registration and troubleshooting, and the [repository guide](docs/repositories.md) covers setting up SSH.
+configured repository the same way, and `cache-status` prints what the archive cache holds. The agent only connects out and has no listener. It launches no emulator. It removes a
+VM directory in one case only: a transfer an administrator confirmed, after a verified master is committed. It creates one in one case only: a restore an administrator asked for, never over an existing
+directory. Its credential is protected with DPAPI. The [agent guide](docs/agent.md) covers configuration, pairing, credential recovery, discovery,
+registration, restoring and troubleshooting, and the [repository guide](docs/repositories.md) covers setting up SSH.
 
 After upgrading from an earlier milestone, run `pnpm db:migrate`.
 
 ## Known limitations
 
-- **Registered VMs cannot be used yet.** A master is stored and cataloged, but downloading, restoring, launching and
-  snapshots arrive in later milestones. There is no way to delete a registered VM or remove an archive through the app.
+- **Restored VMs cannot be launched from here yet.** Launching and snapshots arrive in later milestones, and a restored VM is started by hand. There is no way to delete a registered VM, a local copy or
+  an archive through the app.
+- **Remote HTTPS uploads are not integration-tested.** Remote agents must use HTTPS, and the agent enforces that, but screenshot uploads have only been exercised end to end over loopback HTTP. This test is deferred by decision.
+- **Restoring only restores masters,** and an interrupted download starts over rather than resuming. See [decision 0021](docs/decisions/0021-restore-lifecycle.md).
+- **"Modified" is only as good as names and sizes.** A local change that keeps every size goes unnoticed, so the interface says "not verified" rather than "unchanged". See [decision 0021](docs/decisions/0021-restore-lifecycle.md#local-state).
 - **A transfer of a VM with screenshots can end as a partial success.** Screenshots are not in archives, so the VM is only removed once the
   server holds every one of them. If that cannot be proved, the master and the local VM both stay, and the removal can be retried.
 - **Archiving is not a filesystem snapshot.** Changes during archiving are detected and fail the operation, and Windows also
@@ -166,7 +171,7 @@ After upgrading from an earlier milestone, run `pnpm db:migrate`.
   [decision 0014](docs/decisions/0014-archive-and-manifest.md).
 - **The repository needs hard links,** through `hardlink@openssh.com`, for publication that cannot overwrite. A server
   without them fails closed. See [decision 0013](docs/decisions/0013-ssh-provider.md).
-- **One active SSH repository,** and one registration per agent at a time. No HTTPS provider, replication or migration yet.
+- **One active SSH repository,** and one registration or restore per agent at a time. No HTTPS provider, replication or migration yet.
 - **An address change must be made twice,** in the web app and in each agent's configuration. A mismatch is reported.
 - **A failed publication can leave an unreferenced archive** in rare crash windows, such as a database reset mid-operation. It
   is harmless but is not cleaned up automatically.

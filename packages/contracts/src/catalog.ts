@@ -146,6 +146,19 @@ export const publicVmDetailSchema = z.strictObject({
 });
 export type PublicVmDetail = z.infer<typeof publicVmDetailSchema>;
 
+/**
+ * What the public catalog shows as this VM's cover, and why. A public VM does not make its media public,
+ * so `main_private` is a state an administrator has to be told about, and that only they can change.
+ */
+export const PUBLIC_COVER_STATUSES = [
+  'shown',
+  'vm_private',
+  'no_main_image',
+  'main_private',
+] as const;
+export const publicCoverStatusSchema = z.enum(PUBLIC_COVER_STATUSES);
+export type PublicCoverStatus = z.infer<typeof publicCoverStatusSchema>;
+
 export const adminVmCardSchema = z.strictObject({
   emulatorType: emulatorTypeSchema,
   vmName: z.string(),
@@ -154,6 +167,7 @@ export const adminVmCardSchema = z.strictObject({
   visibility: vmVisibilitySchema,
   /** The selected main image, whether or not the public can see it. */
   mainMediaId: z.uuid().nullable(),
+  publicCover: publicCoverStatusSchema,
   mediaCount: z.number().int().nonnegative(),
   updatedAt: timestampSchema,
 });
@@ -172,6 +186,7 @@ export const adminVmDetailSchema = z.strictObject({
   description: z.string().nullable(),
   visibility: vmVisibilitySchema,
   mainMediaId: z.uuid().nullable(),
+  publicCover: publicCoverStatusSchema,
   mediaCount: z.number().int().nonnegative(),
   versionCount: z.number().int().nonnegative(),
   createdAt: timestampSchema,

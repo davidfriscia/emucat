@@ -139,6 +139,27 @@ Precedence for the agent is command line, then environment, then file. Unknown s
 are errors, so a typo cannot silently disable something. The API refuses to start without a database
 password. There are no default credentials anywhere.
 
+## Restoring
+
+A master comes back the way it went out: directly between the agent and the repository, through `ArchiveRepository`, with the API coordinating and never touching a byte.
+
+```
+Browser ─► API ─► MariaDB          who may restore what, operation state, what the agent verified
+            ▲
+            │ WebSocket            immutable identities, progress, results
+            ▼
+          Agent ◄──────────────── SSH repository    the ZIP, directly
+            │
+            ├─► staging, then archive cache         the download, outside every VM
+            └─► base path/.emucat-restoring-{id}    verified as it is extracted
+                     │ one rename, never replacing
+                     ▼
+                base path/{vm_name}
+```
+
+Screenshots are not in archives, and are not restored: they stay on the server, and keep arriving through the API from a VM once it is held locally.
+See decisions [0021](decisions/0021-restore-lifecycle.md) to [0024](decisions/0024-local-archive-cache.md).
+
 ## Reliability behavior
 
 - `GET /api/v1/health` means the process is running. It does not touch the database.
@@ -166,5 +187,5 @@ pnpm build
 .\agent\target\release\emucat-agent.exe --version
 .\agent\target\release\emucat-agent.exe --help
 pnpm test:sftp                 # the SFTP provider against a real OpenSSH server, needs Docker
-pnpm test:e2e                  # the real agent, API and SFTP server, on Windows
+pnpm test:e2e                  # the real agent, API, SFTP server and a real browser, on Windows
 ```

@@ -3,6 +3,12 @@
  * Nothing here believes a file name, a MIME type or a size somebody else stated. Each decoder checks the
  * dimensions in the header against the limits before it allocates anything, which is what makes a small
  * file claiming to be enormous harmless.
+ *
+ * The decoders are written as generators that yield every so often, so the same code can run two ways.
+ * `decodePpm` and `decodeBmp` finish in one go, for callers that have already bounded the work.
+ * `decodeWithDeadline` gives the event loop a turn at each yield and stops at a deadline, which is what
+ * an upload uses: a request can then neither hold up other requests nor outlast its time limit. See
+ * decision 0025.
  */
 
 export type ImageFormat = 'png' | 'jpeg' | 'bmp' | 'ppm';
@@ -42,7 +48,7 @@ export interface ImageLimits {
   maxDimension: number;
 }
 
-export type DecodeFailure = 'invalid' | 'unsupported' | 'too_large';
+export type DecodeFailure = 'invalid' | 'unsupported' | 'too_large' | 'timeout';
 
 export class ImageDecodeError extends Error {
   override readonly name = 'ImageDecodeError';
@@ -83,6 +89,37 @@ export interface RawImage {
   channels: 3 | 4;
 }
 
+/** How many samples are decoded between two yields. Small enough to keep a server responsive. */
+const SAMPLES_PER_SLICE = 1 << 18;
+
+/** Runs a decoder to the end, without stopping. */
+function finish<T>(decoder: Generator<void, T>): T {
+  for (;;) {
+    const step = decoder.next();
+    if (step.done) return step.value;
+  }
+}
+
+/**
+ * Runs a decoder, giving other work a turn at each yield, and gives up at the deadline. Synchronous code
+ * cannot be interrupted, but this code is only ever synchronous for one slice at a time.
+ */
+export async function decodeWithDeadline<T>(
+  decoder: Generator<void, T>,
+  deadlineMs: number,
+): Promise<T> {
+  for (;;) {
+    if (Date.now() >= deadlineMs) {
+      throw new ImageDecodeError('timeout', 'Decoding the image took too long');
+    }
+    const step = decoder.next();
+    if (step.done) return step.value;
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+  }
+}
+
 function isPpmSpace(byte: number): boolean {
   return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x0b;
 }
@@ -118,7 +155,7 @@ function readPpmNumber(data: Buffer, start: number): { value: number; next: numb
 }
 
 /** Binary (`P6`, which is what QEMU's `screendump` writes) and text (`P3`), up to 16 bits a channel. */
-export function decodePpm(data: Buffer, limits: ImageLimits): RawImage {
+export function* decodePpmSteps(data: Buffer, limits: ImageLimits): Generator<void, RawImage> {
   const binary = data[1] === 0x36;
   const widthField = readPpmNumber(data, 2);
   const heightField = readPpmNumber(data, widthField.next);
@@ -130,7 +167,6 @@ export function decodePpm(data: Buffer, limits: ImageLimits): RawImage {
   checkDimensions(width, height, limits);
 
   const samples = width * height * 3;
-  const output = Buffer.allocUnsafe(samples);
   const scale = maxValue === 255 ? null : 255 / maxValue;
 
   if (binary) {
@@ -141,27 +177,41 @@ export function decodePpm(data: Buffer, limits: ImageLimits): RawImage {
     }
     const start = maxField.next + 1;
     const wide = maxValue > 255;
+    // Before allocating: a small file must not be able to claim its way to a large buffer.
     if (data.length - start < samples * (wide ? 2 : 1)) {
       throw invalid('The PPM file is shorter than its header says');
     }
+    const output = Buffer.allocUnsafe(samples);
     if (!wide && scale === null) {
       data.copy(output, 0, start, start + samples);
     } else {
       for (let index = 0; index < samples; index += 1) {
         const value = wide ? data.readUInt16BE(start + index * 2) : (data[start + index] as number);
         output[index] = Math.min(255, Math.round(value * (scale as number)));
+        if (index % SAMPLES_PER_SLICE === SAMPLES_PER_SLICE - 1) yield;
       }
     }
-  } else {
-    let position = maxField.next;
-    for (let index = 0; index < samples; index += 1) {
-      const sample = readPpmNumber(data, position);
-      if (sample.value > maxValue) throw invalid('A PPM sample is above the maximum value');
-      output[index] = scale === null ? sample.value : Math.round(sample.value * scale);
-      position = sample.next;
-    }
+    return { data: output, width, height, channels: 3 };
+  }
+
+  // A text sample takes at least one digit, and all but the last need a separator.
+  if (data.length - maxField.next < samples * 2 - 1) {
+    throw invalid('The PPM file is shorter than its header says');
+  }
+  const output = Buffer.allocUnsafe(samples);
+  let position = maxField.next;
+  for (let index = 0; index < samples; index += 1) {
+    const sample = readPpmNumber(data, position);
+    if (sample.value > maxValue) throw invalid('A PPM sample is above the maximum value');
+    output[index] = scale === null ? sample.value : Math.round(sample.value * scale);
+    position = sample.next;
+    if (index % SAMPLES_PER_SLICE === SAMPLES_PER_SLICE - 1) yield;
   }
   return { data: output, width, height, channels: 3 };
+}
+
+export function decodePpm(data: Buffer, limits: ImageLimits): RawImage {
+  return finish(decodePpmSteps(data, limits));
 }
 
 const BI_RGB = 0;
@@ -173,7 +223,7 @@ const LE_MASKS = { red: 0x00ff0000, green: 0x0000ff00, blue: 0x000000ff };
  * Uncompressed Windows bitmaps: 8-bit palette, 24-bit and 32-bit, which is what 86Box and the tools
  * around it write. Compressed and exotic variants are refused rather than guessed at.
  */
-export function decodeBmp(data: Buffer, limits: ImageLimits): RawImage {
+export function* decodeBmpSteps(data: Buffer, limits: ImageLimits): Generator<void, RawImage> {
   if (data.length < 26) throw invalid('The BMP header is truncated');
   const pixelOffset = data.readUInt32LE(10);
   const headerSize = data.readUInt32LE(14);
@@ -245,6 +295,11 @@ export function decodeBmp(data: Buffer, limits: ImageLimits): RawImage {
       }
       target += channels;
     }
+    if (row % 64 === 63) yield;
   }
   return { data: output, width, height, channels };
+}
+
+export function decodeBmp(data: Buffer, limits: ImageLimits): RawImage {
+  return finish(decodeBmpSteps(data, limits));
 }

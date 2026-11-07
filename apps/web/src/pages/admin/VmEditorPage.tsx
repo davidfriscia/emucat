@@ -4,14 +4,24 @@ import {
   VM_DISPLAY_NAME_MAX_LENGTH,
   vmPathParamsSchema,
   vmTitle,
+  type AdminMediaListResponse,
   type AdminVmDetail,
   type VmIdentity,
 } from '@emucat/contracts';
 import { useCallback, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router';
-import { ApiRequestError, fetchAdminVm, updateVmMetadata, updateVmVisibility } from '../../api';
+import {
+  ApiRequestError,
+  fetchAdminVm,
+  fetchVmMedia,
+  updateMediaVisibility,
+  updateVmMetadata,
+  updateVmVisibility,
+} from '../../api';
 import { EmulatorBadge, VisibilityBadge } from '../../components/Catalog';
+import { VmRestoreSection } from '../../components/Restore';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
+import { VmMediaGrid } from '../../components/VmMediaGrid';
 import { useAsync } from '../../useAsync';
 import { NotFoundPage } from '../NotFoundPage';
 
@@ -134,6 +144,66 @@ function VisibilityControl({
   );
 }
 
+/**
+ * Why the public catalog does or does not show a cover, with the one action that changes it when that is
+ * the administrator's to take. Publishing is never done for them: a public VM does not make its media public.
+ */
+export function PublicCoverNotice({
+  vm,
+  onPublished,
+}: {
+  vm: AdminVmDetail;
+  onPublished: (media: AdminMediaListResponse) => void;
+}) {
+  const [error, setError] = useState<unknown>(null);
+  const [submitting, setSubmitting] = useState(false);
+  if (vm.visibility !== 'public') {
+    return vm.mainMediaId ? null : (
+      <p className="small text-body-secondary mt-2 mb-0">No main screenshot is selected yet.</p>
+    );
+  }
+  if (vm.publicCover === 'shown') {
+    return <p className="small mt-2 mb-0">The main screenshot is the public catalog’s cover.</p>;
+  }
+  if (vm.publicCover === 'no_main_image') {
+    return (
+      <div className="alert alert-warning small mt-2 mb-0" role="status">
+        <strong>No public cover.</strong> This VM is public, but no main screenshot is selected, so
+        the public catalog shows a placeholder. Choose one below.
+      </div>
+    );
+  }
+  const publish = async () => {
+    if (!vm.mainMediaId) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      onPublished(await updateMediaVisibility(vm, vm.mainMediaId, 'published'));
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <div className="alert alert-warning small mt-2 mb-0" role="status">
+      <strong>No public cover.</strong> This VM is public, but its main screenshot is private, so
+      the public catalog shows a placeholder. A public VM does not publish its screenshots.
+      <FormError error={error} />
+      <div className="mt-2">
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          disabled={submitting}
+          onClick={() => void publish()}
+        >
+          {submitting ? 'Publishing…' : 'Publish the main screenshot'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function VmEditor({ identity }: { identity: VmIdentity }) {
   const { emulatorType, vmName } = identity;
   const load = useCallback(
@@ -141,6 +211,17 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
     [emulatorType, vmName],
   );
   const { state, reload, setData } = useAsync(load);
+  const loadMedia = useCallback(
+    (signal: AbortSignal) => fetchVmMedia({ emulatorType, vmName }, signal),
+    [emulatorType, vmName],
+  );
+  const media = useAsync(loadMedia);
+
+  // A change to a screenshot can change the VM's cover, and the server is what says how.
+  const mediaChanged = (next: AdminMediaListResponse) => {
+    media.setData(next);
+    void fetchAdminVm({ emulatorType, vmName }).then(setData, () => undefined);
+  };
 
   if (state.status === 'loading') return <LoadingState label="Loading the virtual machine" />;
   if (state.status === 'error') {
@@ -185,6 +266,7 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
             <div className="card-body">
               <h2 className="h6 card-title">Visibility</h2>
               <VisibilityControl vm={vm} onChanged={setData} />
+              <PublicCoverNotice vm={vm} onPublished={mediaChanged} />
               {vm.visibility === 'public' ? (
                 <p className="small mt-2 mb-0">
                   <Link to={publicVmRoute(vm)}>View the public page</Link>
@@ -204,6 +286,7 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
               </Link>
             </div>
           </section>
+          <VmRestoreSection vm={identity} />
           <section className="card">
             <div className="card-body">
               <h2 className="h6 card-title">Identity</h2>
@@ -227,6 +310,28 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
           </section>
         </div>
       </div>
+      <section className="mt-4" aria-labelledby="vm-screenshots-heading">
+        <h2 id="vm-screenshots-heading" className="h5">
+          Screenshots
+        </h2>
+        {media.state.status === 'loading' ? <LoadingState label="Loading screenshots" /> : null}
+        {media.state.status === 'error' ? (
+          <p className="small text-body-secondary">
+            The screenshots could not be loaded.{' '}
+            <button type="button" className="btn btn-sm btn-link p-0" onClick={media.reload}>
+              Try again
+            </button>
+          </p>
+        ) : null}
+        {media.state.status === 'success' && media.state.data.media.length === 0 ? (
+          <p className="small text-body-secondary">
+            No screenshots yet. They appear here shortly after the agent finds them.
+          </p>
+        ) : null}
+        {media.state.status === 'success' && media.state.data.media.length > 0 ? (
+          <VmMediaGrid vm={vm} media={media.state.data.media} onChange={mediaChanged} showMain />
+        ) : null}
+      </section>
     </>
   );
 }

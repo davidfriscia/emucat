@@ -32,6 +32,9 @@ pub enum EntryState {
     Pending,
     Uploading,
     RetryWait,
+    /// The server refused for a reason sending it again cannot fix. It waits for something to change: a
+    /// new connection, or the server listing this VM for this agent. The file is not touched.
+    Blocked,
     Completed,
     Failed,
 }
@@ -374,6 +377,39 @@ impl MediaQueue {
         }
     }
 
+    /// Refused for a reason that has nothing to do with these bytes. Waits, without a timer.
+    pub fn mark_blocked(
+        &mut self,
+        emulator: EmulatorType,
+        vm_name: &VmName,
+        source_path: &str,
+        error: EntryError,
+    ) {
+        if let Some(entry) = self
+            .entries
+            .get_mut(&entry_key(emulator, vm_name, source_path))
+        {
+            entry.attempts = entry.attempts.saturating_add(1);
+            entry.state = EntryState::Blocked;
+            entry.next_attempt_ms = 0;
+            entry.last_error = Some(error);
+            self.dirty = true;
+        }
+    }
+
+    /// Something changed, so what was blocked gets one more try. `scope` limits it to one VM.
+    pub fn unblock(&mut self, scope: Option<&BTreeSet<String>>) {
+        for entry in self.entries.values_mut() {
+            let in_scope = scope
+                .is_none_or(|keys| keys.contains(&vm_key(entry.emulator_type, &entry.vm_name)));
+            if entry.state == EntryState::Blocked && in_scope {
+                entry.state = EntryState::Pending;
+                entry.next_attempt_ms = 0;
+                self.dirty = true;
+            }
+        }
+    }
+
     /// The connection is back, so whatever was waiting for it can go now.
     pub fn retry_now(&mut self) {
         for entry in self.entries.values_mut() {
@@ -415,7 +451,10 @@ impl MediaQueue {
             .iter()
             .filter(|(key, _)| key.starts_with(&prefix))
             .map(|(_, entry)| entry)
-            .find(|entry| entry.state == EntryState::Failed && entry.sha256 == sha256)
+            .find(|entry| {
+                matches!(entry.state, EntryState::Failed | EntryState::Blocked)
+                    && entry.sha256 == sha256
+            })
             .and_then(|entry| entry.last_error.as_ref())
     }
 
@@ -457,12 +496,13 @@ impl MediaQueue {
                 EntryState::Pending | EntryState::RetryWait => status.pending += 1,
                 EntryState::Uploading => status.uploading += 1,
                 EntryState::Completed => status.synchronized += 1,
-                EntryState::Failed => status.failed += 1,
+                EntryState::Failed | EntryState::Blocked => status.failed += 1,
             }
             if let Some(error) = &entry.last_error
                 && entry.state != EntryState::Completed
                 // A refusal says more than a passing network problem, so it is the one that stays.
-                && (status.last_error.is_none() || entry.state == EntryState::Failed)
+                && (status.last_error.is_none()
+                    || matches!(entry.state, EntryState::Failed | EntryState::Blocked))
             {
                 status.last_error = Some(MediaSyncError {
                     code: error.code.chars().take(64).collect(),

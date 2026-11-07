@@ -55,22 +55,47 @@ fn now_ms() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
+/// What has to change before a blocked request is worth repeating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    /// The credential was refused. Nothing can succeed until the connection proves it works again.
+    Credential,
+    /// This VM is unknown to the server, or is not this agent's. It may become so later.
+    Vm,
+}
+
 /// What became of a request to the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiFailure {
-    /// Trying again later may work: the network, the server, or a credential problem it may recover from.
+    /// Trying again later may work: the network, or a server that is busy or restarting.
     Transient { code: String, message: String },
     /// These bytes were refused for what they are. Sending them again cannot help.
     Permanent { code: String, message: String },
+    /// Authorization or the VM's registration is the problem. Repeating the request on a timer would do
+    /// nothing but load the server, so it waits for a real change. Nothing is discarded.
+    Blocked {
+        code: String,
+        message: String,
+        reason: BlockReason,
+    },
 }
 
 impl ApiFailure {
     pub fn entry_error(&self) -> EntryError {
         match self {
-            Self::Transient { code, message } | Self::Permanent { code, message } => EntryError {
+            Self::Transient { code, message }
+            | Self::Permanent { code, message }
+            | Self::Blocked { code, message, .. } => EntryError {
                 code: code.clone(),
                 message: message.clone(),
             },
+        }
+    }
+
+    pub fn block_reason(&self) -> Option<BlockReason> {
+        match self {
+            Self::Blocked { reason, .. } => Some(*reason),
+            _ => None,
         }
     }
 
@@ -79,9 +104,14 @@ impl ApiFailure {
     }
 }
 
-/// Which answers mean that the bytes themselves are the problem. Everything else is treated as passing,
-/// including 401 and 403: a credential problem is not the screenshot's fault, and connectivity is what
-/// stops an agent whose credential was really revoked.
+/// What an answer means for trying again. See decision 0026.
+///
+/// - 400, 413, 415 and 422: the bytes themselves were refused, permanently, unless the file changes.
+/// - 401: the credential was refused. A revoked agent stops on its connection, and a recoverable problem
+///   recovers there too, so uploads wait for the connection to prove itself again.
+/// - 403 and a 404 from the API: the association is the problem, and only the server listing the VM again
+///   makes another attempt worth anything. A 404 with no API error code is a proxy, not an answer.
+/// - Everything else, such as 408, 429 and 5xx: passing, with backoff.
 pub fn classify_response(status: u16, code: &str, message: &str) -> ApiFailure {
     let failure = |permanent: bool| {
         let code = code.to_owned();
@@ -92,10 +122,18 @@ pub fn classify_response(status: u16, code: &str, message: &str) -> ApiFailure {
             ApiFailure::Transient { code, message }
         }
     };
+    let blocked = |reason: BlockReason| ApiFailure::Blocked {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        reason,
+    };
     match (status, code) {
         // Bytes changed on the way or on the disk. The next scan notices if it was the disk.
         (_, "hash_mismatch") => failure(false),
         (400 | 413 | 415 | 422, _) => failure(true),
+        (401, _) => blocked(BlockReason::Credential),
+        (403, _) => blocked(BlockReason::Vm),
+        (404, "vm_not_registered" | "vm_not_found") => blocked(BlockReason::Vm),
         _ => failure(false),
     }
 }
@@ -402,6 +440,8 @@ struct State {
     /// Entries the server has been asked about since they were queued or since the last reconnection.
     asked: BTreeSet<(String, String)>,
     held: BTreeSet<String>,
+    /// The server refused this agent's credential. Nothing is sent until a connection proves it works.
+    credential_refused: bool,
     in_flight: usize,
     max_upload_bytes: u64,
     full_requested: bool,
@@ -492,6 +532,7 @@ impl MediaSync {
                 candidates: HashMap::new(),
                 asked: BTreeSet::new(),
                 held: BTreeSet::new(),
+                credential_refused: false,
                 in_flight: 0,
                 max_upload_bytes,
                 full_requested: true,
@@ -523,6 +564,9 @@ impl MediaSync {
             state.status_sent = None;
             state.asked.clear();
             state.queue.retry_now();
+            // A working connection is the proof a refused credential was waiting for.
+            state.credential_refused = false;
+            state.queue.unblock(None);
         }
         self.wake.notify_one();
     }
@@ -736,13 +780,18 @@ impl MediaSync {
     }
 
     fn api_available(&self) -> bool {
-        self.lock()
-            .next_api_attempt
-            .is_none_or(|when| when <= Instant::now())
+        let state = self.lock();
+        !state.credential_refused
+            && state
+                .next_api_attempt
+                .is_none_or(|when| when <= Instant::now())
     }
 
     fn api_failed(&self, what: &str, failure: &ApiFailure) {
         let mut state = self.lock();
+        if failure.block_reason() == Some(BlockReason::Credential) {
+            state.credential_refused = true;
+        }
         state.api_failures = state.api_failures.saturating_add(1);
         let delay = crate::media_queue::retry_delay(
             state.api_failures,
@@ -783,6 +832,8 @@ impl MediaSync {
                     .collect();
                 let keys: BTreeSet<String> = registered.keys().cloned().collect();
                 state.queue.retain_vms(&keys);
+                // The server says these are this agent's, which is the change a refusal waited for.
+                state.queue.unblock(Some(&keys));
                 state.registered = registered;
                 state.status_version += 1;
                 let now = Instant::now();
@@ -1065,9 +1116,10 @@ impl MediaSync {
     fn dispatch(self: &Arc<Self>, done: &mpsc::Sender<UploadDone>) {
         let now = now_ms();
         let mut state = self.lock();
-        if state
-            .next_api_attempt
-            .is_some_and(|when| when > Instant::now())
+        if state.credential_refused
+            || state
+                .next_api_attempt
+                .is_some_and(|when| when > Instant::now())
         {
             return;
         }
@@ -1215,6 +1267,20 @@ impl MediaSync {
                     .queue
                     .mark_failed(emulator, &vm_name, &source_path, error);
             }
+            UploadOutcome::Failed(failure) if failure.block_reason().is_some() => {
+                let error = failure.entry_error();
+                if failure.block_reason() == Some(BlockReason::Credential) {
+                    state.credential_refused = true;
+                }
+                tracing::warn!(
+                    vm = %vm_name, source_path = %source_path, sha256 = %short_hash, attempt,
+                    classification = "blocked", code = %error.code, message = %error.message,
+                    "The server refused an upload; it waits for the connection or the VM's listing to change"
+                );
+                state
+                    .queue
+                    .mark_blocked(emulator, &vm_name, &source_path, error);
+            }
             UploadOutcome::Failed(failure) => {
                 let error = failure.entry_error();
                 let settings = &self.config.settings;
@@ -1271,7 +1337,7 @@ impl MediaSync {
                 EntryState::Pending | EntryState::RetryWait => counts.0 += 1,
                 EntryState::Uploading => counts.1 += 1,
                 EntryState::Completed => counts.2 += 1,
-                EntryState::Failed => counts.3 += 1,
+                EntryState::Failed | EntryState::Blocked => counts.3 += 1,
             }
         }
         counts

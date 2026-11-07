@@ -1,43 +1,19 @@
 import {
-  adminMediaPath,
   adminVmRoute,
   vmPathParamsSchema,
-  type AdminMedia,
-  type AdminMediaListResponse,
   type AdminMediaSyncResponse,
   type VmIdentity,
 } from '@emucat/contracts';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback } from 'react';
 import { Link, useParams } from 'react-router';
-import {
-  ApiRequestError,
-  clearMainMedia,
-  deleteMedia,
-  fetchVmMedia,
-  fetchVmMediaSync,
-  selectMainMedia,
-  updateMediaVisibility,
-} from '../../api';
-import { VmImage } from '../../components/Catalog';
-import { formatBytes } from '../../components/Agents';
-import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
+import { ApiRequestError, fetchVmMedia, fetchVmMediaSync } from '../../api';
+import { EmptyState, ErrorState, LoadingState } from '../../components/States';
+import { VmMediaGrid } from '../../components/VmMediaGrid';
 import { useAsync } from '../../useAsync';
 import { usePolledData } from '../../usePolledData';
 import { NotFoundPage } from '../NotFoundPage';
 
-function publicEffect(item: AdminMedia): string | null {
-  if (item.shownAsPublicMain) return 'Shown as the main image in the public catalog.';
-  if (!item.isMain) return null;
-  return item.visibility === 'private'
-    ? 'Selected as main, but private: the public catalog shows a placeholder until it is published.'
-    : 'Selected as main, but this VM is private: nobody outside sees it until the VM is public.';
-}
-
 const SYNC_POLL_MS = 5_000;
-
-function formatUploaded(timestamp: string): string {
-  return new Date(timestamp).toLocaleString();
-}
 
 /** What each agent holding this VM last said. It is a report, and nothing here depends on it. */
 function SyncSummary({ vm }: { vm: VmIdentity }) {
@@ -107,168 +83,6 @@ function SyncSummary({ vm }: { vm: VmIdentity }) {
   );
 }
 
-/** The whole image, over the page. Escape or the button closes it, and focus goes back where it was. */
-function MediaPreview({
-  vm,
-  item,
-  onClose,
-}: {
-  vm: VmIdentity;
-  item: AdminMedia;
-  onClose: () => void;
-}) {
-  const close = useRef<HTMLButtonElement>(null);
-  // Once only: anything else re-rendering this must not take the focus away.
-  useEffect(() => {
-    close.current?.focus();
-  }, []);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
-  return (
-    <div
-      className="media-preview-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Full-resolution view of ${item.originalFilename}`}
-    >
-      <div className="d-flex flex-wrap align-items-center gap-2">
-        <span className="small media-filename flex-grow-1">
-          {item.originalFilename}, {item.widthPx} × {item.heightPx}
-        </span>
-        <a
-          className="btn btn-sm btn-outline-light"
-          href={adminMediaPath(vm, item.id, 'original')}
-          download
-        >
-          Download original
-        </a>
-        <button ref={close} type="button" className="btn btn-sm btn-light" onClick={onClose}>
-          Close
-        </button>
-      </div>
-      <div className="media-preview-frame">
-        <img src={adminMediaPath(vm, item.id, 'full')} alt={item.originalFilename} />
-      </div>
-    </div>
-  );
-}
-
-function MediaCard({
-  vm,
-  item,
-  busy,
-  onAct,
-  onPreview,
-}: {
-  vm: VmIdentity;
-  item: AdminMedia;
-  busy: boolean;
-  onAct: (work: () => Promise<AdminMediaListResponse>) => void;
-  onPreview: (item: AdminMedia, opener: HTMLElement) => void;
-}) {
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const effect = publicEffect(item);
-  return (
-    <article className="card h-100">
-      <button
-        type="button"
-        className="media-thumbnail-button"
-        aria-label={`View ${item.originalFilename} at full resolution`}
-        onClick={(event) => onPreview(item, event.currentTarget)}
-      >
-        <VmImage src={adminMediaPath(vm, item.id, 'thumbnail')} alt="" />
-      </button>
-      <div className="card-body d-flex flex-column">
-        <h2 className="h6 card-title media-filename">{item.originalFilename}</h2>
-        <div className="d-flex flex-wrap gap-1 mb-2">
-          {item.visibility === 'published' ? (
-            <span className="badge text-bg-success">Published</span>
-          ) : (
-            <span className="badge text-bg-dark border">Private</span>
-          )}
-          {item.isMain ? <span className="badge text-bg-primary">Main image</span> : null}
-        </div>
-        <p className="small text-body-secondary mb-2">
-          {item.widthPx} × {item.heightPx}, {formatBytes(item.originalSizeBytes)}
-          <br />
-          Uploaded {formatUploaded(item.createdAt)}
-        </p>
-        {effect ? <p className="small">{effect}</p> : null}
-        <div className="d-flex flex-wrap gap-2 mt-auto">
-          {item.isMain ? (
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-primary"
-              disabled={busy}
-              onClick={() => onAct(() => clearMainMedia(vm))}
-            >
-              Clear main image
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-primary"
-              disabled={busy}
-              onClick={() => onAct(() => selectMainMedia(vm, item.id))}
-            >
-              Set as main image
-            </button>
-          )}
-          <button
-            type="button"
-            className="btn btn-sm btn-outline-primary"
-            disabled={busy}
-            onClick={() =>
-              onAct(() =>
-                updateMediaVisibility(
-                  vm,
-                  item.id,
-                  item.visibility === 'published' ? 'private' : 'published',
-                ),
-              )
-            }
-          >
-            {item.visibility === 'published' ? 'Make private' : 'Publish'}
-          </button>
-          {confirmingDelete ? (
-            <>
-              <button
-                type="button"
-                className="btn btn-sm btn-danger"
-                disabled={busy}
-                onClick={() => onAct(() => deleteMedia(vm, item.id))}
-              >
-                Confirm delete
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-secondary theme-button"
-                onClick={() => setConfirmingDelete(false)}
-              >
-                Keep
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-danger"
-              disabled={busy}
-              onClick={() => setConfirmingDelete(true)}
-            >
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
-    </article>
-  );
-}
-
 function VmMedia({ identity }: { identity: VmIdentity }) {
   const { emulatorType, vmName } = identity;
   const vm = { emulatorType, vmName };
@@ -277,14 +91,6 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
     [emulatorType, vmName],
   );
   const { state, reload, setData } = useAsync(load);
-  const [error, setError] = useState<unknown>(null);
-  const [busy, setBusy] = useState(false);
-  const [previewId, setPreviewId] = useState<string | null>(null);
-  const opener = useRef<HTMLElement | null>(null);
-  const closePreview = () => {
-    setPreviewId(null);
-    opener.current?.focus();
-  };
 
   if (state.status === 'loading') return <LoadingState label="Loading media" />;
   if (state.status === 'error') {
@@ -305,20 +111,6 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
     return <ErrorState error={state.error} onRetry={reload} />;
   }
 
-  const act = async (work: () => Promise<AdminMediaListResponse>) => {
-    setError(null);
-    setBusy(true);
-    try {
-      setData(await work());
-    } catch (failure) {
-      setError(failure);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const previewItem = state.data.media.find((item) => item.id === previewId) ?? null;
-
   return (
     <>
       <title>{`Media of ${vmName} · EmuCat`}</title>
@@ -334,30 +126,14 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
         versions.
       </p>
       <SyncSummary vm={vm} />
-      <FormError error={error} />
       {state.data.media.length === 0 ? (
         <EmptyState title="No media yet">
           Screenshots appear here shortly after the agent finds them in this VM’s directory. They
           are not in the VM’s archive, and nothing here reads or changes the VM itself.
         </EmptyState>
       ) : (
-        <div className="media-grid">
-          {state.data.media.map((item) => (
-            <MediaCard
-              key={item.id}
-              vm={vm}
-              item={item}
-              busy={busy}
-              onAct={(work) => void act(work)}
-              onPreview={(chosen, element) => {
-                opener.current = element;
-                setPreviewId(chosen.id);
-              }}
-            />
-          ))}
-        </div>
+        <VmMediaGrid vm={vm} media={state.data.media} onChange={setData} />
       )}
-      {previewItem ? <MediaPreview vm={vm} item={previewItem} onClose={closePreview} /> : null}
     </>
   );
 }

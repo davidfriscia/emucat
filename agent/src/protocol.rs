@@ -100,6 +100,20 @@ pub enum Message {
     ServerRegistrationRetryCleanup(RegistrationRetryCleanup),
     #[serde(rename = "agent.media_sync_status")]
     AgentMediaSyncStatus(MediaSyncStatus),
+    #[serde(rename = "agent.restore_sync")]
+    AgentRestoreSync(RestoreSync),
+    #[serde(rename = "agent.restore_progress")]
+    AgentRestoreProgress(RestoreProgress),
+    #[serde(rename = "agent.restore_result")]
+    AgentRestoreResult(RestoreResult),
+    #[serde(rename = "agent.restore_error")]
+    AgentRestoreError(RestoreFailure),
+    #[serde(rename = "server.restore_request")]
+    ServerRestoreRequest(RestoreRequest),
+    #[serde(rename = "server.restore_cancel")]
+    ServerRestoreCancel(RestoreCancel),
+    #[serde(rename = "server.restore_ack")]
+    ServerRestoreAck(RestoreAck),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -371,6 +385,162 @@ pub struct MediaSyncStatus {
     pub truncated: bool,
 }
 
+/// Which master, under which identities, from which repository. It holds no path and no address: the
+/// agent derives the destination from its own base paths, reaches the repository through its own
+/// configuration, and recomputes the archive key. Unknown fields are refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreRequest {
+    pub operation_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub repository_id: Uuid,
+    pub version_id: Uuid,
+    pub archive_key: String,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+    /// What the registration verified, when that is known.
+    pub manifest_sha256: Option<String>,
+    /// For checking disk space before downloading. Never treated as a limit.
+    pub expected_uncompressed_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreCancel {
+    pub operation_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreAckOutcome {
+    /// The server has recorded everything. The agent can forget this operation.
+    Closed,
+    /// The server does not recognize it. A directory that was published stays where it is.
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreAck {
+    pub operation_id: Uuid,
+    pub outcome: RestoreAckOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestorePhase {
+    Running,
+    Publishing,
+    Published,
+    Reported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSyncEntry {
+    pub operation_id: Uuid,
+    pub phase: RestorePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreEmulator {
+    pub emulator_type: EmulatorType,
+    pub base_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreCapabilities {
+    pub emulators: Vec<RestoreEmulator>,
+    pub repository_ids: Vec<Uuid>,
+    pub cache_max_bytes: u64,
+    pub cache_used_bytes: u64,
+}
+
+/// What can honestly be said about a local copy without reading it. A difference proves a change, and no
+/// difference proves nothing, which is why this has no way to say "verified".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalCopyCondition {
+    Unverified,
+    Modified,
+    Absent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCopyReport {
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub version_id: Uuid,
+    pub status: LocalCopyCondition,
+}
+
+/// Sent after every welcome. It also tells the server that this agent can restore VMs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSync {
+    pub operations: Vec<RestoreSyncEntry>,
+    pub capabilities: RestoreCapabilities,
+    pub local_copies: Vec<LocalCopyReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreStage {
+    Validating,
+    Downloading,
+    Verifying,
+    Extracting,
+    PublishingLocal,
+}
+
+/// Only real measurements: without a known total there is no total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreProgress {
+    pub operation_id: Uuid,
+    pub stage: RestoreStage,
+    pub done_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub cache_hit: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreCache {
+    pub hit: bool,
+    pub downloaded_bytes: u64,
+    pub archive_cached: bool,
+    pub total_bytes: u64,
+}
+
+/// What this agent verified and where it put it. It is a report, and authorizes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResult {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+    pub manifest_version: u32,
+    pub manifest_sha256: String,
+    pub file_count: u64,
+    pub total_uncompressed_bytes: u64,
+    pub local_directory: String,
+    pub cache: RestoreCache,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreFailure {
+    pub operation_id: Uuid,
+    pub code: String,
+    pub message: String,
+}
+
 /// What a text frame from the server turned out to be.
 #[derive(Debug, PartialEq)]
 pub enum Decoded {
@@ -444,5 +614,12 @@ fn is_known_type(message_type: &str) -> bool {
             | "server.repository_health_request"
             | "server.registration_retry_cleanup"
             | "agent.media_sync_status"
+            | "agent.restore_sync"
+            | "agent.restore_progress"
+            | "agent.restore_result"
+            | "agent.restore_error"
+            | "server.restore_request"
+            | "server.restore_cancel"
+            | "server.restore_ack"
     )
 }

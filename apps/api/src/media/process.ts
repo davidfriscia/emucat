@@ -2,8 +2,9 @@ import { open, readFile, stat } from 'node:fs/promises';
 import sharp from 'sharp';
 import {
   checkDimensions,
-  decodeBmp,
-  decodePpm,
+  decodeBmpSteps,
+  decodePpmSteps,
+  decodeWithDeadline,
   IMAGE_EXTENSIONS,
   IMAGE_MIME_TYPES,
   ImageDecodeError,
@@ -20,8 +21,13 @@ const THUMBNAIL_JPEG_QUALITY = 82;
 /** JPEG has no transparency. Screenshots rarely have any, and white is what a viewer would assume. */
 export const ALPHA_BACKGROUND = '#ffffff';
 
+/** What the two hand-written decoders read into memory, unless told otherwise. */
+export const DEFAULT_MAX_DECODER_INPUT_BYTES = 256 * 1024 * 1024;
+
 export interface ProcessingLimits extends ImageLimits {
   timeoutSeconds: number;
+  /** The largest PPM or BMP that is read into memory to decode it. */
+  maxInputBytes?: number;
 }
 
 export interface ProcessedImage {
@@ -63,6 +69,9 @@ async function readHead(path: string): Promise<Buffer> {
 }
 
 function toRejection(error: unknown): unknown {
+  if (error instanceof ImageDecodeError && error.failure === 'timeout') {
+    return new ImageTimeoutError(error.message);
+  }
   if (error instanceof ImageDecodeError) {
     const code =
       error.failure === 'invalid'
@@ -121,12 +130,30 @@ export async function processImage(
   let input: string | RawImage = originalPath;
   try {
     if (format === 'ppm' || format === 'bmp') {
-      // These are decoded here, since the file size is already bounded by the upload limit.
-      if ((await stat(originalPath)).size === 0) {
-        throw new ImageRejectedError('invalid_image', 'The file is empty');
+      // These two are decoded here rather than by `sharp`, so the limits are applied here too: the size
+      // before anything is read, and a deadline that covers both the read and the decoding.
+      const { size } = await stat(originalPath);
+      if (size === 0) throw new ImageRejectedError('invalid_image', 'The file is empty');
+      const maxInputBytes = limits.maxInputBytes ?? DEFAULT_MAX_DECODER_INPUT_BYTES;
+      if (size > maxInputBytes) {
+        throw new ImageRejectedError(
+          'image_too_large',
+          `The file is ${size} bytes, and the limit for this format is ${maxInputBytes}`,
+        );
       }
-      const data = await readFile(originalPath);
-      input = format === 'ppm' ? decodePpm(data, limits) : decodeBmp(data, limits);
+      const deadlineMs = Date.now() + limits.timeoutSeconds * 1000;
+      const data = await readFile(originalPath, {
+        signal: AbortSignal.timeout(limits.timeoutSeconds * 1000),
+      }).catch((error: unknown) => {
+        if ((error as Error).name === 'TimeoutError' || (error as Error).name === 'AbortError') {
+          throw new ImageTimeoutError('Reading the image took too long');
+        }
+        throw error;
+      });
+      input = await decodeWithDeadline(
+        format === 'ppm' ? decodePpmSteps(data, limits) : decodeBmpSteps(data, limits),
+        deadlineMs,
+      );
     } else {
       // A header is enough to refuse an image with absurd dimensions, without decoding a pixel.
       const metadata = await pipeline(originalPath, limits).metadata();

@@ -24,6 +24,10 @@ import type {
   RegistrationResultPayload,
   RegistrationSyncPayload,
   RepositoryHealthResultPayload,
+  RestoreErrorPayload,
+  RestoreProgressPayload,
+  RestoreResultPayload,
+  RestoreSyncPayload,
 } from '@emucat/contracts';
 import { DiscoveryCoordinator, type DiscoveryRecord } from './discovery.js';
 
@@ -54,6 +58,22 @@ export interface AgentOperationsHandler {
   healthResult(agentId: string, payload: RepositoryHealthResultPayload): Promise<void>;
   agentRevoked(agentId: string): Promise<void>;
   close(): void;
+}
+
+/** What is done with restore messages. Every call is for the agent's active connection. */
+export interface AgentRestoresHandler {
+  synced(agentId: string, payload: RestoreSyncPayload): Promise<void>;
+  progress(agentId: string, payload: RestoreProgressPayload): Promise<void>;
+  result(agentId: string, payload: RestoreResultPayload): Promise<void>;
+  failed(agentId: string, payload: RestoreErrorPayload): Promise<void>;
+  discovered(
+    agentId: string,
+    report: {
+      emulators: readonly { emulatorType: string; status: string; truncated: boolean }[];
+      vms: readonly { emulatorType: string; vmName: string }[];
+    },
+  ): Promise<void>;
+  agentRevoked(agentId: string): Promise<void>;
 }
 
 export interface AgentHubOptions {
@@ -99,6 +119,8 @@ interface Connection {
   closed: boolean;
   /** Set once this connection has sent `agent.registration_sync`, which older agents never do. */
   registrationCapable: boolean;
+  /** What `agent.restore_sync` said this connection's agent can do. Older agents never send it. */
+  restoreCapabilities: RestoreSyncPayload['capabilities'] | null;
 }
 
 /** What `ws` calls a frame over its `maxPayload`. */
@@ -130,6 +152,7 @@ export class AgentHub {
   private readonly active = new Map<string, Connection>();
   private readonly pendingPresence = new Set<Promise<unknown>>();
   private operations: AgentOperationsHandler | null = null;
+  private restores: AgentRestoresHandler | null = null;
   /** What each agent last said about its screenshots. Stale once it is offline, and says when it spoke. */
   private readonly mediaStatuses = new Map<
     string,
@@ -150,6 +173,14 @@ export class AgentHub {
 
   setOperations(operations: AgentOperationsHandler): void {
     this.operations = operations;
+  }
+
+  setRestores(restores: AgentRestoresHandler): void {
+    this.restores = restores;
+  }
+
+  restoreCapabilities(agentId: string): RestoreSyncPayload['capabilities'] | null {
+    return this.active.get(agentId)?.restoreCapabilities ?? null;
   }
 
   isRegistrationCapable(agentId: string): boolean {
@@ -200,6 +231,7 @@ export class AgentHub {
       silenceTimer: null,
       closed: false,
       registrationCapable: false,
+      restoreCapabilities: null,
     };
     this.connections.add(connection);
     log.info({ agentId, connectionId: connection.id }, 'Agent connected');
@@ -389,7 +421,14 @@ export class AgentHub {
         const wanted =
           platform !== null &&
           this.discovery.acceptResult(agentId, connection.id, platform, message.payload);
-        if (!wanted) log.warn({ agentId, id: message.id }, 'Ignored an unwanted discovery result');
+        if (!wanted) {
+          log.warn({ agentId, id: message.id }, 'Ignored an unwanted discovery result');
+        } else {
+          // Housekeeping only. A database hiccup must not cost the connection its discovery result.
+          await this.restores?.discovered(agentId, message.payload).catch((error: unknown) => {
+            log.warn({ agentId, err: error }, 'Cannot record what a discovery found');
+          });
+        }
         break;
       }
       case 'agent.discovery_error': {
@@ -416,6 +455,12 @@ export class AgentHub {
       case 'agent.registration_cleanup':
       case 'agent.repository_health_result':
         await this.handleOperationMessage(connection, message);
+        break;
+      case 'agent.restore_sync':
+      case 'agent.restore_progress':
+      case 'agent.restore_result':
+      case 'agent.restore_error':
+        await this.handleRestoreMessage(connection, message);
         break;
     }
   }
@@ -472,7 +517,64 @@ export class AgentHub {
     }
   }
 
+  /** As for registration: a stale connection counts for nothing, and a database failure gets no answer. */
+  private async handleRestoreMessage(
+    connection: Connection,
+    message: Extract<
+      AgentMessage,
+      {
+        type:
+          | 'agent.restore_sync'
+          | 'agent.restore_progress'
+          | 'agent.restore_result'
+          | 'agent.restore_error';
+      }
+    >,
+  ): Promise<void> {
+    const { agentId, log } = connection;
+    if (this.active.get(agentId) !== connection || !this.restores) {
+      log.warn({ agentId, type: message.type }, 'Ignored a message from an inactive connection');
+      return;
+    }
+    const restores = this.restores;
+    try {
+      switch (message.type) {
+        case 'agent.restore_sync':
+          connection.restoreCapabilities = message.payload.capabilities;
+          await restores.synced(agentId, message.payload);
+          break;
+        case 'agent.restore_progress':
+          await restores.progress(agentId, message.payload);
+          break;
+        case 'agent.restore_result':
+          await restores.result(agentId, message.payload);
+          break;
+        case 'agent.restore_error':
+          await restores.failed(agentId, message.payload);
+          break;
+      }
+    } catch (error) {
+      log.error({ agentId, type: message.type, err: error }, 'Cannot handle an agent report');
+    }
+  }
+
   private operationsRevoked(agentId: string): void {
+    if (this.restores) {
+      const ended = this.restores
+        .agentRevoked(agentId)
+        .catch((error: unknown) => {
+          for (const connection of this.connections) {
+            if (connection.agentId === agentId) {
+              connection.log.error(
+                { agentId, err: error },
+                'Cannot end a revoked agent’s restores',
+              );
+            }
+          }
+        })
+        .finally(() => this.pendingPresence.delete(ended));
+      this.pendingPresence.add(ended);
+    }
     if (!this.operations) return;
     const update = this.operations
       .agentRevoked(agentId)

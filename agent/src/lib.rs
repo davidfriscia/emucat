@@ -14,6 +14,10 @@
 //! - [`repository`]: the provider-independent archive store interface, and safe object keys.
 //! - [`sftp`]: the archive store over SSH and SFTP, with mandatory host-key verification.
 //! - [`packaging`]: builds a standalone ZIP and its manifest, without changing the source.
+//! - [`zip_directory`]: reads a ZIP's central directory as written, which is what duplicates hide in.
+//! - [`extraction`]: takes an archive apart safely, and puts the result in place without replacing.
+//! - [`archive_cache`]: a local cache of verified master ZIPs.
+//! - [`restore`]: the durable workflow that turns a master into a verified local VM.
 //! - [`registration`]: the durable workflow that turns a discovered VM into a verified archive.
 //! - [`removal`]: removes a local VM after a confirmed transfer, and fails closed.
 //! - [`media`]: which files are media, finding them safely, and reading them completely.
@@ -21,9 +25,11 @@
 //! - [`media_sync`]: the watcher, reconciliation and upload to the API over HTTP(S).
 //! - [`state`]: local state, operation types and execution states.
 //!
-//! The agent has no inbound listener and does not launch emulators. It changes a VM directory in one
-//! case only: a transfer an administrator confirmed, after the server has committed a verified master.
+//! The agent has no inbound listener and does not launch emulators. It removes a VM directory in one case
+//! only: a transfer an administrator confirmed, after the server has committed a verified master. It
+//! creates one in one case only: a restore an administrator asked for, and never over an existing one.
 
+pub mod archive_cache;
 pub mod archives;
 pub mod cli;
 pub mod config;
@@ -31,6 +37,7 @@ pub mod connectivity;
 pub mod credentials;
 pub mod discovery;
 pub mod emulators;
+pub mod extraction;
 pub mod filesystem;
 pub mod logging;
 pub mod media;
@@ -43,6 +50,8 @@ pub mod protocol;
 pub mod registration;
 pub mod removal;
 pub mod repository;
+pub mod restore;
 pub mod sftp;
 pub mod shutdown;
 pub mod state;
+pub mod zip_directory;

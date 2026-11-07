@@ -113,7 +113,7 @@ impl VmNameError {
     }
 }
 
-fn is_windows_device_name(stem: &str) -> bool {
+pub(crate) fn is_windows_device_name(stem: &str) -> bool {
     let upper = stem.to_ascii_uppercase();
     if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
         return true;

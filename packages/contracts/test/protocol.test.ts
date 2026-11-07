@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  RESTORE_ERROR_CODES,
   agentMessageSchema,
   agentVmStateSchema,
   envelopeSchema,
   isLocalContentTrusted,
+  isRestoreCancellable,
+  isRestoreTerminal,
+  restoreRecovery,
   serverMessageSchema,
 } from '../src/index.js';
 import { fixture } from './helpers.js';
@@ -129,5 +133,45 @@ describe('screenshot messages', () => {
     expect(serverMessageSchema.safeParse(retry).success).toBe(true);
     const withPath = { ...retry, payload: { ...retry.payload, path: 'C:/Windows' } };
     expect(serverMessageSchema.safeParse(withPath).success).toBe(false);
+  });
+});
+
+describe('restore messages', () => {
+  const all = fixture<Record<string, unknown[]>>('wire-examples');
+
+  it('accepts the shared examples, each in the right direction', () => {
+    for (const example of all.restoreServerMessages ?? []) {
+      expect(serverMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(true);
+      expect(agentMessageSchema.safeParse(example).success).toBe(false);
+    }
+    for (const example of all.restoreAgentMessages ?? []) {
+      expect(agentMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(true);
+      expect(serverMessageSchema.safeParse(example).success).toBe(false);
+    }
+  });
+
+  it('refuses a command that tries to say where something goes', () => {
+    for (const example of all.restoreRefusedByTheAgent ?? []) {
+      expect(serverMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(false);
+    }
+  });
+});
+
+describe('restore states', () => {
+  it('knows when a restore can be cancelled, and when it has ended', () => {
+    expect(isRestoreCancellable('downloading')).toBe(true);
+    expect(isRestoreCancellable('publishing_local')).toBe(false);
+    expect(isRestoreCancellable('committing')).toBe(false);
+    expect(isRestoreCancellable('succeeded')).toBe(false);
+    expect(isRestoreTerminal('partial_success')).toBe(true);
+    expect(isRestoreTerminal('committing')).toBe(false);
+  });
+
+  it('has recovery advice for each of its codes that an administrator can act on', () => {
+    for (const code of RESTORE_ERROR_CODES) {
+      if (code === 'internal_error') continue;
+      expect(restoreRecovery(code), code).not.toBeNull();
+    }
+    expect(restoreRecovery('some_code_from_a_newer_agent')).toBeNull();
   });
 });

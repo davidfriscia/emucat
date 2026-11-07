@@ -20,6 +20,15 @@ import {
   repositoryHealthRequestPayloadSchema,
   repositoryHealthResultPayloadSchema,
 } from './registration.js';
+import {
+  restoreAckPayloadSchema,
+  restoreCancelPayloadSchema,
+  restoreErrorPayloadSchema,
+  restoreProgressPayloadSchema,
+  restoreRequestPayloadSchema,
+  restoreResultPayloadSchema,
+  restoreSyncPayloadSchema,
+} from './restore.js';
 import { timestampSchema } from './version.js';
 
 export * from './platform.js';
@@ -123,6 +132,22 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.media_sync_status'),
     payload: mediaSyncStatusPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.restore_sync'),
+    payload: restoreSyncPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.restore_progress'),
+    payload: restoreProgressPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.restore_result'),
+    payload: restoreResultPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.restore_error'),
+    payload: restoreErrorPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -157,6 +182,18 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.registration_retry_cleanup'),
     payload: registrationRetryCleanupPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.restore_request'),
+    payload: restoreRequestPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.restore_cancel'),
+    payload: restoreCancelPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.restore_ack'),
+    payload: restoreAckPayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

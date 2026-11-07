@@ -18,9 +18,12 @@ use crate::protocol::PROTOCOL_VERSION;
         Connects outbound to an EmuCat server, reports the 86Box and QEMU virtual machines in its \
         configured directories when asked, and registers one when an administrator asks: it builds a \
         standalone ZIP archive with a manifest, uploads it straight to an SSH/SFTP repository, and \
-        verifies its SHA-256 there. It has no listener and launches no emulators. It removes a local \
-        VM only for an explicitly confirmed transfer, after the server has committed a verified \
-        master. Pair it once with `pair`, then keep it running with `run`."
+        verifies its SHA-256 there. It restores a registered master when an administrator asks: it \
+        downloads the ZIP straight from the repository, verifies its SHA-256 and manifest, extracts it \
+        safely, and publishes the VM under the configured base path, never over an existing \
+        directory. It keeps verified ZIPs in a local cache. It has no listener and launches no \
+        emulators. It removes a local VM only for an explicitly confirmed transfer, after the server \
+        has committed a verified master. Pair it once with `pair`, then keep it running with `run`."
 )]
 pub struct Cli {
     /// Configuration file [env: EMUCAT_AGENT_CONFIG]
@@ -58,6 +61,8 @@ pub enum Command {
     Discover,
     /// Print what the screenshot queue holds, from the local state directory.
     MediaStatus,
+    /// Print what the archive cache holds: where it is, how many ZIPs, and how much of its limit they use
+    CacheStatus,
     /// Test a configured SSH repository directly: connection, host key, key, read, write, publication
     RepositoryCheck {
         /// The repository's UUID, as shown on the Repositories page

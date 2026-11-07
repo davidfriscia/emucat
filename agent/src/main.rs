@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use emucat_agent::archive_cache::ArchiveCache;
 use emucat_agent::cli::{Cli, Command, Overrides, print_info};
 use emucat_agent::config::{Config, ConfigError, Severity, process_env, validate};
 use emucat_agent::connectivity::{self, ConnectionEnd, ConnectionSettings, check_transport};
@@ -33,6 +34,7 @@ fn main() -> ExitCode {
         Command::Unpair => unpair(&cli),
         Command::Discover => discover(&cli),
         Command::MediaStatus => media_status(&cli),
+        Command::CacheStatus => cache_status(&cli),
         Command::RepositoryCheck { repository } => repository_check(&cli, *repository),
         Command::RepositoryPassphrase { repository } => repository_passphrase(&cli, *repository),
     };
@@ -204,8 +206,12 @@ fn operations(
     let staging_dir = config
         .effective_staging_dir()
         .ok_or("no staging directory is configured and no default is known")?;
+    let restore = config
+        .restore_settings()
+        .ok_or("no state directory is configured and no default is known")?;
     AgentOperations::load(OperationsConfig {
         agent_id,
+        restore,
         repositories: Arc::new(ConfiguredRepositories::new(
             config.repositories.clone(),
             state_dir.clone(),
@@ -233,6 +239,21 @@ fn media_status(cli: &Cli) -> Result<(), String> {
     let status = queue.status(std::iter::empty());
     let json = serde_json::to_string_pretty(&status).map_err(|error| error.to_string())?;
     println!("{json}");
+    Ok(())
+}
+
+/// What the cache holds, without connecting to anything. Opening it also tidies what a crash left behind.
+fn cache_status(cli: &Cli) -> Result<(), String> {
+    let config = load(cli).map_err(|error| error.to_string())?;
+    let directory = config
+        .effective_cache_dir()
+        .ok_or("no cache directory is configured and no default is known")?;
+    let cache = ArchiveCache::open(directory, config.cache_max_bytes);
+    let usage = cache.usage();
+    println!("Cache directory: {}", cache.directory().display());
+    println!("Limit: {} bytes", cache.max_bytes());
+    println!("Archives: {}", usage.entries);
+    println!("In use: {} bytes", usage.total_bytes);
     Ok(())
 }
 

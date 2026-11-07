@@ -216,6 +216,18 @@ export class RegistrationCoordinator {
       if (agents[0].revoked_at) {
         throw new ApiError(409, 'agent_revoked', 'This agent has been revoked.');
       }
+      // A restore creating itself holds this row's exclusive lock, so the two cannot start together.
+      const [restores] = await connection.execute<RowDataPacket[]>(
+        'SELECT 1 FROM restore_operations WHERE agent_id = ? AND active_marker = 1',
+        [agentId],
+      );
+      if (restores.length > 0) {
+        throw new ApiError(
+          409,
+          'registration_in_progress',
+          'A restore is running on this agent. Wait for it to finish.',
+        );
+      }
       const [repositories] = await connection.execute<RowDataPacket[]>(
         `SELECT r.enabled, ar.agent_id
          FROM repositories AS r

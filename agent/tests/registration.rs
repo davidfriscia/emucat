@@ -228,6 +228,10 @@ struct Provider {
 }
 
 impl RepositoryProvider for Provider {
+    fn repository_ids(&self) -> Vec<Uuid> {
+        vec![REPOSITORY]
+    }
+
     fn open(&self, repository_id: Uuid) -> RepositoryResult<Arc<dyn ArchiveRepository>> {
         if repository_id == REPOSITORY {
             Ok(Arc::new(self.repository.clone()))
@@ -298,7 +302,9 @@ impl World {
             ),
         ]
         .into();
+        let restore = emucat_agent::restore::RestoreSettings::under(&self.state);
         AgentOperations::load(OperationsConfig {
+            restore,
             agent_id: Uuid::from_u128(1),
             state_dir: self.state.clone(),
             staging_dir: self.staging.clone(),

@@ -25,3 +25,10 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0018](0018-agent-media-upload.md)               | Screenshots are a PUT addressed by hash, and the WebSocket only reports       |
 | [0019](0019-media-processing-and-storage.md)     | `sharp`, two small decoders, and files named by UUID                          |
 | [0020](0020-transfer-media-preservation.md)      | A transfer deletes a screenshot only if the server holds exactly that content |
+| [0021](0021-restore-lifecycle.md)                | Restoring as a durable operation, with nothing to undo                        |
+| [0022](0022-safe-zip-extraction.md)              | An archive is untrusted input, even when its hash matches                     |
+| [0023](0023-atomic-local-publication.md)         | Publishing a restored VM is one rename that refuses to replace anything       |
+| [0024](0024-local-archive-cache.md)              | A small cache of verified ZIPs, with the file system as its index             |
+| [0025](0025-bounded-image-decoders.md)           | The hand-written decoders are limited by input, by allocation and by time     |
+| [0026](0026-media-retry-classification.md)       | Refusals about authorization wait for a change, not a timer                   |
+| [0027](0027-catalog-detail-and-public-covers.md) | Why a public VM can have no cover, and saying so                              |

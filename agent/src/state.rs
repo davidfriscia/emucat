@@ -126,6 +126,15 @@ pub fn record_local_source(
     fs::rename(&temporary, &path)
 }
 
+/// Every local copy [`record_local_source`] recorded.
+pub fn local_source_entries(state_dir: &Path) -> Vec<AgentVmState> {
+    let Ok(bytes) = fs::read(state_dir.join(LOCAL_STATE_FILE)) else {
+        return Vec::new();
+    };
+    let states: BTreeMap<String, AgentVmState> = serde_json::from_slice(&bytes).unwrap_or_default();
+    states.into_values().collect()
+}
+
 /// What [`record_local_source`] recorded, for one VM.
 pub fn read_local_state(
     state_dir: &Path,
