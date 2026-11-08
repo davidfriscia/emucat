@@ -194,6 +194,9 @@ export function createHost(): Host {
         EMUCAT_ROOT: root,
         EMUCAT_SOCKET_DIR: socketDir,
         EMUCAT_SOCKET_GID: '1000',
+        // The test container's UID/GID 1000 account.
+        EMUCAT_APP_USER: 'node',
+        EMUCAT_APP_GROUP: 'node',
         EMUCAT_DEPLOY_USER: 'nobody-here',
         EMUCAT_HTTP_PORT: '18080',
         EMUCAT_HEALTH_TIMEOUT_SECONDS: '1',

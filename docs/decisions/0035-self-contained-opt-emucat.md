@@ -23,6 +23,10 @@ The first deployment layout spread EmuCat over `/etc/emucat` (configuration and 
   deploy key, and never overwrites a file; `install` re-applies the same owners and modes. Secrets keep
   their previous protection: `config/` is `root:emucat-deploy` 0750, the token `root:emucat-socket` 0640,
   the deploy key `emucat-deploy` 0600. The tooling stays root-owned.
+- **The API runs as an existing host account,** `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (`david:david`,
+  1000:1000, the homelab convention for application containers), which also owns `data/media`. There is
+  no dedicated application account and no fixed UID in the tooling; the IDs are resolved from the names.
+  That account gets no host group: the container alone joins `emucat-socket` by GID.
 - The deployment service additionally gets the account's own group (`SupplementaryGroups=`), since
   `Group=emucat-socket` would otherwise drop the group that can read `config/`.
 

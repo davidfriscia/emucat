@@ -89,6 +89,8 @@ load_config() {
   : "${EMUCAT_PROJECT:=emucat}"
   : "${EMUCAT_SOCKET_DIR:=/run/emucat-deployer}"
   : "${EMUCAT_DEPLOY_USER:=emucat-deploy}"
+  : "${EMUCAT_APP_USER:=david}"
+  : "${EMUCAT_APP_GROUP:=$EMUCAT_APP_USER}"
   : "${EMUCAT_SOCKET_GROUP:=emucat-socket}"
   : "${EMUCAT_BIND_ADDRESS:=127.0.0.1}"
   : "${EMUCAT_HTTP_PORT:=8080}"
@@ -128,6 +130,14 @@ load_config() {
   if [[ -z ${EMUCAT_SOCKET_GID:-} ]]; then
     EMUCAT_SOCKET_GID=$(getent group "$EMUCAT_SOCKET_GROUP" 2>/dev/null | cut -d: -f3 || true)
   fi
+  # The host account the API container runs as, and that owns the media. Named here, resolved to IDs.
+  [[ $EMUCAT_APP_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ && $EMUCAT_APP_GROUP =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] ||
+    abort "EMUCAT_APP_USER and EMUCAT_APP_GROUP must be account names"
+  [[ $EMUCAT_APP_USER != "$EMUCAT_DEPLOY_USER" ]] ||
+    abort "EMUCAT_APP_USER must not be the deployment account: the application never gets its privileges"
+  EMUCAT_APP_UID=$(id -u -- "$EMUCAT_APP_USER" 2>/dev/null || true)
+  EMUCAT_APP_GID=$(getent group "$EMUCAT_APP_GROUP" 2>/dev/null | cut -d: -f3 || true)
+  [[ $EMUCAT_APP_UID != 0 && $EMUCAT_APP_GID != 0 ]] || abort "the application must not run as root"
 
   layout_paths
   local host=$EMUCAT_BIND_ADDRESS
@@ -137,8 +147,8 @@ load_config() {
 
   # Everything Compose substitutes into compose.yaml. The three file and directory paths are derived.
   export EMUCAT_PROJECT EMUCAT_ENVIRONMENT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR \
-    EMUCAT_SOCKET_DIR EMUCAT_SOCKET_GID EMUCAT_BIND_ADDRESS EMUCAT_HTTP_PORT EMUCAT_TRUSTED_PROXIES \
-    EMUCAT_DB_HOST_GATEWAY EMUCAT_EDGE_SUBNET EMUCAT_INTERNAL_SUBNET EMUCAT_DATABASE_SUBNET \
+    EMUCAT_SOCKET_DIR EMUCAT_SOCKET_GID EMUCAT_APP_UID EMUCAT_APP_GID EMUCAT_BIND_ADDRESS EMUCAT_HTTP_PORT \
+    EMUCAT_TRUSTED_PROXIES EMUCAT_DB_HOST_GATEWAY EMUCAT_EDGE_SUBNET EMUCAT_INTERNAL_SUBNET EMUCAT_DATABASE_SUBNET \
     EMUCAT_API_MEMORY_LIMIT
 }
 
@@ -609,6 +619,8 @@ cmd_update() {
   [[ -f $EMUCAT_APP_ENV_FILE ]] || fail configuration_invalid "$EMUCAT_APP_ENV_FILE does not exist"
   [[ -d $EMUCAT_MEDIA_DIR ]] || fail configuration_invalid "The media directory does not exist"
   [[ -n $EMUCAT_SOCKET_GID ]] || fail configuration_invalid "The socket group $EMUCAT_SOCKET_GROUP does not exist"
+  [[ -n $EMUCAT_APP_UID && -n $EMUCAT_APP_GID ]] ||
+    fail configuration_invalid "The application account $EMUCAT_APP_USER:$EMUCAT_APP_GROUP does not exist"
   docker info >/dev/null 2>&1 || fail docker_unavailable "Docker is not reachable"
   current=$(current_commit)
   PREVIOUS_RELEASE=$current
@@ -831,6 +843,10 @@ owned_with_mode() {
   [[ -e $path && ! -L $path ]] || return 1
   [[ $(stat -c %u -- "$path") == "$uid" ]] && mode_at_most "$path" "$max"
 }
+not_in_group() {
+  local user=$1 group=$2
+  ! id -nG -- "$user" 2>/dev/null | tr ' ' '\n' | grep -qx -- "$group"
+}
 database_answers() {
   write_db_option_file
   mariadb --defaults-extra-file="$DB_OPTION_FILE" --database="$APP_DB_NAME" -e 'SELECT 1'
@@ -872,7 +888,10 @@ cmd_check() {
     check_item "$dir is writable by the deployment account" test -d "$dir" -a -w "$dir"
   done
   check_item "media directory $EMUCAT_MEDIA_DIR" test -d "$EMUCAT_MEDIA_DIR"
-  check_item "media directory owned by UID 10001" test "$(stat -c %u -- "$EMUCAT_MEDIA_DIR" 2>/dev/null)" = 10001
+  check_item "media directory owned by $EMUCAT_APP_USER:$EMUCAT_APP_GROUP ($EMUCAT_APP_UID:$EMUCAT_APP_GID)" \
+    test "$(stat -c %u:%g -- "$EMUCAT_MEDIA_DIR" 2>/dev/null)" = "$EMUCAT_APP_UID:$EMUCAT_APP_GID"
+  check_item "$EMUCAT_APP_USER is not a member of $EMUCAT_SOCKET_GROUP on the host (only the container is)" \
+    not_in_group "$EMUCAT_APP_USER" "$EMUCAT_SOCKET_GROUP"
   check_item "deployment service socket" test -S "$EMUCAT_SOCKET_DIR/deployer.sock"
   say "Connectivity"
   check_item "MariaDB accepts the application account ($EMUCAT_HOST_DB_HOST)" database_answers
@@ -907,6 +926,10 @@ require_accounts() {
   getent group "$EMUCAT_DEPLOY_USER" >/dev/null 2>&1 ||
     abort "the deployment account needs its own group $EMUCAT_DEPLOY_USER (useradd --user-group)"
   [[ -n $EMUCAT_SOCKET_GID ]] || abort "create the socket group first: $ACCOUNT_HINT"
+  [[ -n $EMUCAT_APP_UID ]] ||
+    abort "the application account $EMUCAT_APP_USER does not exist; set EMUCAT_APP_USER in $CONFIG_PATH"
+  [[ -n $EMUCAT_APP_GID ]] ||
+    abort "the group $EMUCAT_APP_GROUP does not exist; set EMUCAT_APP_GROUP in $CONFIG_PATH"
 }
 
 # A configuration file must be a plain file: never follow a link someone else planted.
@@ -931,11 +954,21 @@ create_layout() {
   install -d -o "$EMUCAT_DEPLOY_USER" -g "$EMUCAT_DEPLOY_USER" -m 0750 \
     "$REPO" "$RELEASES" "$STATE" "$OPERATIONS" "$BUILDS" "$BACKUP_DIR"
   install -d -o "$EMUCAT_DEPLOY_USER" -g "$EMUCAT_DEPLOY_USER" -m 0700 "$DEPLOY_HOME"
+  # The media belongs to the application account the API container runs as.
+  local media_owner="$EMUCAT_APP_USER:$EMUCAT_APP_GROUP"
+  [[ ! -L $EMUCAT_MEDIA_DIR ]] || abort "$EMUCAT_MEDIA_DIR must be a directory, not a link"
   if [[ ! -d $EMUCAT_MEDIA_DIR ]]; then
-    install -d -o 10001 -g 10001 -m 0750 "$EMUCAT_MEDIA_DIR"
-  elif [[ $(stat -c %u -- "$EMUCAT_MEDIA_DIR") != 10001 ]]; then
-    # Existing data is never changed automatically.
-    warn "$EMUCAT_MEDIA_DIR exists but is not owned by UID 10001; fix it by hand (see docs/deployment.md)"
+    install -d -o "$EMUCAT_APP_USER" -g "$EMUCAT_APP_GROUP" -m 0750 "$EMUCAT_MEDIA_DIR"
+  elif [[ $(stat -c %u:%g -- "$EMUCAT_MEDIA_DIR") != "$EMUCAT_APP_UID:$EMUCAT_APP_GID" ]]; then
+    if [[ -z $(ls -A -- "$EMUCAT_MEDIA_DIR") ]]; then
+      # Empty, as a partial earlier run may leave it: nothing to lose by handing it over.
+      chown -- "$media_owner" "$EMUCAT_MEDIA_DIR"
+      chmod 0750 -- "$EMUCAT_MEDIA_DIR"
+      say "Gave the empty $EMUCAT_MEDIA_DIR to $media_owner"
+    else
+      # Existing media is never changed automatically.
+      warn "$EMUCAT_MEDIA_DIR holds files but is not owned by $media_owner; fix it by hand (see docs/deployment.md)"
+    fi
   fi
 }
 
@@ -1067,8 +1100,10 @@ cmd_install() {
   cp -R -- "$source/apps/deployer/src" "$staged/deployer/src"
   install -m 0644 "$source/deploy/systemd/emucat-deployer.service" "$staged/systemd/"
   chown -R root:root -- "$staged"
-  chmod -R go-w -- "$staged"
-  chmod 0755 -- "$staged"
+  # Readable by everyone (the service runs it as emucat-deploy), writable by root only, whatever modes the
+  # copy of the repository had.
+  chmod -R u=rwX,go=rX -- "$staged"
+  chmod 0755 -- "$staged" "$staged/bin/emucatctl"
   rm -rf -- "$TOOLING.old"
   [[ -d $TOOLING ]] && mv -- "$TOOLING" "$TOOLING.old"
   mv -- "$staged" "$TOOLING"

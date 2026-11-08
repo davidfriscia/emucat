@@ -54,7 +54,7 @@ Actions, no container registry and no push-triggered deployment: images are buil
   │    │  /            the single-page app                                │
   │    │  /api/        REST and the agent WebSocket                       │
   │    ▼  internal network (no outside access)                            │
-  │  api  (Fastify, UID 10001) ── database network ──▶ host.docker.internal│
+  │  api  (Fastify, UID 1000)  ── database network ──▶ host.docker.internal│
   └────┬───────────────────────────────┬──────────────────────────────────┘
        │ bind: media directory         │ bind (read-only): /run/emucat-deployer
        ▼                               ▼  deployer.sock, HTTP + bearer token
@@ -95,7 +95,7 @@ modes, and every `install` puts those of the directories and of `config/` back:
 │   ├── builds/                                           0750  temporary source exports during an update
 │   └── home/                                             0700  the deployment account's home (Docker, Git)
 ├── data/                    root:root                    0755
-│   └── media/               10001:10001                  0750  screenshots and other media (persistent)
+│   └── media/               david:david (1000:1000)      0750  screenshots and other media (persistent)
 └── backups/                 emucat-deploy:emucat-deploy  0750  database dumps, 0640 each
 ```
 
@@ -134,6 +134,13 @@ useradd --system --user-group --no-create-home --home-dir /opt/emucat/state/home
 as it. Its home is inside the layout and is created by `emucatctl init`, so `useradd` creates no directory.
 `emucat-socket` exists only so that the API container (by GID) and the deployment service share the
 socket.
+
+**The application account** is an existing unprivileged host account, `david:david` (UID/GID 1000:1000)
+on the homelab servers, set by `EMUCAT_APP_USER` and `EMUCAT_APP_GROUP`. The API container runs with its
+IDs and it owns `data/media`; there is no separate EmuCat application account. It needs no group
+membership and must **not** be added to `emucat-socket` or made `emucat-deploy`: the container joins the
+socket group by GID on its own (`group_add`), so on the host only the deployment account and that one
+container can use the socket and read the token. `emucatctl check` verifies this.
 
 ## 3. External MariaDB
 
@@ -214,6 +221,7 @@ the earlier layout (`EMUCAT_APP_ENV_FILE`, `EMUCAT_DEPLOYER_TOKEN_FILE`, `EMUCAT
 | `EMUCAT_ROOT`                                   | `/opt/emucat`; everything persistent is under it                               |
 | `EMUCAT_BACKUP_RETENTION_COUNT`                 | `0` keeps every dump; `N` keeps the newest N                                   |
 | `EMUCAT_DEPLOY_USER`, `EMUCAT_SOCKET_GROUP`     | The accounts from section 2                                                    |
+| `EMUCAT_APP_USER`, `EMUCAT_APP_GROUP`           | Account the API runs as and that owns the media; `david`, `david` by default   |
 | `EMUCAT_SOCKET_DIR`                             | `/run/emucat-deployer`; must match the unit's `RuntimeDirectory`               |
 | `EMUCAT_BIND_ADDRESS`, `EMUCAT_HTTP_PORT`       | Where the web container listens for the proxy (MARS: `10.0.0.2`, `8095`)       |
 | `EMUCAT_TRUSTED_PROXIES`                        | Addresses whose `X-Forwarded-For` is believed, as the web container sees them  |
@@ -263,7 +271,8 @@ docker build -f deploy/docker/web.Dockerfile --target runtime -t emucat-web:dev 
 
 - **API** ([`api.Dockerfile`](../deploy/docker/api.Dockerfile)): `deps` (pnpm, frozen lockfile) → `build`
   → `verify` (type checks and database-free tests) → `prod` (`pnpm deploy --prod`, production
-  dependencies only) → `runtime` on `node:22-bookworm-slim`, as UID/GID 10001, with a health check on
+  dependencies only) → `runtime` on `node:22-bookworm-slim`, as UID/GID 1000 (Compose sets the IDs
+  of `EMUCAT_APP_USER`), with application files owned by root and a health check on
   `/api/v1/ready` and `EMUCAT_BUILD_COMMIT` and OCI revision labels.
 - **Web** ([`web.Dockerfile`](../deploy/docker/web.Dockerfile)): Vite build → `verify` → `runtime` on
   `nginxinc/nginx-unprivileged` (UID 101, port 8080). Hashed `/assets/` are cached for a year; the app
@@ -335,16 +344,16 @@ To use an existing deploy key instead, put it at `/opt/emucat/config/deploy_key`
 before `install`); its owner and mode are set for you.
 
 `install` is repeatable. It checks the configuration and prerequisites, re-creates any missing
-directory and puts owners and modes back (it never changes existing media: if `data/media` is not owned
-by 10001 it only warns), copies `emucatctl` and the deployment service to `/opt/emucat/tooling` owned by
-root, clones the bare mirror of the configured branch into `repo.git`, writes
+directory and puts owners and modes back. It never changes existing media: a `data/media` not owned by
+the application account is handed over only while it is empty, otherwise it just warns. It copies
+`emucatctl` and the deployment service to `/opt/emucat/tooling` owned by root, clones the bare mirror of the configured branch into `repo.git`, writes
 `/etc/systemd/system/emucat-deployer.service` from the template, and starts the service.
 
 The first `update` builds, backs up the (empty) database, applies all migrations and starts the
 containers. Then create the first administrator at the public address: the setup token is `SETUP_TOKEN`
 or, when empty, printed by `emucatctl logs api`.
 
-Moving existing media: copy it into `/opt/emucat/data/media` and `chown -R 10001:10001` it, while the
+Moving existing media: copy it into `/opt/emucat/data/media` and `chown -R david:david` it (the `EMUCAT_APP_USER:EMUCAT_APP_GROUP` account), while the
 application is stopped.
 
 ## 9. The deployment service
@@ -512,6 +521,13 @@ sudo /opt/emucat/tooling/bin/emucatctl update
 cd ~ && rm -rf ~/emucat-src
 ```
 
+**If `init` stopped halfway** (as the first MARS attempt did, at `install: invalid user: '10001'`, before
+the application account was configurable): copy a newer `origin/develop` the same way and run
+`sudo deploy/bin/emucatctl init` again. It keeps the existing `deploy.env` (one without
+`EMUCAT_APP_USER`/`EMUCAT_APP_GROUP` means `david:david`), and any deploy key, `app.env` or token already
+there; it creates only what is missing, and gives an empty `data/media` to `david:david`. Then continue
+with the steps after `init`.
+
 ## 17. MOON
 
 Production, branch `main`, the same `/opt/emucat` layout and the same steps as MARS (copy from
@@ -578,7 +594,7 @@ host.
 | `cross_origin_rejected` at sign-in         | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
 | Client addresses are the proxy's           | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
 | Agents disconnect every minute             | Proxy WebSocket timeouts (section 15)                                                                                                  |
-| Media permission errors                    | `/opt/emucat/data/media` must be owned by 10001:10001                                                                                  |
+| Media permission errors                    | `/opt/emucat/data/media` must be owned by `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (david:david, 1000:1000)                                  |
 | An update shows "interrupted"              | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
 | `rollback-app` exits 3                     | The database is newer than that release; restore a dump or fix forward                                                                 |
 

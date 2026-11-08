@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -58,6 +60,78 @@ function git(cwd: string, ...args: string[]): string {
   ).trim();
 }
 
+/**
+ * Starts the installed deployment service with the identity its unit gives it: User=emucat-deploy,
+ * Group=emucat-socket, SupplementaryGroups=emucat-deploy (plus docker, from the account's membership), in
+ * the RuntimeDirectory systemd would create.
+ */
+async function startDeployer(
+  deploy: { uid: number; gid: number },
+  socket: number,
+): Promise<ChildProcess> {
+  mkdirSync('/run/emucat-deployer', { recursive: true, mode: 0o750 });
+  execFileSync('chown', ['emucat-deploy:emucat-socket', '/run/emucat-deployer']);
+  chmodSync('/run/emucat-deployer', 0o750);
+  const child = spawn(
+    'setpriv',
+    [
+      `--reuid=${deploy.uid}`,
+      `--regid=${socket}`,
+      `--groups=${deploy.gid},${socket},${gid('docker')}`,
+      process.execPath,
+      '--disable-warning=ExperimentalWarning',
+      `${ROOT}/tooling/deployer/src/main.ts`,
+    ],
+    { env: { ...env, HOME: `${ROOT}/state/home` }, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let output = '';
+  child.stdout?.on('data', (chunk: Buffer) => (output += chunk.toString()));
+  child.stderr?.on('data', (chunk: Buffer) => (output += chunk.toString()));
+  const deadline = Date.now() + 10_000;
+  while (!output.includes('listening on')) {
+    if (Date.now() > deadline || child.exitCode !== null) {
+      throw new Error(`The deployment service did not start: ${output}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return child;
+}
+
+const CLIENT = `
+import { readFileSync } from 'node:fs';
+import { request } from 'node:http';
+const [tokenPath, socketPath, given] = process.argv.slice(1);
+let token = given;
+if (!token) {
+  try { token = readFileSync(tokenPath, 'utf8').trim(); }
+  catch (error) { console.log('token:' + error.code); process.exit(0); }
+}
+const req = request({ socketPath, path: '/v1/status', headers: { authorization: 'Bearer ' + token } },
+  (response) => { console.log('status:' + response.statusCode); response.resume(); });
+req.on('error', (error) => console.log('socket:' + error.code));
+req.end();
+`;
+
+/** Asks the deployment service for its status as [uid, gid, ...supplementary groups], as the API does. */
+function asApi([uid, group, ...groups]: number[], tokenPath: string, token = ''): string {
+  return execFileSync(
+    'setpriv',
+    [
+      `--reuid=${uid}`,
+      `--regid=${group}`,
+      groups.length > 0 ? `--groups=${groups.join(',')}` : '--clear-groups',
+      process.execPath,
+      '--input-type=module',
+      '-e',
+      CLIENT,
+      tokenPath,
+      '/run/emucat-deployer/deployer.sock',
+      token,
+    ],
+    { encoding: 'utf8', timeout: 30_000 },
+  ).trim();
+}
+
 /** Every path that earlier layouts used, or a default home might have created. */
 const OUTSIDE = [
   '/etc/emucat',
@@ -68,7 +142,7 @@ const OUTSIDE = [
 ];
 
 describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root' }, () => {
-  it('bootstraps, installs and operates the whole layout', () => {
+  it('bootstraps, installs and operates the whole layout', async () => {
     for (const path of [ROOT, ...OUTSIDE]) assert.equal(existsSync(path), false, path);
     const deploy = { uid: id('-u', 'emucat-deploy'), gid: id('-g', 'emucat-deploy') };
     const socket = gid('emucat-socket');
@@ -124,7 +198,7 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
       [`${ROOT}/state/builds`]: [deploy.uid, deploy.gid, 0o750],
       [`${ROOT}/state/home`]: [deploy.uid, deploy.gid, 0o700],
       [`${ROOT}/data`]: [0, 0, 0o755],
-      [`${ROOT}/data/media`]: [10001, 10001, 0o750],
+      [`${ROOT}/data/media`]: [1000, 1000, 0o750],
       [`${ROOT}/backups`]: [deploy.uid, deploy.gid, 0o750],
     };
     const checkLayout = () => {
@@ -204,7 +278,46 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
     assert.deepEqual(failed, ['deployment service socket'], result.stdout + result.stderr);
     assert.match(result.stdout, /ok {4}\/opt\/emucat\/config is root-owned/);
     assert.match(result.stdout, /ok {4}tooling \/opt\/emucat\/tooling is root-owned/);
-    assert.match(result.stdout, /ok {4}media directory owned by UID 10001/);
+    assert.match(result.stdout, /ok {4}media directory owned by david:david \(1000:1000\)/);
+    assert.match(result.stdout, /ok {4}david is not a member of emucat-socket/);
+
+    // 4b. The real deployment service, started as the unit starts it, and the API's identity: UID/GID
+    // 1000 plus the socket group (Compose group_add). Without that group, UID 1000 gets nothing.
+    const service = await startDeployer(deploy, socket);
+    try {
+      result = run(INSTALLED, 'check');
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      // The container sees the token file itself (a Compose secret is a bind mount of the inode, so the
+      // directories above it do not apply); a hard link stands in for that mount.
+      const secrets = mkdtempSync(join(ROOT, '..', 'emucat-secret-'));
+      chmodSync(secrets, 0o755);
+      const token = join(secrets, 'deployer_token');
+      linkSync(`${ROOT}/config/deployer.token`, token);
+      try {
+        assert.equal(asApi([1000, 1000, socket], token), 'status:200');
+        assert.equal(asApi([1000, 1000], token), 'token:EACCES');
+        const known = readFileSync(`${ROOT}/config/deployer.token`, 'utf8').trim();
+        assert.equal(asApi([1000, 1000], token, known), 'socket:EACCES');
+      } finally {
+        rmSync(secrets, { recursive: true, force: true });
+      }
+    } finally {
+      service.kill('SIGTERM');
+    }
+
+    // 4c. Media: the API's UID/GID can write and read it, and new files belong to david:david.
+    const media = `${ROOT}/data/media`;
+    execFileSync('setpriv', [
+      '--reuid=1000',
+      '--regid=1000',
+      '--clear-groups',
+      'sh',
+      '-c',
+      `echo kept > ${media}/written-as-1000 && cat ${media}/written-as-1000`,
+    ]);
+    assert.deepEqual(owner(`${media}/written-as-1000`).uid, 1000);
+    assert.deepEqual(owner(`${media}/written-as-1000`).gid, 1000);
+    rmSync(`${media}/written-as-1000`);
 
     // 5. update: the first release.
     result = run(INSTALLED, 'update', '--yes');
@@ -260,5 +373,73 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
     assert.equal(current().commit, first);
 
     for (const path of OUTSIDE) assert.equal(existsSync(path), false, path);
+  });
+
+  it('resumes an init that stopped halfway, keeping every file it finds', () => {
+    // What MARS was left with when init stopped at the media directory: the layout up to data/, a
+    // deploy.env from the template of that time (without the application account settings), and here
+    // also a deploy key and app.env put there by hand, and an empty media directory owned by root.
+    const partial = '/opt/emucat-partial';
+    const config = `${partial}/config/deploy.env`;
+    const template = readFileSync(join(REPOSITORY, 'deploy/config/deploy.env.example'), 'utf8')
+      .replace(/^EMUCAT_APP_(USER|GROUP)=.*\n/gm, '')
+      .replace(/^EMUCAT_ROOT=.*$/m, `EMUCAT_ROOT=${partial}`)
+      .replace(/^EMUCAT_GIT_SSH_KEY=.*$/m, `EMUCAT_GIT_SSH_KEY=${partial}/config/deploy_key`);
+    assert.doesNotMatch(template, /EMUCAT_APP_USER/);
+    for (const dir of [
+      'config',
+      'repo.git',
+      'releases',
+      'state/operations',
+      'state/builds',
+      'backups',
+    ]) {
+      mkdirSync(join(partial, dir), { recursive: true });
+    }
+    mkdirSync(`${partial}/data/media`, { recursive: true });
+    execFileSync('chown', ['root:emucat-deploy', `${partial}/config`]);
+    chmodSync(`${partial}/config`, 0o750);
+    writeFileSync(config, template, { mode: 0o640 });
+    writeFileSync(`${partial}/config/deploy_key`, 'EXISTING DEPLOY KEY\n', { mode: 0o600 });
+    writeFileSync(
+      `${partial}/config/app.env`,
+      'DB_NAME=emucat-db\nDB_USER=emucat-usr\nDB_PASSWORD=kept\n',
+    );
+    const before = {
+      config: readFileSync(config, 'utf8'),
+      key: readFileSync(`${partial}/config/deploy_key`, 'utf8'),
+      app: readFileSync(`${partial}/config/app.env`, 'utf8'),
+    };
+    const resume = () =>
+      spawnSync(CTL, ['init'], {
+        env: { ...env, EMUCAT_DEPLOY_CONFIG: config },
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = resume();
+        assert.equal(result.status, 0, result.stdout + result.stderr);
+        assert.match(result.stdout, /Keeping the existing/);
+        assert.doesNotMatch(result.stdout, /Created the deploy key|Created .*app\.env/);
+        assert.equal(readFileSync(config, 'utf8'), before.config);
+        assert.equal(readFileSync(`${partial}/config/deploy_key`, 'utf8'), before.key);
+        assert.equal(readFileSync(`${partial}/config/app.env`, 'utf8'), before.app);
+        const deploy = { uid: id('-u', 'emucat-deploy'), gid: id('-g', 'emucat-deploy') };
+        assert.deepEqual(owner(`${partial}/config/deploy_key`), { ...deploy, mode: 0o600 });
+        assert.deepEqual(owner(`${partial}/data/media`), { uid: 1000, gid: 1000, mode: 0o750 });
+        assert.ok(readFileSync(`${partial}/config/deployer.token`, 'utf8').length >= 32);
+      }
+      // Media that already holds files is never taken over, only reported.
+      writeFileSync(`${partial}/data/media/existing.jpg`, 'precious');
+      execFileSync('chown', ['-R', 'root:root', `${partial}/data/media`]);
+      const result = resume();
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /holds files but is not owned by david:david/);
+      assert.equal(owner(`${partial}/data/media`).uid, 0);
+      assert.equal(readFileSync(`${partial}/data/media/existing.jpg`, 'utf8'), 'precious');
+    } finally {
+      rmSync(partial, { recursive: true, force: true });
+    }
   });
 });

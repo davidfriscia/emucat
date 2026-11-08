@@ -33,6 +33,9 @@ services:
   api:
     <<: *hardening
     image: emucat-api:${EMUCAT_RELEASE:?EMUCAT_RELEASE is set by emucatctl to the deployed commit}
+    # The host account that owns the media (EMUCAT_APP_USER, david on the homelab servers: 1000:1000),
+    # resolved by emucatctl. Never root.
+    user: ${EMUCAT_APP_UID:?set EMUCAT_APP_UID}:${EMUCAT_APP_GID:?set EMUCAT_APP_GID}
     env_file:
       - path: ${EMUCAT_APP_ENV_FILE:?set EMUCAT_APP_ENV_FILE (EMUCAT_ROOT/config/app.env)}
         required: true

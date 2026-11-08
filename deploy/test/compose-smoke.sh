@@ -82,7 +82,10 @@ EMUCAT_APP_ENV_FILE=$(host_path "$root/config/app.env")
 EMUCAT_MEDIA_DIR=$(host_path "$root/data/media")
 EMUCAT_SOCKET_DIR=$(host_path "$work/socket")
 EMUCAT_DEPLOYER_TOKEN_FILE=$(host_path "$root/config/deployer.token")
-export EMUCAT_SOCKET_GID=10001 EMUCAT_HTTP_PORT=$http_port EMUCAT_BIND_ADDRESS=127.0.0.1
+# The socket group (any GID other than the application's) and the application account, david:david on the
+# homelab servers, as emucatctl resolves them.
+export EMUCAT_SOCKET_GID=990 EMUCAT_APP_UID=1000 EMUCAT_APP_GID=1000
+export EMUCAT_HTTP_PORT=$http_port EMUCAT_BIND_ADDRESS=127.0.0.1
 # Test-only networks, so as not to collide with a real installation on this machine.
 export EMUCAT_EDGE_SUBNET=172.31.243.0/24 EMUCAT_INTERNAL_SUBNET=172.31.244.0/24
 export EMUCAT_DATABASE_SUBNET=172.31.245.0/24
@@ -129,7 +132,11 @@ check "the agent WebSocket handshake reaches the API (401 without a credential)"
 api=$(compose ps -q api)
 web=$(compose ps -q web)
 inspect() { docker inspect --format "$2" "$1"; }
-check "API runs as UID 10001, not root" test "$(inspect "$api" '{{.Config.User}}')" = 10001:10001
+check "API runs as UID/GID 1000:1000, not root" test "$(inspect "$api" '{{.Config.User}}')" = 1000:1000
+check "the API process is UID 1000, GID 1000, and joins only the socket group" \
+  test "$(docker exec "$api" id -u):$(docker exec "$api" id -g):$(docker exec "$api" id -G)" = "1000:1000:1000 990"
+check "the API can read the deployment token (a Compose secret)" \
+  docker exec "$api" node -e "require('fs').readFileSync('/run/secrets/deployer_token')"
 check "API root filesystem is read-only" test "$(inspect "$api" '{{.HostConfig.ReadonlyRootfs}}')" = true
 check "web root filesystem is read-only" test "$(inspect "$web" '{{.HostConfig.ReadonlyRootfs}}')" = true
 check "no container is privileged" test "$(inspect "$api" '{{.HostConfig.Privileged}}')$(inspect "$web" '{{.HostConfig.Privileged}}')" = falsefalse
@@ -161,6 +168,8 @@ echo "Replacing the containers"
 docker exec "$api" node -e "require('fs').writeFileSync('/data/storage/survives.txt','kept')"
 compose up --detach --wait --wait-timeout 120 --force-recreate >/dev/null
 check "media written by the API is on the host" test "$(cat "$root/data/media/survives.txt")" = kept
+check "media files the API writes belong to UID/GID 1000" \
+  test "$(docker exec "$(compose ps -q api)" stat -c %u:%g /data/storage/survives.txt)" = 1000:1000
 check "media survives replacing the containers" \
   test "$(docker exec "$(compose ps -q api)" node -e "process.stdout.write(require('fs').readFileSync('/data/storage/survives.txt','utf8'))")" = kept
 check "the API cannot write outside its mounts" \

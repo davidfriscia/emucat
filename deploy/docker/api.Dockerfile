@@ -64,14 +64,13 @@ ENV NODE_ENV=production \
     STORAGE_PATH=/data/storage \
     EMUCAT_BUILD_COMMIT=${EMUCAT_COMMIT} \
     EMUCAT_BUILD_TIME=${EMUCAT_BUILD_TIME}
-# A fixed, unprivileged identity. Persistent directories on the host are owned by this UID and GID.
-RUN groupadd --system --gid 10001 emucat \
-    && useradd --system --uid 10001 --gid emucat --no-create-home --home-dir /nonexistent \
-       --shell /usr/sbin/nologin emucat \
-    && mkdir -p /data/storage && chown emucat:emucat /data/storage
+# Unprivileged: UID/GID 1000 (the base image's `node` account), the homelab's application identity.
+# Compose sets the same IDs from the host account that owns the media (EMUCAT_APP_USER). The application
+# files stay root-owned, so the process cannot change them.
+RUN mkdir -p /data/storage && chown 1000:1000 /data/storage
 WORKDIR /app
 COPY --from=prod --chown=root:root /prod/api ./
-USER 10001:10001
+USER 1000:1000
 EXPOSE 4000
 VOLUME ["/data/storage"]
 # Readiness, not just liveness: healthy means the database answers and the schema matches this build.
