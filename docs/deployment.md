@@ -285,6 +285,12 @@ docker build -f deploy/docker/web.Dockerfile --target runtime -t emucat-web:dev 
 `emucatctl` builds the `verify` target first when `EMUCAT_VERIFY=true`, so a release whose checks fail is
 never started.
 
+File modes in the images do not depend on the build context. `emucatctl` extracts each release as
+`emucat-deploy` under umask 027, so its files arrive as 0640 and its directories as 0750, and `COPY`
+keeps those modes. Both Dockerfiles therefore set them: everything under `/app` (migrations included) and
+the site and nginx configuration are root-owned, readable and traversable by all, and writable by root
+only. `pnpm test:compose` builds from a context exported the same way.
+
 ## 7. Docker Compose
 
 [`deploy/compose.yaml`](../deploy/compose.yaml) is the same file on every host; everything that differs is
@@ -547,6 +553,15 @@ again. It builds the compiled service, replaces the tooling, rewrites the unit, 
 waits for its socket. Configuration, deploy key, token, mirror, releases, backups, media and the database
 are left as they are; `init` is not needed again.
 
+**If the first `update` failed with** `Error: EACCES: permission denied, open
+'/app/migrations/0001_initial_schema.sql'` (the first MARS update): the API image kept the 0640 modes of
+the exported release, which UID 1000 cannot read. The migration runner reads every file before it
+connects, so nothing reached the database, and no release was recorded. Once a `develop` with fixed
+images is pushed, run `update` again (from Settings or `sudo /opt/emucat/tooling/bin/emucatctl update`):
+it is again a first deployment on an empty database, builds new images and applies all migrations.
+The failure message's "Restore before retrying" does not apply: there was no backup to restore and
+nothing to undo. Nothing on the host needs a permission change.
+
 ## 17. MOON
 
 Production, branch `main`, the same `/opt/emucat` layout and the same steps as MARS (copy from
@@ -629,7 +644,7 @@ socket, without changing anything.
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pnpm test`         | Includes the deployment service's unit tests and the API's update routes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `pnpm test:deploy`  | `emucatctl` and the real deployment service against disposable hosts, in a Linux container with fake `docker`, `curl` and MariaDB clients; then, as root in a fresh container, `init`, `install`, `check`, `update`, `backup` and `rollback-app` into the real `/opt/emucat`, checking every owner and mode. That installation builds the service with the real `deployer.Dockerfile`, and a stand-in `systemctl` starts it from the installed unit with the unit's identity and Node's TypeScript support off; the test checks its socket, an authenticated request, a failed build and the repair of a pre-compiled installation |
-| `pnpm test:compose` | Builds both images, runs `deploy/compose.yaml` against a disposable MariaDB outside Compose, and checks routing, caching, health, container security and media persistence                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `pnpm test:compose` | Builds both images from a context exported as `emucatctl` exports it (umask 027), runs migrations as UID/GID 1000:1000, runs `deploy/compose.yaml` against a disposable MariaDB outside Compose, and checks routing, caching, health, container security and media persistence                                                                                                                                                                                                                                                                                                                                                     |
 
 Both Docker-based tests create only resources named `emucat-smoke-*` or `emucat-deploy-test`, and remove
 them.

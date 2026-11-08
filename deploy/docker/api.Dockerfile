@@ -48,7 +48,12 @@ RUN pnpm --filter @emucat/contracts check \
 FROM build AS prod
 RUN --mount=type=cache,id=emucat-pnpm-store,target=/pnpm/store \
     pnpm --filter @emucat/api --prod deploy --legacy /prod/api \
-    && rm -rf /prod/api/src /prod/api/test /prod/api/e2e /prod/api/tsconfig*.json /prod/api/vitest.config.ts
+    && rm -rf /prod/api/src /prod/api/test /prod/api/e2e /prod/api/tsconfig*.json /prod/api/vitest.config.ts \
+    && chmod -R u=rwX,go=rX /prod/api
+# ^ The build context keeps the modes it was exported with: emucatctl extracts releases under umask 027,
+#   so files arrive as 0640 and directories as 0750, which the runtime user (UID 1000, "other" to these
+#   root-owned files) could neither read nor enter. Everything the API runs or reads, migrations
+#   included, is made readable and traversable by all and writable by root only.
 
 FROM ${NODE_IMAGE} AS runtime
 ARG EMUCAT_COMMIT=

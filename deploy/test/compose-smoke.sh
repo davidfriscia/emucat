@@ -42,11 +42,23 @@ trap cleanup EXIT
 
 commit=$(git -C "$repo" rev-parse HEAD)
 built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# The build context as a server gets it: emucatctl extracts each release as the deployment account under
+# umask 027 (files 0640, directories 0750). The working tree (tracked and new files) is extracted that
+# way in a Linux container by a non-root user, and the result goes to docker build as a tar stream, which
+# keeps those modes. A checkout on Windows would otherwise show Docker permissive modes.
+echo "Exporting the build context as emucatctl does (non-root, umask 027)"
+context=$work/context.tar
+(cd "$repo" && git ls-files -z --cached --others --exclude-standard |
+  while IFS= read -r -d '' file; do [[ -e $file ]] && printf '%s\0' "$file"; done |
+  tar --null --files-from=- -cf -) |
+  docker run --rm -i --user 4242:4242 --entrypoint sh node:22.22.3-bookworm-slim -c \
+    'umask 027 && mkdir /tmp/c && tar -x -C /tmp/c && tar -c -C /tmp/c .' >"$context"
+migration_mode=$(tar -tvf "$context" ./apps/api/migrations/0001_initial_schema.sql | cut -c1-10)
 echo "Building images for $commit"
 for component in api web; do
-  docker build --quiet --file "$repo/deploy/docker/$component.Dockerfile" --target runtime \
+  docker build --quiet --file "deploy/docker/$component.Dockerfile" --target runtime \
     --tag "emucat-$component:smoke-$id" --build-arg "EMUCAT_COMMIT=$commit" \
-    --build-arg "EMUCAT_BUILD_TIME=$built" "$repo" >/dev/null
+    --build-arg "EMUCAT_BUILD_TIME=$built" - <"$context" >/dev/null
 done
 
 echo "Starting a disposable MariaDB (outside Compose, as on a real host)"
@@ -93,7 +105,11 @@ compose() { docker compose --file "$repo/deploy/compose.yaml" "$@"; }
 COMPOSE_READY=1
 
 echo "Applying migrations as a controlled step"
-migrate=$(compose run --rm --no-deps -T api node dist/db/migrate-cli.js 2>&1)
+if ! migrate=$(compose run --rm --no-deps -T api node dist/db/migrate-cli.js 2>&1); then
+  echo "$migrate" | sed 's/^/  /'
+  echo "  FAIL  the migration runner failed (as UID/GID 1000:1000)"
+  exit 1
+fi
 echo "$migrate" | sed 's/^/  /'
 echo "Starting the application"
 compose up --detach --wait --wait-timeout 120 >/dev/null
@@ -102,9 +118,17 @@ base=http://127.0.0.1:$http_port
 headers() { curl --silent --output /dev/null --dump-header - "$base$1" | tr -d '\r'; }
 body() { curl --silent "$base$1"; }
 has() { grep -qi -- "$2" <<<"$1"; }
+lacks() { ! grep -qi -- "$2" <<<"$1"; }
+
+migrate_again=$(compose run --rm --no-deps -T api node dist/db/migrate-cli.js 2>&1)
 
 echo "Checks"
-check "migrations ran against the external database" has "$migrate" 'Applied [1-9]'
+check "the build context had the server's modes (migration file 0640)" test "$migration_mode" = '-rw-r-----'
+check "migrations ran against the external database, as UID/GID 1000:1000" has "$migrate" 'Applied [1-9]'
+check "no EACCES reading the migrations" lacks "$migrate$migrate_again" 'EACCES'
+check "a second migration run is a no-op (retrying is safe)" has "$migrate_again" 'Database is up to date'
+check "the migration container runs as 1000:1000" \
+  test "$(compose run --rm --no-deps -T api sh -c 'echo $(id -u):$(id -g)' 2>/dev/null | tr -d '\r')" = 1000:1000
 for variable in EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_DEPLOYER_TOKEN_FILE; do
   check "Compose has no default for $variable (no fallback outside EMUCAT_ROOT)" bash -c \
     "! env -u $variable docker compose --file '$repo/deploy/compose.yaml' config --quiet 2>/dev/null"
@@ -137,6 +161,9 @@ check "the API process is UID 1000, GID 1000, and joins only the socket group" \
   test "$(docker exec "$api" id -u):$(docker exec "$api" id -g):$(docker exec "$api" id -G)" = "1000:1000:1000 990"
 check "the API can read the deployment token (a Compose secret)" \
   docker exec "$api" node -e "require('fs').readFileSync('/run/secrets/deployer_token')"
+check "every file and directory of the API is readable by its UID (1000)" \
+  test -z "$(docker exec "$api" find /app ! -readable -print -quit)"
+check "the API's files are root-owned" test -z "$(docker exec "$api" find /app ! -user 0 -print -quit)"
 check "API root filesystem is read-only" test "$(inspect "$api" '{{.HostConfig.ReadonlyRootfs}}')" = true
 check "web root filesystem is read-only" test "$(inspect "$web" '{{.HostConfig.ReadonlyRootfs}}')" = true
 check "no container is privileged" test "$(inspect "$api" '{{.HostConfig.Privileged}}')$(inspect "$web" '{{.HostConfig.Privileged}}')" = falsefalse
