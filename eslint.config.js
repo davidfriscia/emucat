@@ -12,7 +12,7 @@ export default tseslint.config(
       'scripts/**/*.mjs',
       'eslint.config.js',
       'apps/api/**/*.ts',
-      'apps/deployer/**/*.ts',
+      'apps/deployer/**/*.{ts,mjs}',
       'packages/**/*.ts',
     ],
     languageOptions: { globals: globals.node },

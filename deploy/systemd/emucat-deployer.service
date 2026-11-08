@@ -19,7 +19,9 @@ Group=@SOCKET_GROUP@
 SupplementaryGroups=@DEPLOY_USER@
 Environment=EMUCAT_DEPLOY_CONFIG=@CONFIG@
 Environment=HOME=@ROOT@/state/home
-ExecStart=@NODE@ --disable-warning=ExperimentalWarning @ROOT@/tooling/deployer/src/main.ts
+# Compiled JavaScript (deploy/docker/deployer.Dockerfile): any Node.js 22 runs it, with or without its
+# TypeScript support.
+ExecStart=@NODE@ @ROOT@/tooling/deployer/main.js
 Restart=on-failure
 RestartSec=5
 

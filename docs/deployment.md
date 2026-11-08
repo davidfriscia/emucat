@@ -81,7 +81,8 @@ modes, and every `install` puts those of the directories and of `config/` back:
 
 ```
 /opt/emucat/                 root:root                    0755
-├── tooling/                 root:root                    0755  emucatctl, the deployment service, the unit template
+├── tooling/                 root:root                    0755  bin/emucatctl, systemd/ (the unit template) and
+│                                                               deployer/: the deployment service, compiled to JavaScript
 ├── repo.git/                emucat-deploy:emucat-deploy  0750  bare mirror of the one configured branch
 ├── releases/                emucat-deploy:emucat-deploy  0750  each release's compose.yaml and migration list
 ├── config/                  root:emucat-deploy           0750
@@ -113,9 +114,12 @@ needs to exist outside `/opt/emucat` before installing.
 ## 2. Host prerequisites
 
 - A 64-bit Linux distribution with systemd (Debian 12 or Ubuntu 24.04 are the reference).
-- **Docker Engine 24 or later** with the Compose v2 plugin (`docker compose version`), and BuildKit.
-- **Node.js 22.18 or later** on the host, for the deployment service (it runs TypeScript directly, with no
-  dependencies). The containers bring their own Node.js.
+- **Docker Engine 24 or later** with the Compose v2 plugin (`docker compose version`) and BuildKit
+  (`docker buildx version`, package `docker-buildx-plugin`).
+- **Node.js 22** on the host, for the deployment service. Any build of it will do, the distribution's own
+  `nodejs` package included: `install` compiles the service to plain JavaScript in a container, so the host
+  needs no TypeScript support, no global npm packages and no `node_modules`. The containers bring their
+  own Node.js.
 - `git`, `flock` and `runuser` (util-linux), `curl`, `gzip`, and the MariaDB client tools `mariadb` and
   `mariadb-dump` (package `mariadb-client`).
 - MariaDB 11.4 or later already running on the host (see below).
@@ -345,9 +349,14 @@ before `install`); its owner and mode are set for you.
 
 `install` is repeatable. It checks the configuration and prerequisites, re-creates any missing
 directory and puts owners and modes back. It never changes existing media: a `data/media` not owned by
-the application account is handed over only while it is empty, otherwise it just warns. It copies
-`emucatctl` and the deployment service to `/opt/emucat/tooling` owned by root, clones the bare mirror of the configured branch into `repo.git`, writes
-`/etc/systemd/system/emucat-deployer.service` from the template, and starts the service.
+the application account is handed over only while it is empty, otherwise it just warns. It builds the
+deployment service from `deploy/docker/deployer.Dockerfile` (TypeScript compiled to JavaScript with the
+lockfile's toolchain, then loaded once with Node's TypeScript support switched off), and only then
+replaces `/opt/emucat/tooling` with `emucatctl`, that build and the unit template, owned by root. A failed
+build leaves the installed tooling and the running service as they were. It clones the bare mirror of the
+configured branch into `repo.git`, writes `/etc/systemd/system/emucat-deployer.service` from the
+template, restarts the service (clearing an earlier failed state) and waits up to 30 seconds for it to
+answer an authenticated request on its socket; if it does not, `install` fails and points at the journal.
 
 The first `update` builds, backs up the (empty) database, applies all migrations and starts the
 containers. Then create the first administrator at the public address: the setup token is `SETUP_TOKEN`
@@ -358,7 +367,8 @@ application is stopped.
 
 ## 9. The deployment service
 
-`emucat-deployer.service` runs `/opt/emucat/tooling/deployer/src/main.ts` as `emucat-deploy`, group
+`emucat-deployer.service` runs `node /opt/emucat/tooling/deployer/main.js` (the compiled service: plain
+ES modules with no dependencies besides Node.js) as `emucat-deploy`, group
 `emucat-socket` (plus the account's own group, which can read `config/`), with
 `HOME=/opt/emucat/state/home`. systemd makes the whole file system read-only to it except `state/`,
 `releases/`, `repo.git/` and `backups/`; `config/` and `tooling/` are read-only even to its account. It:
@@ -528,6 +538,15 @@ the application account was configurable): copy a newer `origin/develop` the sam
 there; it creates only what is missing, and gives an empty `data/media` to `david:david`. Then continue
 with the steps after `init`.
 
+**If the deployment service keeps restarting** with `TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file
+extension ".ts" for /opt/emucat/tooling/deployer/src/main.ts` in `journalctl -u emucat-deployer`, and
+`check` fails only at `deployment service socket` (the first MARS installation): that tooling ran the
+TypeScript sources directly, which needs a Node.js with TypeScript support, and Ubuntu's `nodejs` package
+is built without it. Copy a newer `origin/develop` the same way and run `sudo deploy/bin/emucatctl install`
+again. It builds the compiled service, replaces the tooling, rewrites the unit, restarts the service and
+waits for its socket. Configuration, deploy key, token, mirror, releases, backups, media and the database
+are left as they are; `init` is not needed again.
+
 ## 17. MOON
 
 Production, branch `main`, the same `/opt/emucat` layout and the same steps as MARS (copy from
@@ -582,32 +601,35 @@ host.
 
 ## 20. Troubleshooting
 
-| Symptom                                    | Look at                                                                                                                                |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Settings: "deployment service unavailable" | `systemctl status emucat-deployer`, `journalctl -u emucat-deployer`; socket and token permissions; the API's GID (`EMUCAT_SOCKET_GID`) |
-| Settings: "not configured"                 | The API runs without `DEPLOYER_SOCKET` (not under `deploy/compose.yaml`)                                                               |
-| `update` exits 75                          | Another update holds the lock; `emucatctl status`                                                                                      |
-| "target_changed"                           | The branch moved after the check; check again                                                                                          |
-| Build or test stage fails                  | `state/operations/<id>.log`; the running release is untouched                                                                          |
-| Backup fails                               | MariaDB reachable from the host as `emucat-usr`? Disk space in `/opt/emucat/backups`                                                   |
-| API unhealthy after start                  | `emucatctl logs api`: database address, firewall, `bind-address`, migrations                                                           |
-| `cross_origin_rejected` at sign-in         | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
-| Client addresses are the proxy's           | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
-| Agents disconnect every minute             | Proxy WebSocket timeouts (section 15)                                                                                                  |
-| Media permission errors                    | `/opt/emucat/data/media` must be owned by `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (david:david, 1000:1000)                                  |
-| An update shows "interrupted"              | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
-| `rollback-app` exits 3                     | The database is newer than that release; restore a dump or fix forward                                                                 |
+| Symptom                                              | Look at                                                                                                                                |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Settings: "deployment service unavailable"           | `systemctl status emucat-deployer`, `journalctl -u emucat-deployer`; socket and token permissions; the API's GID (`EMUCAT_SOCKET_GID`) |
+| Settings: "not configured"                           | The API runs without `DEPLOYER_SOCKET` (not under `deploy/compose.yaml`)                                                               |
+| `update` exits 75                                    | Another update holds the lock; `emucatctl status`                                                                                      |
+| "target_changed"                                     | The branch moved after the check; check again                                                                                          |
+| Build or test stage fails                            | `state/operations/<id>.log`; the running release is untouched                                                                          |
+| Backup fails                                         | MariaDB reachable from the host as `emucat-usr`? Disk space in `/opt/emucat/backups`                                                   |
+| API unhealthy after start                            | `emucatctl logs api`: database address, firewall, `bind-address`, migrations                                                           |
+| `cross_origin_rejected` at sign-in                   | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
+| Client addresses are the proxy's                     | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
+| Agents disconnect every minute                       | Proxy WebSocket timeouts (section 15)                                                                                                  |
+| Service restarts, `ERR_UNKNOWN_FILE_EXTENSION` `.ts` | Tooling from before the compiled service; run `install` again from a current checkout (section 16)                                     |
+| `install`: "did not answer on its socket"            | `journalctl -u emucat-deployer -n 50`; `check`; is `node` on root's `PATH` the one in the unit's `ExecStart`?                          |
+| Media permission errors                              | `/opt/emucat/data/media` must be owned by `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (david:david, 1000:1000)                                  |
+| An update shows "interrupted"                        | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
+| `rollback-app` exits 3                               | The database is newer than that release; restore a dump or fix forward                                                                 |
 
 `sudo /opt/emucat/tooling/bin/emucatctl check` verifies the configuration, tools, Docker, MariaDB, the
-mirror and the socket without changing anything.
+mirror, the installed service program and that the service answers an authenticated request on its
+socket, without changing anything.
 
 ## Testing this tooling
 
-| Command             | What it runs                                                                                                                                                                                                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm test`         | Includes the deployment service's unit tests and the API's update routes                                                                                                                                                                                                                                    |
-| `pnpm test:deploy`  | `emucatctl` and the real deployment service against disposable hosts, in a Linux container with fake `docker`, `curl` and MariaDB clients; then, as root in a fresh container, `init`, `install`, `check`, `update`, `backup` and `rollback-app` into the real `/opt/emucat`, checking every owner and mode |
-| `pnpm test:compose` | Builds both images, runs `deploy/compose.yaml` against a disposable MariaDB outside Compose, and checks routing, caching, health, container security and media persistence                                                                                                                                  |
+| Command             | What it runs                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm test`         | Includes the deployment service's unit tests and the API's update routes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pnpm test:deploy`  | `emucatctl` and the real deployment service against disposable hosts, in a Linux container with fake `docker`, `curl` and MariaDB clients; then, as root in a fresh container, `init`, `install`, `check`, `update`, `backup` and `rollback-app` into the real `/opt/emucat`, checking every owner and mode. That installation builds the service with the real `deployer.Dockerfile`, and a stand-in `systemctl` starts it from the installed unit with the unit's identity and Node's TypeScript support off; the test checks its socket, an authenticated request, a failed build and the repair of a pre-compiled installation |
+| `pnpm test:compose` | Builds both images, runs `deploy/compose.yaml` against a disposable MariaDB outside Compose, and checks routing, caching, health, container security and media persistence                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 Both Docker-based tests create only resources named `emucat-smoke-*` or `emucat-deploy-test`, and remove
 them.

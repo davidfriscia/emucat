@@ -1,7 +1,53 @@
 #!/usr/bin/env bash
-# A stand-in for systemctl in the installation test: records the call and succeeds. No service starts.
+# A stand-in for systemctl in the installation test. It records every call. Run as root, `start` or
+# `restart emucat-deployer.service` starts the real deployment service the way systemd would from the
+# installed unit: its ExecStart, User=, Group=, SupplementaryGroups= (plus the account's own groups),
+# Environment=, UMask= and RuntimeDirectory=, detached, with its output in fake/deployer.log. `stop`
+# ends it. NODE_OPTIONS switches off Node's TypeScript support, as in a Node.js built without it
+# (Ubuntu's own nodejs package), so the unit must run compiled JavaScript.
 set -uo pipefail
 fake=$(dirname -- "${EMUCAT_DEPLOY_CONFIG:?}")/fake
+# Root (install) and the deployment account (updates) both write the records here.
+umask 0000
 mkdir -p "$fake"
 printf 'systemctl %s\n' "$*" >>"$fake/calls"
+unit=/etc/systemd/system/emucat-deployer.service
+pidfile=$fake/deployer.pid
+
+stop_service() {
+  local pid
+  pid=$(cat "$pidfile" 2>/dev/null) || return 0
+  kill "$pid" 2>/dev/null
+  for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  rm -f "$pidfile"
+}
+
+start_service() {
+  [[ $EUID -eq 0 && -f $unit ]] || return 0
+  stop_service
+  value() { sed -n "s/^$1=//p" "$unit" | tail -n 1; }
+  local user group extra exec umask runtime mode uid gid groups environment=()
+  user=$(value User) group=$(value Group) extra=$(value SupplementaryGroups) exec=$(value ExecStart)
+  umask=$(value UMask) runtime=$(value RuntimeDirectory) mode=$(value RuntimeDirectoryMode)
+  uid=$(id -u "$user") gid=$(getent group "$group" | cut -d: -f3)
+  # As systemd does: initgroups() with Group= (the groups that list the account as a member, not its own
+  # primary group from passwd), then SupplementaryGroups=.
+  groups=$( {
+    echo "$gid"
+    getent group | awk -F: -v user="$user" '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == user) print $3 }'
+    for name in $extra; do getent group "$name" | cut -d: -f3; done
+  } | sort -un | paste -sd,)
+  while IFS= read -r line; do environment+=("$line"); done < <(sed -n "s/^Environment=//p" "$unit")
+  install -d -o "$user" -g "$group" -m "${mode:-0755}" "/run/$runtime"
+  # shellcheck disable=SC2086 # ExecStart is a command line.
+  (umask "${umask:-0022}" && exec setpriv --reuid="$uid" --regid="$gid" --groups="$groups" \
+    env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 NODE_OPTIONS=--no-experimental-strip-types \
+    "${environment[@]}" $exec) >>"$fake/deployer.log" 2>&1 </dev/null &
+  echo $! >"$pidfile"
+}
+
+case "${1:-} ${2:-}" in
+  "start emucat-deployer.service" | "restart emucat-deployer.service") start_service ;;
+  "stop emucat-deployer.service") stop_service ;;
+esac
 exit 0

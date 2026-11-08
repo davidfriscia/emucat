@@ -27,6 +27,12 @@ The first deployment layout spread EmuCat over `/etc/emucat` (configuration and 
   1000:1000, the homelab convention for application containers), which also owns `data/media`. There is
   no dedicated application account and no fixed UID in the tooling; the IDs are resolved from the names.
   That account gets no host group: the container alone joins `emucat-socket` by GID.
+- **The deployment service is installed compiled.** `install` builds `apps/deployer` into plain
+  JavaScript ES modules with `deploy/docker/deployer.Dockerfile` (the lockfile's TypeScript, in a
+  container) and the unit runs `tooling/deployer/main.js`. Running the `.ts` sources directly relied on
+  Node's built-in type stripping, which is optional at build time: Ubuntu's `nodejs` package lacks it, and
+  the first MARS installation failed with `ERR_UNKNOWN_FILE_EXTENSION`. The host now needs any Node.js
+  22 and BuildKit, and nothing from npm.
 - The deployment service additionally gets the account's own group (`SupplementaryGroups=`), since
   `Group=emucat-socket` would otherwise drop the group that can read `config/`.
 

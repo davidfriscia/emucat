@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
     "test": "vitest run"
   },

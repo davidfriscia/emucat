@@ -831,7 +831,28 @@ node_new_enough() {
   local version
   version=$(node --version 2>/dev/null) || return 1
   [[ $version =~ ^v([0-9]+)\.([0-9]+) ]] || return 1
-  ((BASH_REMATCH[1] > 22 || (BASH_REMATCH[1] == 22 && BASH_REMATCH[2] >= 18)))
+  ((BASH_REMATCH[1] >= 22))
+}
+# Asks the deployment service for its status over its socket, with the token, as the API does. True only
+# if it answers 200. The token is read from its file, never put on a command line.
+SERVICE_PROBE='
+import { readFileSync } from "node:fs";
+import { request } from "node:http";
+const [socketPath, tokenFile] = process.argv.slice(1);
+const token = readFileSync(tokenFile, "utf8").trim();
+const req = request({ socketPath, path: "/v1/status", timeout: 5000,
+  headers: { authorization: `Bearer ${token}` } }, (response) => {
+  response.resume();
+  process.exit(response.statusCode === 200 ? 0 : 1);
+});
+req.on("timeout", () => req.destroy());
+req.on("error", () => process.exit(1));
+req.end();
+'
+service_answers() {
+  [[ -S $EMUCAT_SOCKET_DIR/deployer.sock ]] &&
+    node --input-type=module -e "$SERVICE_PROBE" "$EMUCAT_SOCKET_DIR/deployer.sock" \
+      "$EMUCAT_DEPLOYER_TOKEN_FILE" 2>/dev/null
 }
 mode_at_most() {
   local file=$1 max=$2 mode
@@ -864,7 +885,7 @@ cmd_check() {
   done
   check_item "docker compose v2 is available" docker compose version
   check_item "Docker is reachable" docker info
-  check_item "node 22.18 or later (deployment service)" node_new_enough
+  check_item "node 22 or later (deployment service)" node_new_enough
   say "Configuration files ($CONFIG_DIR)"
   check_item "$CONFIG_DIR is root-owned and closed to others" owned_with_mode "$CONFIG_DIR" 0 750
   check_item "$CONFIG_PATH is root-owned and not world-readable" owned_with_mode "$CONFIG_PATH" 0 640
@@ -893,6 +914,9 @@ cmd_check() {
   check_item "$EMUCAT_APP_USER is not a member of $EMUCAT_SOCKET_GROUP on the host (only the container is)" \
     not_in_group "$EMUCAT_APP_USER" "$EMUCAT_SOCKET_GROUP"
   check_item "deployment service socket" test -S "$EMUCAT_SOCKET_DIR/deployer.sock"
+  check_item "deployment service program $TOOLING/deployer/main.js (compiled JavaScript)" \
+    test -f "$TOOLING/deployer/main.js"
+  check_item "the deployment service answers an authenticated request" service_answers
   say "Connectivity"
   check_item "MariaDB accepts the application account ($EMUCAT_HOST_DB_HOST)" database_answers
   check_item "the Git remote answers for $EMUCAT_BRANCH" git_repo ls-remote --exit-code --heads origin "$EMUCAT_BRANCH"
@@ -1082,7 +1106,9 @@ cmd_install() {
   for tool in docker git flock curl gzip mariadb mariadb-dump node systemctl runuser; do
     command -v "$tool" >/dev/null || abort "$tool is not installed"
   done
-  node_new_enough || abort "the deployment service needs Node.js 22.18 or later on the host"
+  node_new_enough || abort "the deployment service needs Node.js 22 or later on the host"
+  docker buildx version >/dev/null 2>&1 ||
+    abort "Docker BuildKit is required to build the deployment service (package docker-buildx-plugin)"
   [[ -f $EMUCAT_APP_ENV_FILE ]] || abort "$EMUCAT_APP_ENV_FILE does not exist; run emucatctl init first"
   if ! todo=$(configuration_todo); then
     printf '%s\n' "$todo" >&2
@@ -1097,7 +1123,20 @@ cmd_install() {
   staged=$(mktemp -d "$EMUCAT_ROOT/tooling.XXXXXX")
   install -d -m 0755 "$staged/bin" "$staged/deployer" "$staged/systemd"
   install -m 0755 "$source/deploy/bin/emucatctl" "$staged/bin/emucatctl"
-  cp -R -- "$source/apps/deployer/src" "$staged/deployer/src"
+  # The deployment service, compiled to plain JavaScript in a container from this checkout's lockfile, so
+  # that the host's Node.js needs no TypeScript support, global packages or node_modules. Built before
+  # anything is replaced: a failed build leaves the installed tooling as it was.
+  say "Building the deployment service (deploy/docker/deployer.Dockerfile)"
+  if ! docker build --file "$source/deploy/docker/deployer.Dockerfile" --target artifact \
+    --output "type=local,dest=$staged/deployer" "$source"; then
+    rm -rf -- "$staged"
+    abort "cannot build the deployment service; see the build output above"
+  fi
+  if [[ ! -f $staged/deployer/main.js || ! -f $staged/deployer/package.json ]] ||
+    find "$staged/deployer" -name '*.ts' | grep -q .; then
+    rm -rf -- "$staged"
+    abort "the deployment service build did not produce compiled JavaScript (deployer/main.js)"
+  fi
   install -m 0644 "$source/deploy/systemd/emucat-deployer.service" "$staged/systemd/"
   chown -R root:root -- "$staged"
   # Readable by everyone (the service runs it as emucat-deploy), writable by root only, whatever modes the
@@ -1131,8 +1170,21 @@ cmd_install() {
   chmod 0644 "$unit.tmp"
   mv -- "$unit.tmp" "$unit"
   systemctl daemon-reload
-  systemctl enable --now emucat-deployer.service
+  systemctl enable emucat-deployer.service
+  # A service that could not start (an earlier installation) may have hit systemd's start limit.
+  systemctl reset-failed emucat-deployer.service 2>/dev/null || true
   systemctl restart emucat-deployer.service
+
+  say "Waiting for the deployment service on $EMUCAT_SOCKET_DIR/deployer.sock"
+  local deadline=$((SECONDS + 30))
+  until service_answers; do
+    if ((SECONDS >= deadline)); then
+      say "  journalctl -u emucat-deployer.service -n 50 --no-pager   shows why"
+      abort "the deployment service did not answer on its socket within 30 seconds"
+    fi
+    sleep 1
+  done
+  say "The deployment service answers."
 
   say ""
   say "Installed. Next:"

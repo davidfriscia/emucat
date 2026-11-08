@@ -1,0 +1,18 @@
+{
+  // The production build of the deployment service: plain JavaScript in dist/, which any Node.js 22 runs
+  // without TypeScript support (Ubuntu's own nodejs package, for one, is built without it). The sources
+  // import each other with .ts extensions, rewritten to .js here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": false,
+    "declaration": false,
+    "removeComments": false,
+    "newLine": "lf"
+  },
+  "include": ["src"]
+}

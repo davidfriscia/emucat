@@ -4,8 +4,12 @@
 #   fail                 build | verify | migrate | up      makes that step fail
 #   build_sleep          seconds each image build takes
 #   migrations_applied   how many migrations the migration step reports
+# A build exported with --output (the deployment service, deploy/docker/deployer.Dockerfile) receives the
+# artifact that deploy/test/integration.sh built with the real Docker, from $EMUCAT_TEST_DEPLOYER_ARTIFACT.
 set -uo pipefail
 fake=$(dirname -- "${EMUCAT_DEPLOY_CONFIG:?}")/fake
+# Root (install) and the deployment account (updates) both write the records here.
+umask 0000
 mkdir -p "$fake"
 touch "$fake/images"
 printf 'docker %s\n' "$*" >>"$fake/calls"
@@ -13,15 +17,25 @@ fail=$(cat "$fake/fail" 2>/dev/null || true)
 
 case ${1:-} in
   info) exit 0 ;;
+  buildx) [[ ${2:-} == version ]] && { echo 'github.com/docker/buildx v0 (fake)'; exit 0; } ;;
   build)
-    target='' tag=''
+    target='' tag='' output=''
     while (($#)); do
       case $1 in
         --target) target=$2; shift ;;
         --tag) tag=$2; shift ;;
+        --output) output=$2; shift ;;
       esac
       shift
     done
+    if [[ -n $output ]]; then
+      artifact=${EMUCAT_TEST_DEPLOYER_ARTIFACT:-}
+      [[ $target == artifact && $output == type=local,dest=* && -f $artifact/main.js ]] ||
+        { echo "fake docker: no deployment service artifact for $output" >&2; exit 1; }
+      [[ $fail == deployer ]] && { echo "deployer build failed" >&2; exit 1; }
+      cp -R -- "$artifact"/. "${output#type=local,dest=}"
+      exit 0
+    fi
     # Output a secret, as a careless build step might: the log shown to administrators must hide it.
     echo "#5 [build] DB_PASSWORD=$(sed -n 's/^DB_PASSWORD=//p' "$fake/../app.env") https://user:ghp_abcdefghijklmnopqrstuvwx@github.com/x.git"
     sleep "$(cat "$fake/build_sleep" 2>/dev/null || echo 0)"

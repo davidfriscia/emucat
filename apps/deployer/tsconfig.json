@@ -3,8 +3,9 @@
   "compilerOptions": {
     "types": ["node"],
     "noEmit": true,
-    // The service runs directly from these sources with Node's type stripping, on the host, with no
-    // build step and no dependencies: only syntax Node can erase is allowed.
+    // In development and in the tests the sources run directly with Node's type stripping, so only
+    // syntax Node can erase is allowed. Servers run the compiled build instead (tsconfig.build.json),
+    // because not every Node.js has type stripping (Ubuntu's own package does not).
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true
   },

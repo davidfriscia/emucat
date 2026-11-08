@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -22,6 +22,11 @@ import { CTL, REPOSITORY } from './harness.ts';
  * `check`, `update`, `backup` and `rollback-app` through the installed, root-owned tooling. Runs as root
  * only, in its own container (`pnpm test:deploy` starts it); docker, systemctl, curl and the MariaDB
  * clients are fakes. Elsewhere it is skipped.
+ *
+ * The deployment service itself is real: the compiled artifact that deploy/test/integration.sh built from
+ * deploy/docker/deployer.Dockerfile with the real Docker, which the fake docker hands to `install`. The
+ * fake systemctl starts it from the installed unit, with the unit's identity and with Node's TypeScript
+ * support switched off, as on a Node.js built without it.
  */
 
 const ROOT = '/opt/emucat';
@@ -34,7 +39,10 @@ const env = {
   PATH: process.env.PATH,
   LANG: 'C.UTF-8',
   EMUCAT_DEPLOY_CONFIG: CONFIG,
+  EMUCAT_TEST_DEPLOYER_ARTIFACT: process.env.EMUCAT_TEST_DEPLOYER_ARTIFACT,
 };
+const UNIT = '/etc/systemd/system/emucat-deployer.service';
+const SOCKET = '/run/emucat-deployer/deployer.sock';
 
 function run(ctl: string, ...args: string[]) {
   return spawnSync(ctl, args, { env, encoding: 'utf8', timeout: 120_000 });
@@ -60,42 +68,43 @@ function git(cwd: string, ...args: string[]): string {
   ).trim();
 }
 
-/**
- * Starts the installed deployment service with the identity its unit gives it: User=emucat-deploy,
- * Group=emucat-socket, SupplementaryGroups=emucat-deploy (plus docker, from the account's membership), in
- * the RuntimeDirectory systemd would create.
- */
-async function startDeployer(
-  deploy: { uid: number; gid: number },
-  socket: number,
-): Promise<ChildProcess> {
-  mkdirSync('/run/emucat-deployer', { recursive: true, mode: 0o750 });
-  execFileSync('chown', ['emucat-deploy:emucat-socket', '/run/emucat-deployer']);
-  chmodSync('/run/emucat-deployer', 0o750);
-  const child = spawn(
-    'setpriv',
-    [
-      `--reuid=${deploy.uid}`,
-      `--regid=${socket}`,
-      `--groups=${deploy.gid},${socket},${gid('docker')}`,
-      process.execPath,
-      '--disable-warning=ExperimentalWarning',
-      `${ROOT}/tooling/deployer/src/main.ts`,
-    ],
-    { env: { ...env, HOME: `${ROOT}/state/home` }, stdio: ['ignore', 'pipe', 'pipe'] },
-  );
-  let output = '';
-  child.stdout?.on('data', (chunk: Buffer) => (output += chunk.toString()));
-  child.stderr?.on('data', (chunk: Buffer) => (output += chunk.toString()));
-  const deadline = Date.now() + 10_000;
-  while (!output.includes('listening on')) {
-    if (Date.now() > deadline || child.exitCode !== null) {
-      throw new Error(`The deployment service did not start: ${output}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return child;
+/** The process the (fake) systemd started for the unit, as the kernel sees it. */
+function serviceProcess(): {
+  pid: number;
+  uid: number;
+  gid: number;
+  groups: number[];
+  cmdline: string[];
+} {
+  const pid = Number(readFileSync(join(FAKE, 'deployer.pid'), 'utf8').trim());
+  const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+  const field = (name: string) =>
+    (new RegExp(`^${name}:(.*)$`, 'm').exec(status)?.[1] ?? '').trim();
+  return {
+    pid,
+    uid: Number(field('Uid').split(/\s+/)[0]),
+    gid: Number(field('Gid').split(/\s+/)[0]),
+    groups: field('Groups')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(Number)
+      .sort((a, b) => a - b),
+    cmdline: readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean),
+  };
 }
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function systemctl(...args: string[]) {
+  return spawnSync('systemctl', args, { env, encoding: 'utf8' });
+}
+const serviceLog = () => readFileSync(join(FAKE, 'deployer.log'), 'utf8');
+const sortNumbers = (values: number[]) => [...values].sort((a, b) => a - b);
 
 const CLIENT = `
 import { readFileSync } from 'node:fs';
@@ -142,7 +151,29 @@ const OUTSIDE = [
 ];
 
 describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root' }, () => {
-  it('bootstraps, installs and operates the whole layout', async () => {
+  it('cannot run the TypeScript sources on a Node.js without TypeScript support (the MARS failure)', () => {
+    const result = spawnSync(
+      process.execPath,
+      ['--no-experimental-strip-types', join(REPOSITORY, 'apps/deployer/src/main.ts')],
+      { encoding: 'utf8', env: { PATH: process.env.PATH, EMUCAT_DEPLOY_CONFIG: '/nonexistent' } },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ERR_UNKNOWN_FILE_EXTENSION/);
+    assert.ok(
+      process.env.EMUCAT_TEST_DEPLOYER_ARTIFACT,
+      'integration.sh provides the built artifact',
+    );
+  });
+
+  it('bootstraps, installs and operates the whole layout', () => {
+    try {
+      installAndOperate();
+    } finally {
+      systemctl('stop', 'emucat-deployer.service');
+    }
+  });
+
+  function installAndOperate() {
     for (const path of [ROOT, ...OUTSIDE]) assert.equal(existsSync(path), false, path);
     const deploy = { uid: id('-u', 'emucat-deploy'), gid: id('-g', 'emucat-deploy') };
     const socket = gid('emucat-socket');
@@ -233,9 +264,11 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
     mkdirSync(FAKE, { recursive: true });
     chmodSync(FAKE, 0o777);
 
-    // 3. install: tooling, mirror, unit.
+    // 3. install: tooling, mirror, unit, and the service started and answering.
     result = run(CTL, 'install');
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /Building the deployment service/);
+    assert.match(result.stdout, /The deployment service answers\./);
     expected[`${ROOT}/config/known_hosts`] = [0, deploy.gid, 0o640];
     checkLayout();
     assert.deepEqual(owner(`${ROOT}/tooling`), { uid: 0, gid: 0, mode: 0o755 });
@@ -247,18 +280,34 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
       if (stat.isDirectory()) for (const name of readdirSync(path)) walk(join(path, name));
     };
     walk(`${ROOT}/tooling`);
-    assert.ok(existsSync(`${ROOT}/tooling/deployer/src/main.ts`));
+    // The compiled service only: no sources, no TypeScript, no node_modules.
+    assert.deepEqual(readdirSync(`${ROOT}/tooling/deployer`).sort(), [
+      'config.js',
+      'envfile.js',
+      'http.js',
+      'main.js',
+      'operations.js',
+      'package.json',
+      'runner.js',
+      'sanitize.js',
+      'service.js',
+    ]);
+    assert.equal(
+      JSON.parse(readFileSync(`${ROOT}/tooling/deployer/package.json`, 'utf8')).type,
+      'module',
+    );
     assert.ok(existsSync(`${ROOT}/repo.git/HEAD`));
     assert.equal(statSync(`${ROOT}/repo.git/HEAD`).uid, deploy.uid);
 
-    const unit = readFileSync('/etc/systemd/system/emucat-deployer.service', 'utf8');
+    const unit = readFileSync(UNIT, 'utf8');
     assert.doesNotMatch(unit, /@[A-Z_]+@/);
     assert.match(unit, /^User=emucat-deploy$/m);
     assert.match(unit, /^Group=emucat-socket$/m);
     assert.match(unit, /^SupplementaryGroups=emucat-deploy$/m);
     assert.match(unit, /^Environment=EMUCAT_DEPLOY_CONFIG=\/opt\/emucat\/config\/deploy\.env$/m);
     assert.match(unit, /^Environment=HOME=\/opt\/emucat\/state\/home$/m);
-    assert.match(unit, /^ExecStart=\S+node .* \/opt\/emucat\/tooling\/deployer\/src\/main\.ts$/m);
+    assert.match(unit, /^ExecStart=\/\S+\/node \/opt\/emucat\/tooling\/deployer\/main\.js$/m);
+    assert.doesNotMatch(unit, /\.ts\b|strip-types|ExperimentalWarning/);
     assert.match(unit, /^RuntimeDirectory=emucat-deployer$/m);
     assert.match(
       unit,
@@ -266,27 +315,42 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
     );
     assert.doesNotMatch(unit, /\/etc\/emucat|\/srv\/emucat|\/var\/backups/);
     const calls = () => readFileSync(join(FAKE, 'calls'), 'utf8');
-    assert.match(calls(), /systemctl enable --now emucat-deployer\.service/);
+    assert.match(
+      calls(),
+      /systemctl daemon-reload\nsystemctl enable emucat-deployer\.service\nsystemctl reset-failed emucat-deployer\.service\nsystemctl restart emucat-deployer\.service\n/,
+    );
 
-    // 4. check, through the installed tooling, as the deployment account. Only the socket of the (fake)
-    // service is missing.
+    // 3b. The running service: the unit's identity, the compiled entry point, its socket.
+    const service = serviceProcess();
+    assert.equal(service.uid, deploy.uid);
+    assert.equal(service.gid, socket);
+    assert.deepEqual(service.groups, sortNumbers([deploy.gid, socket, gid('docker')]));
+    assert.equal(service.cmdline.at(-1), `${ROOT}/tooling/deployer/main.js`);
+    // TypeScript support is off in its environment (NODE_OPTIONS, set by the fake systemctl): 8b below
+    // shows the TypeScript sources failing there exactly as on MARS.
+    assert.match(serviceLog(), /listening on \/run\/emucat-deployer\/deployer\.sock/);
+    assert.doesNotMatch(serviceLog(), /ERR_UNKNOWN_FILE_EXTENSION|TypeError/);
+    assert.ok(statSync(SOCKET).isSocket());
+    assert.deepEqual(owner(SOCKET), { uid: deploy.uid, gid: socket, mode: 0o660 });
+    assert.deepEqual(owner('/run/emucat-deployer'), { uid: deploy.uid, gid: socket, mode: 0o750 });
+
+    // 4. check, through the installed tooling: everything passes, the service included.
     result = run(INSTALLED, 'check');
-    const failed = result.stdout
-      .split('\n')
-      .filter((line) => line.startsWith('  FAIL'))
-      .map((line) => line.replace(/^ {2}FAIL {2}/, ''));
-    assert.deepEqual(failed, ['deployment service socket'], result.stdout + result.stderr);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /ok {4}deployment service socket/);
+    assert.match(
+      result.stdout,
+      /ok {4}deployment service program \/opt\/emucat\/tooling\/deployer\/main\.js/,
+    );
+    assert.match(result.stdout, /ok {4}the deployment service answers an authenticated request/);
     assert.match(result.stdout, /ok {4}\/opt\/emucat\/config is root-owned/);
     assert.match(result.stdout, /ok {4}tooling \/opt\/emucat\/tooling is root-owned/);
     assert.match(result.stdout, /ok {4}media directory owned by david:david \(1000:1000\)/);
     assert.match(result.stdout, /ok {4}david is not a member of emucat-socket/);
 
-    // 4b. The real deployment service, started as the unit starts it, and the API's identity: UID/GID
-    // 1000 plus the socket group (Compose group_add). Without that group, UID 1000 gets nothing.
-    const service = await startDeployer(deploy, socket);
-    try {
-      result = run(INSTALLED, 'check');
-      assert.equal(result.status, 0, result.stdout + result.stderr);
+    // 4b. The API's identity: UID/GID 1000 plus the socket group (Compose group_add). Without that group,
+    // UID 1000 gets nothing; without the token, nobody does.
+    {
       // The container sees the token file itself (a Compose secret is a bind mount of the inode, so the
       // directories above it do not apply); a hard link stands in for that mount.
       const secrets = mkdtempSync(join(ROOT, '..', 'emucat-secret-'));
@@ -295,14 +359,13 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
       linkSync(`${ROOT}/config/deployer.token`, token);
       try {
         assert.equal(asApi([1000, 1000, socket], token), 'status:200');
+        assert.equal(asApi([1000, 1000, socket], token, 'x'.repeat(40)), 'status:401');
         assert.equal(asApi([1000, 1000], token), 'token:EACCES');
         const known = readFileSync(`${ROOT}/config/deployer.token`, 'utf8').trim();
         assert.equal(asApi([1000, 1000], token, known), 'socket:EACCES');
       } finally {
         rmSync(secrets, { recursive: true, force: true });
       }
-    } finally {
-      service.kill('SIGTERM');
     }
 
     // 4c. Media: the API's UID/GID can write and read it, and new files belong to david:david.
@@ -361,19 +424,74 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
       );
     }
 
-    // 8. init and install again: nothing edited is replaced, the layout stays as it was.
+    // 8a. A build that fails leaves the installed tooling and the running service as they were.
+    const running = serviceProcess().pid;
+    writeFileSync(join(FAKE, 'fail'), 'deployer');
+    result = run(CTL, 'install');
+    rmSync(join(FAKE, 'fail'));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /cannot build the deployment service/);
+    assert.ok(existsSync(`${ROOT}/tooling/deployer/main.js`));
+    assert.deepEqual(
+      readdirSync(ROOT).filter((name) => name.startsWith('tooling.')),
+      [],
+      'no staged tooling is left behind',
+    );
+    assert.equal(serviceProcess().pid, running);
+    assert.ok(alive(running));
+
+    // 8b. The state MARS was left in: tooling and unit from before, which ran the TypeScript sources and
+    // so could not start on a Node.js without TypeScript support; no socket. install repairs it.
+    systemctl('stop', 'emucat-deployer.service');
+    rmSync(`${ROOT}/tooling/deployer`, { recursive: true });
+    mkdirSync(`${ROOT}/tooling/deployer/src`, { recursive: true });
+    for (const file of readdirSync(join(REPOSITORY, 'apps/deployer/src'))) {
+      writeFileSync(
+        `${ROOT}/tooling/deployer/src/${file}`,
+        readFileSync(join(REPOSITORY, 'apps/deployer/src', file)),
+      );
+    }
+    writeFileSync(
+      UNIT,
+      unit.replace(
+        /^ExecStart=(\S+) .*$/m,
+        `ExecStart=$1 --disable-warning=ExperimentalWarning ${ROOT}/tooling/deployer/src/main.ts`,
+      ),
+    );
+    systemctl('restart', 'emucat-deployer.service');
+    const broken = serviceProcess().pid;
+    for (let i = 0; i < 100 && alive(broken); i++) execFileSync('sleep', ['0.1']);
+    assert.equal(alive(broken), false, 'the old unit exits');
+    assert.match(serviceLog(), /ERR_UNKNOWN_FILE_EXTENSION/, 'and fails as it did on MARS');
+    assert.equal(existsSync(SOCKET), false);
+    result = run(INSTALLED, 'check');
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /FAIL {2}deployment service socket/);
+    assert.match(result.stdout, /FAIL {2}deployment service program/);
+
+    // 8c. init and install again: nothing edited is replaced, the layout stays as it was, and the service
+    // runs again.
     result = run(CTL, 'init');
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Keeping the existing/);
     assert.match(result.stdout, /The configuration is complete/);
     assert.match(readFileSync(CONFIG, 'utf8'), new RegExp(`^EMUCAT_GIT_URL=${remote}$`, 'm'));
     result = run(CTL, 'install');
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /The deployment service answers\./);
     checkLayout();
     assert.equal(current().commit, first);
+    assert.equal(existsSync(`${ROOT}/tooling/deployer/src`), false);
+    assert.match(
+      readFileSync(UNIT, 'utf8'),
+      /^ExecStart=\/\S+\/node \/opt\/emucat\/tooling\/deployer\/main\.js$/m,
+    );
+    assert.deepEqual(owner(SOCKET), { uid: deploy.uid, gid: socket, mode: 0o660 });
+    result = run(INSTALLED, 'check');
+    assert.equal(result.status, 0, result.stdout + result.stderr);
 
     for (const path of OUTSIDE) assert.equal(existsSync(path), false, path);
-  });
+  }
 
   it('resumes an init that stopped halfway, keeping every file it finds', () => {
     // What MARS was left with when init stopped at the media directory: the layout up to data/, a
