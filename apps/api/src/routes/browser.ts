@@ -19,6 +19,7 @@ import { registerAdminCatalogRoutes } from './admin-catalog.js';
 import { registerAdminExecutionRoutes } from './admin-execution.js';
 import { registerAdminRegistrationRoutes } from './admin-registrations.js';
 import { registerAdminRestoreRoutes } from './admin-restores.js';
+import { registerAdminSystemRoutes, type DeploymentDependencies } from './admin-system.js';
 import { registerAgentMediaRoutes } from './agent-media.js';
 import { registerAgentPairingRoutes, type PairingRateLimits } from './agent-pairing.js';
 import { registerAuthRoutes, type AuthRateLimits } from './auth.js';
@@ -41,6 +42,8 @@ export interface BrowserDependencies {
   pairingRateLimits: PairingRateLimits;
   /** Limits on acting on discovery results. Tests shorten them. */
   registrationPolicy?: RegistrationPolicy;
+  /** Version reporting and the deployment service. Defaults to none configured. */
+  deployment?: DeploymentDependencies;
 }
 
 export async function registerBrowserRoutes(
@@ -67,4 +70,5 @@ export async function registerBrowserRoutes(
   registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
   registerAdminRestoreRoutes(api, dependencies, restores);
   registerAdminExecutionRoutes(api, dependencies, execution);
+  registerAdminSystemRoutes(api, dependencies);
 }

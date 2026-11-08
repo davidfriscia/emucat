@@ -38,3 +38,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0031](0031-graceful-and-forced-shutdown.md)     | Graceful by default, forced only when an administrator confirms               |
 | [0032](0032-local-verification.md)               | Verifying a local copy hashes every file on the agent                         |
 | [0033](0033-remote-execution-modes.md)           | Remote modes exist in the contract, and are refused                           |
+| [0034](0034-deployment-and-admin-updates.md)     | Images built on the server, updated on demand by a separate service           |

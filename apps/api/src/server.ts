@@ -1,3 +1,4 @@
+import { APP_VERSION } from '@emucat/contracts';
 import { AgentHub } from './agents/hub.js';
 import { DEFAULT_PAIRING_POLICY } from './agents/pairing.js';
 import { databaseAgentPresence } from './agents/repository.js';
@@ -9,6 +10,7 @@ import { buildApp } from './app.js';
 import { ConfigError, loadConfig, type Config } from './config.js';
 import { loadMigrations } from './db/migrate.js';
 import { createPool } from './db/pool.js';
+import { socketDeploymentClient } from './deployment/client.js';
 import { loadDotEnv } from './env.js';
 import { maintainMediaStorage } from './media/uploads.js';
 import { databaseReadiness } from './readiness.js';
@@ -48,6 +50,15 @@ async function main(): Promise<void> {
     publicOrigin: config.publicOrigin,
     pairing: DEFAULT_PAIRING_POLICY,
     pairingRateLimits: DEFAULT_PAIRING_RATE_LIMITS,
+    deployment: {
+      client: config.deployer ? socketDeploymentClient(config.deployer) : null,
+      environment: config.environment,
+      build: {
+        version: APP_VERSION,
+        commit: config.build.commit ?? null,
+        builtAt: config.build.builtAt ?? null,
+      },
+    },
   };
 
   const app = await buildApp({

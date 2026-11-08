@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# A stand-in for curl in the deployment tests: answers as the EmuCat ingress would. The application is
+# ready only while a release is running, and never while the running release is in fake/unhealthy.
+set -uo pipefail
+fake=$(dirname -- "${EMUCAT_DEPLOY_CONFIG:?}")/fake
+url='' write_out=0
+for arg in "$@"; do
+  case $arg in
+    http://* | https://*) url=$arg ;;
+    --write-out) write_out=1 ;;
+  esac
+done
+running=$(cat "$fake/running" 2>/dev/null || true)
+unhealthy=$(cat "$fake/unhealthy" 2>/dev/null || true)
+healthy=0
+[[ -n $running && $running != "$unhealthy" ]] && healthy=1
+
+case $url in
+  */api/v1/ready)
+    ((healthy)) || exit 22
+    echo '{"status":"ready","checks":{"database":"ok","migrations":"ok"}}'
+    ;;
+  */api/v1/info) ((healthy)) && echo '{"name":"EmuCat","version":"0.1.0"}' ;;
+  */api/v1/agent/ws) ((write_out)) && printf '401' ;;
+  *) ((healthy)) && echo '<!doctype html><div id="root"></div>' ;;
+esac
+exit 0

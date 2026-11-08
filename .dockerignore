@@ -1,0 +1,21 @@
+# The build context is the repository (or, on a server, an exported release of it). Only what the
+# Dockerfiles copy matters; everything else is excluded so that no local data or secret can end up in an
+# image by accident.
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+**/*.log
+.git
+.github
+.idea
+.vscode
+.env
+.env.*
+!.env.example
+var
+agent
+docs
+infra
+deploy/test
+**/test-results

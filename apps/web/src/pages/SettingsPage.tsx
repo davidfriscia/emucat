@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { InfoResponse } from '@emucat/contracts';
 import { fetchApiInfo } from '../api';
+import { useAuth } from '../auth';
+import { ApplicationUpdates } from '../components/ApplicationUpdates';
 import { THEME_PREFERENCES, useTheme, type ThemePreference } from '../theme';
 
 const THEME_LABELS: Record<ThemePreference, string> = {
@@ -24,6 +26,8 @@ function useApiInfo(): InfoResponse | null {
 export function SettingsPage() {
   const { preference, setPreference } = useTheme();
   const info = useApiInfo();
+  const { state } = useAuth();
+  const isAdmin = state.status === 'authenticated' && state.session.user.role === 'admin';
 
   return (
     <>
@@ -70,6 +74,16 @@ export function SettingsPage() {
             )}
           </div>
         </section>
+        {isAdmin ? (
+          <section className="card settings-wide" aria-labelledby="application-updates-title">
+            <div className="card-body">
+              <h2 className="h6 card-title" id="application-updates-title">
+                Application updates
+              </h2>
+              <ApplicationUpdates />
+            </div>
+          </section>
+        ) : null}
       </div>
       <p className="text-body-secondary small mt-4">
         Repositories are managed under Repositories. Agent and emulator settings live in each

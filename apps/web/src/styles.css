@@ -366,6 +366,35 @@
   overflow-wrap: anywhere;
 }
 
+.settings-wide {
+  grid-column: 1 / -1;
+}
+
+.update-stages li[data-state='done'] .update-stage-icon {
+  color: var(--bs-success);
+}
+
+.update-stages li[data-state='current'] .update-stage-icon {
+  color: var(--bs-primary);
+}
+
+.update-stages li[data-state='failed'] {
+  color: var(--bs-danger);
+}
+
+.update-stage-icon {
+  display: inline-block;
+  width: 1.25em;
+  text-align: center;
+}
+
+.update-log {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .pairing-code-input {
   flex: 1 1 10rem;
   max-width: 16rem;

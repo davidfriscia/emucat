@@ -6,6 +6,7 @@ import {
   adminVmApiPath,
   adminVmDetailSchema,
   agentListResponseSchema,
+  applicationUpdatesResponseSchema,
   agentSummarySchema,
   API_PREFIX,
   authenticatedSessionSchema,
@@ -30,6 +31,8 @@ import {
   revokedSessionsResponseSchema,
   sessionListResponseSchema,
   sessionStateResponseSchema,
+  updateLogResponseSchema,
+  updateOperationSchema,
   setupStatusResponseSchema,
   vmSessionListResponseSchema,
   vmSessionSchema,
@@ -40,6 +43,7 @@ import {
   type AdminSummaryResponse,
   type AdminVmDetail,
   type AgentListResponse,
+  type ApplicationUpdatesResponse,
   type AgentSummary,
   type AuthenticatedSession,
   type CreateRegistrationRequest,
@@ -73,6 +77,8 @@ import {
   type SessionStateResponse,
   type SetupRequest,
   type SetupStatusResponse,
+  type UpdateLogResponse,
+  type UpdateOperation,
   type UpdateVmMetadataRequest,
   type VmIdentity,
   type VmVisibility,
@@ -635,4 +641,36 @@ export function verifyLocalCopy(request: VerifyRequest): Promise<VmVerification>
     method: 'POST',
     body: request,
   });
+}
+
+// Application updates. Administrators only. Nothing here sends a ref, command or repository: the server's
+// deployment service decides all of that from its own configuration.
+
+export function fetchApplicationUpdates(signal?: AbortSignal): Promise<ApplicationUpdatesResponse> {
+  return requestJson('/admin/system/updates', applicationUpdatesResponseSchema, { signal });
+}
+
+export function checkForUpdates(): Promise<ApplicationUpdatesResponse> {
+  return requestJson('/admin/system/updates/check', applicationUpdatesResponseSchema, {
+    method: 'POST',
+  });
+}
+
+/** `expectedCommit` is the commit the administrator was shown; the server refuses if the branch moved. */
+export function startApplicationUpdate(expectedCommit: string): Promise<UpdateOperation> {
+  return requestJson('/admin/system/updates', updateOperationSchema, {
+    method: 'POST',
+    body: { expectedCommit },
+  });
+}
+
+export function fetchUpdateOperation(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<UpdateOperation> {
+  return requestJson(`/admin/system/updates/${operationId}`, updateOperationSchema, { signal });
+}
+
+export function fetchUpdateLog(operationId: string): Promise<UpdateLogResponse> {
+  return requestJson(`/admin/system/updates/${operationId}/log`, updateLogResponseSchema);
 }

@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true,
+    // The service runs directly from these sources with Node's type stripping, on the host, with no
+    // build step and no dependencies: only syntax Node can erase is allowed.
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true
+  },
+  "include": ["src", "test", "integration", "vitest.config.ts"]
+}

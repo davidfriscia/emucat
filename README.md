@@ -78,23 +78,25 @@ All of these can be changed in `.env`. See [`.env.example`](.env.example).
 
 Run from the repository root.
 
-| Command            | What it does                                                                 |
-| ------------------ | ---------------------------------------------------------------------------- |
-| `pnpm install`     | Installs JavaScript dependencies.                                            |
-| `pnpm install:all` | Installs from the lockfile and fetches Rust dependencies.                    |
-| `pnpm check`       | Type checks TypeScript and runs `cargo check`.                               |
-| `pnpm lint`        | ESLint, Prettier check, `cargo fmt --check`, Clippy with warnings as errors. |
-| `pnpm format`      | Formats everything with Prettier and rustfmt.                                |
-| `pnpm test`        | Runs all tests. MariaDB must be running.                                     |
-| `pnpm test:e2e`    | Builds the agent, and runs the real agent, API and SFTP server. Windows.     |
-| `pnpm test:sftp`   | Runs the SFTP provider against a real OpenSSH container, and the ZIP64 test. |
-| `pnpm build`       | Production builds of contracts, API and web, plus the Release agent.         |
-| `pnpm build:agent` | Builds only the Release agent.                                               |
-| `pnpm dev`         | Starts contracts watcher, API and web together.                              |
-| `pnpm db:up`       | Starts MariaDB and waits for it to be healthy.                               |
-| `pnpm db:migrate`  | Applies pending migrations.                                                  |
-| `pnpm db:down`     | Stops MariaDB and keeps the data.                                            |
-| `pnpm db:reset`    | Stops MariaDB and deletes the data.                                          |
+| Command             | What it does                                                                 |
+| ------------------- | ---------------------------------------------------------------------------- |
+| `pnpm install`      | Installs JavaScript dependencies.                                            |
+| `pnpm install:all`  | Installs from the lockfile and fetches Rust dependencies.                    |
+| `pnpm check`        | Type checks TypeScript and runs `cargo check`.                               |
+| `pnpm lint`         | ESLint, Prettier check, `cargo fmt --check`, Clippy with warnings as errors. |
+| `pnpm format`       | Formats everything with Prettier and rustfmt.                                |
+| `pnpm test`         | Runs all tests. MariaDB must be running.                                     |
+| `pnpm test:e2e`     | Builds the agent, and runs the real agent, API and SFTP server. Windows.     |
+| `pnpm test:sftp`    | Runs the SFTP provider against a real OpenSSH container, and the ZIP64 test. |
+| `pnpm test:deploy`  | Runs the deployment tooling against disposable hosts, in a Linux container.  |
+| `pnpm test:compose` | Builds the production images and checks them under `deploy/compose.yaml`.    |
+| `pnpm build`        | Production builds of contracts, API and web, plus the Release agent.         |
+| `pnpm build:agent`  | Builds only the Release agent.                                               |
+| `pnpm dev`          | Starts contracts watcher, API and web together.                              |
+| `pnpm db:up`        | Starts MariaDB and waits for it to be healthy.                               |
+| `pnpm db:migrate`   | Applies pending migrations.                                                  |
+| `pnpm db:down`      | Stops MariaDB and keeps the data.                                            |
+| `pnpm db:reset`     | Stops MariaDB and deletes the data.                                          |
 
 There is no root script named `install`: npm-style lifecycle rules would run it during every
 `pnpm install`. Use `pnpm install` or `pnpm install:all`.
@@ -157,6 +159,12 @@ registration, restoring and troubleshooting, and the [repository guide](docs/rep
 
 After upgrading from an earlier milestone, run `pnpm db:migrate`.
 
+## Deploying to a server
+
+Production Docker images, one Compose file without a database service, the `emucatctl` tool and an
+admin-only **Application updates** section in Settings. See [the deployment guide](docs/deployment.md).
+No server has been installed from it yet.
+
 ## Known limitations
 
 - **Only local execution.** Remote volatile and remote snapshot modes are shown but refused, never replaced by a local launch. Snapshots arrive in Milestone 7. Launching is implemented in the Windows agent only. There is no way to delete a registered VM, a local copy or
@@ -189,6 +197,9 @@ After upgrading from an earlier milestone, run `pnpm db:migrate`.
 - **No password recovery** other than editing the database. See
   [authentication](docs/authentication.md#if-you-lose-the-password).
 - **Rate limits are per API process.** See [decision 0007](docs/decisions/0007-local-authentication.md).
+- **Deployment is built and tested on disposable hosts only.** Updates rebuild on the server and briefly
+  interrupt the application; there is no automatic rollback across migrations. See
+  [decision 0034](docs/decisions/0034-deployment-and-admin-updates.md).
 - **The artwork has not had a designer's review**, and there are no raster icons. See
   [brand guidelines](docs/brand.md#outstanding-work).
 

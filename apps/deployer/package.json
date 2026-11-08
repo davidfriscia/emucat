@@ -1,0 +1,21 @@
+{
+  "name": "@emucat/deployer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local deployment service for EmuCat servers. Runs on the host, outside the application containers.",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@emucat/contracts": "workspace:*",
+    "@types/node": "^22.20.5",
+    "typescript": "~6.0.3",
+    "vitest": "^5.1.0"
+  }
+}

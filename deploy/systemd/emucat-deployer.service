@@ -1,0 +1,47 @@
+# EmuCat deployment service. Installed by `emucatctl install`, which fills in the @...@ values.
+#
+# It listens on a Unix socket in /run/emucat-deployer only (no TCP port) and runs the root-owned
+# emucatctl on behalf of administrators. Its account is in the docker group, which is equivalent to root
+# on this host: that privilege lives here, never in the application containers.
+
+[Unit]
+Description=EmuCat deployment service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=@DEPLOY_USER@
+Group=@SOCKET_GROUP@
+Environment=EMUCAT_DEPLOY_CONFIG=@CONFIG@
+ExecStart=@NODE@ --disable-warning=ExperimentalWarning @ROOT@/tooling/deployer/src/main.ts
+Restart=on-failure
+RestartSec=5
+
+# The socket directory. Kept across restarts so that the API container's bind mount of it stays valid.
+RuntimeDirectory=emucat-deployer
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+
+# A running update is a separate, detached process holding its own lock. Stopping or restarting this
+# service must not kill it halfway; the next start reads its result from the state directory.
+KillMode=process
+
+# Hardening. Docker access goes through the daemon socket, so none of this limits deployments.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=@ROOT@/state @ROOT@/releases @ROOT@/builds @ROOT@/repo.git @BACKUP_DIR@ -@HOME@
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

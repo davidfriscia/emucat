@@ -1,0 +1,933 @@
+#!/usr/bin/env bash
+# emucatctl: installs, updates and inspects an EmuCat deployment on a Linux host.
+#
+# The same script runs on every server; /etc/emucat/deploy.env says which environment, branch and paths.
+# It is installed root-owned in $EMUCAT_ROOT/tooling and is the only program the deployment service runs.
+# See docs/deployment.md. Run `emucatctl help` for the commands.
+#
+# Safety rules this script keeps:
+# - The branch comes from host configuration only. Nothing deploys a ref given on the command line or by a
+#   browser; --expect only guards against the branch having moved since it was shown.
+# - No value is ever evaluated: configuration is parsed, not sourced, and nothing goes through `eval`.
+# - Persistent data is never removed: there is no `down --volumes`, no volume removal, no database reset.
+# - Old images are kept until a new release is healthy. Backups are deleted only under an explicit,
+#   configured retention count.
+# - Success is recorded only after health checks and smoke tests pass.
+
+set -Eeuo pipefail
+umask 027
+shopt -s nullglob
+
+readonly EXIT_BUSY=75
+readonly EXIT_UNSAFE=3
+readonly COMMIT_RE='^[0-9a-f]{40}$'
+readonly UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+readonly CONFIG_PATH=${EMUCAT_DEPLOY_CONFIG:-/etc/emucat/deploy.env}
+TOOLING_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+readonly TOOLING_DIR
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+abort() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+now_iso() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+
+# --- Configuration -------------------------------------------------------------------------------------
+
+# Reads KEY=VALUE lines into shell variables without evaluating anything. Only keys matching $2 are read.
+# Values are literal: no quotes, no expansion (the same meaning Docker Compose gives env_file values).
+read_env_file() {
+  local file=$1 allowed=$2 prefix=${3:-} line key value
+  [[ -r $file ]] || abort "cannot read $file"
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+    if [[ $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+      key=${BASH_REMATCH[1]}
+      value=${BASH_REMATCH[2]}
+      [[ $key =~ $allowed ]] || continue
+      printf -v "${prefix}${key}" '%s' "$value"
+    fi
+  done <"$file"
+}
+
+require_absolute() {
+  local name=$1 value=${!1:-}
+  [[ $value == /* && $value != *..* && $value =~ ^/[A-Za-z0-9._/@+-]*$ ]] ||
+    abort "$name must be a plain absolute path"
+}
+
+load_config() {
+  read_env_file "$CONFIG_PATH" '^EMUCAT_[A-Z0-9_]+$'
+  : "${EMUCAT_ENVIRONMENT:?EMUCAT_ENVIRONMENT is required in $CONFIG_PATH}"
+  : "${EMUCAT_BRANCH:?EMUCAT_BRANCH is required in $CONFIG_PATH}"
+  : "${EMUCAT_GIT_URL:?EMUCAT_GIT_URL is required in $CONFIG_PATH}"
+  [[ $EMUCAT_ENVIRONMENT =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
+    abort "EMUCAT_ENVIRONMENT must be a short lowercase name"
+  git check-ref-format --branch "$EMUCAT_BRANCH" >/dev/null 2>&1 ||
+    abort "EMUCAT_BRANCH is not a valid branch name"
+  [[ $EMUCAT_BRANCH =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] || abort "EMUCAT_BRANCH has unusual characters"
+  [[ $EMUCAT_GIT_URL != -* ]] || abort "EMUCAT_GIT_URL is not valid"
+
+  : "${EMUCAT_ROOT:=/opt/emucat}"
+  : "${EMUCAT_PROJECT:=emucat}"
+  : "${EMUCAT_APP_ENV_FILE:=/etc/emucat/app.env}"
+  : "${EMUCAT_DEPLOYER_TOKEN_FILE:=/etc/emucat/deployer.token}"
+  : "${EMUCAT_MEDIA_DIR:=/srv/emucat/media}"
+  : "${EMUCAT_BACKUP_DIR:=/var/backups/emucat}"
+  : "${EMUCAT_SOCKET_DIR:=/run/emucat-deployer}"
+  : "${EMUCAT_DEPLOY_USER:=emucat-deploy}"
+  : "${EMUCAT_SOCKET_GROUP:=emucat-socket}"
+  : "${EMUCAT_BIND_ADDRESS:=127.0.0.1}"
+  : "${EMUCAT_HTTP_PORT:=8080}"
+  : "${EMUCAT_TRUSTED_PROXIES:=}"
+  : "${EMUCAT_DB_HOST_GATEWAY:=host-gateway}"
+  : "${EMUCAT_HOST_DB_HOST:=127.0.0.1}"
+  : "${EMUCAT_EDGE_SUBNET:=172.31.253.0/24}"
+  : "${EMUCAT_INTERNAL_SUBNET:=172.31.254.0/24}"
+  : "${EMUCAT_DATABASE_SUBNET:=172.31.252.0/24}"
+  : "${EMUCAT_API_MEMORY_LIMIT:=1g}"
+  : "${EMUCAT_ADMIN_UPDATES_ENABLED:=false}"
+  : "${EMUCAT_VERIFY:=true}"
+  : "${EMUCAT_KEEP_RELEASES:=5}"
+  : "${EMUCAT_BACKUP_RETENTION_COUNT:=0}"
+  : "${EMUCAT_HEALTH_TIMEOUT_SECONDS:=180}"
+  : "${EMUCAT_GIT_SSH_KEY:=}"
+  : "${EMUCAT_PUBLIC_URL:=}"
+
+  local name
+  for name in EMUCAT_ROOT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR \
+    EMUCAT_BACKUP_DIR EMUCAT_SOCKET_DIR; do
+    require_absolute "$name"
+  done
+  [[ -z $EMUCAT_GIT_SSH_KEY ]] || require_absolute EMUCAT_GIT_SSH_KEY
+  [[ $EMUCAT_PROJECT =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || abort "EMUCAT_PROJECT is not valid"
+  [[ $EMUCAT_HTTP_PORT =~ ^[0-9]{1,5}$ ]] || abort "EMUCAT_HTTP_PORT is not a port"
+  [[ $EMUCAT_BIND_ADDRESS =~ ^[0-9a-fA-F.:]+$ ]] || abort "EMUCAT_BIND_ADDRESS must be an IP address"
+  [[ $EMUCAT_KEEP_RELEASES =~ ^[0-9]+$ && $EMUCAT_KEEP_RELEASES -ge 2 ]] ||
+    abort "EMUCAT_KEEP_RELEASES must be 2 or more"
+  [[ $EMUCAT_BACKUP_RETENTION_COUNT =~ ^[0-9]+$ ]] ||
+    abort "EMUCAT_BACKUP_RETENTION_COUNT must be a number (0 keeps every backup)"
+  [[ $EMUCAT_HEALTH_TIMEOUT_SECONDS =~ ^[0-9]+$ ]] || abort "EMUCAT_HEALTH_TIMEOUT_SECONDS is not valid"
+  [[ $EMUCAT_ADMIN_UPDATES_ENABLED == true || $EMUCAT_ADMIN_UPDATES_ENABLED == false ]] ||
+    abort "EMUCAT_ADMIN_UPDATES_ENABLED must be true or false"
+  if [[ -z ${EMUCAT_SOCKET_GID:-} ]]; then
+    EMUCAT_SOCKET_GID=$(getent group "$EMUCAT_SOCKET_GROUP" 2>/dev/null | cut -d: -f3 || true)
+  fi
+
+  readonly REPO=$EMUCAT_ROOT/repo.git
+  readonly STATE=$EMUCAT_ROOT/state
+  readonly RELEASES=$EMUCAT_ROOT/releases
+  readonly BUILDS=$EMUCAT_ROOT/builds
+  readonly OPERATIONS=$STATE/operations
+  readonly LOCK_FILE=$STATE/deploy.lock
+  readonly CURRENT_FILE=$STATE/current-release.json
+  local host=$EMUCAT_BIND_ADDRESS
+  [[ $host == 0.0.0.0 ]] && host=127.0.0.1
+  [[ $host == *:* ]] && host="[$host]"
+  readonly INGRESS="http://$host:$EMUCAT_HTTP_PORT"
+
+  # Everything Compose substitutes into compose.yaml.
+  export EMUCAT_PROJECT EMUCAT_ENVIRONMENT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR \
+    EMUCAT_SOCKET_DIR EMUCAT_SOCKET_GID EMUCAT_BIND_ADDRESS EMUCAT_HTTP_PORT EMUCAT_TRUSTED_PROXIES \
+    EMUCAT_DB_HOST_GATEWAY EMUCAT_EDGE_SUBNET EMUCAT_INTERNAL_SUBNET EMUCAT_DATABASE_SUBNET \
+    EMUCAT_API_MEMORY_LIMIT
+}
+
+load_app_database() {
+  read_env_file "$EMUCAT_APP_ENV_FILE" '^DB_(PORT|NAME|USER|PASSWORD)$' APP_
+  : "${APP_DB_PORT:=3306}"
+  : "${APP_DB_NAME:?DB_NAME is required in $EMUCAT_APP_ENV_FILE}"
+  : "${APP_DB_USER:?DB_USER is required in $EMUCAT_APP_ENV_FILE}"
+  : "${APP_DB_PASSWORD:?DB_PASSWORD is required in $EMUCAT_APP_ENV_FILE}"
+  [[ $APP_DB_USER != root ]] || abort "the application must not use the MariaDB root account"
+}
+
+# A client option file, so that the password never appears in a process list.
+DB_OPTION_FILE=
+write_db_option_file() {
+  load_app_database
+  DB_OPTION_FILE=$(mktemp "${TMPDIR:-/tmp}/emucat-db.XXXXXX")
+  chmod 600 "$DB_OPTION_FILE"
+  local password=${APP_DB_PASSWORD//\\/\\\\}
+  password=${password//\"/\\\"}
+  printf '[client]\nhost=%s\nport=%s\nuser=%s\npassword="%s"\n' \
+    "$EMUCAT_HOST_DB_HOST" "$APP_DB_PORT" "$APP_DB_USER" "$password" >"$DB_OPTION_FILE"
+}
+remove_db_option_file() {
+  [[ -n $DB_OPTION_FILE ]] && rm -f -- "$DB_OPTION_FILE"
+  DB_OPTION_FILE=
+}
+
+# --- Helpers -------------------------------------------------------------------------------------------
+
+git_repo() {
+  local ssh_command=
+  if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
+    ssh_command="ssh -i $EMUCAT_GIT_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
+    ssh_command+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$STATE/known_hosts"
+  fi
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=${ssh_command:-ssh -o BatchMode=yes} git -C "$REPO" "$@"
+}
+
+compose_for() {
+  local release=$1
+  shift
+  [[ $release =~ $COMMIT_RE ]] || abort "internal: invalid release $release"
+  EMUCAT_RELEASE=$release docker compose --project-name "$EMUCAT_PROJECT" \
+    --project-directory "$RELEASES/$release" --file "$RELEASES/$release/compose.yaml" "$@"
+}
+
+json_string_or_null() {
+  if [[ -n ${1:-} ]]; then printf '"%s"' "$(json_escape "$1")"; else printf 'null'; fi
+}
+
+json_escape() {
+  local text=$1
+  text=${text//\\/\\\\}
+  text=${text//\"/\\\"}
+  text=${text//$'\t'/ }
+  text=${text//$'\n'/ }
+  text=${text//$'\r'/ }
+  # Any other control character.
+  text=$(printf '%s' "$text" | tr -d '\000-\037')
+  printf '%s' "$text"
+}
+
+# Writes a file atomically: temporary file in the same directory, then rename.
+write_atomic() {
+  local target=$1 temporary
+  temporary=$(mktemp "$target.XXXXXX")
+  cat >"$temporary"
+  chmod 640 "$temporary"
+  mv -f -- "$temporary" "$target"
+}
+
+current_commit() {
+  [[ -r $CURRENT_FILE ]] || return 0
+  local commit
+  commit=$(sed -n 's/.*"commit": *"\([0-9a-f]\{40\}\)".*/\1/p' "$CURRENT_FILE" | head -n 1)
+  [[ $commit =~ $COMMIT_RE ]] && printf '%s' "$commit"
+  return 0
+}
+
+previous_commit() {
+  [[ -r $CURRENT_FILE ]] || return 0
+  local commit
+  commit=$(sed -n 's/.*"previous": *"\([0-9a-f]\{40\}\)".*/\1/p' "$CURRENT_FILE" | head -n 1)
+  [[ $commit =~ $COMMIT_RE ]] && printf '%s' "$commit"
+  return 0
+}
+
+# The commit the running API container was built from, from its image label.
+running_revision() {
+  local service=$1 release=$2 id
+  [[ -n $release && -f $RELEASES/$release/compose.yaml ]] || return 0
+  id=$(compose_for "$release" ps --quiet "$service" 2>/dev/null | head -n 1 || true)
+  [[ -n $id ]] || return 0
+  docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$id" \
+    2>/dev/null || true
+}
+
+image_exists() { docker image inspect "$1" >/dev/null 2>&1; }
+
+acquire_lock() {
+  mkdir -p -- "$STATE"
+  exec 9>>"$LOCK_FILE"
+  flock --nonblock 9 || return 1
+}
+
+ingress_ready() {
+  curl --silent --show-error --fail --max-time 5 "$INGRESS/api/v1/ready" 2>/dev/null |
+    grep -q '"status":"ready"'
+}
+
+# --- Operation events ----------------------------------------------------------------------------------
+# One tab-separated line per fact, read by the deployment service. Values never contain tabs or newlines.
+
+OPERATION_ID=
+EVENTS_FILE=
+CURRENT_STAGE=queued
+FINISHED=0
+FAIL_CODE=
+FAIL_MESSAGE=
+MIGRATIONS_STARTED=0
+MIGRATIONS_APPLIED=0
+ACTIVATION_STARTED=0
+PREVIOUS_RELEASE=
+TARGET=
+
+emit() {
+  local key=$1 value=${2:-} message=${3:-}
+  value=${value//[$'\t\n\r']/ }
+  message=${message//[$'\t\n\r']/ }
+  [[ -n $EVENTS_FILE ]] && printf '%s\t%s\t%s\t%s\n' "$(now_iso)" "$key" "$value" "$message" >>"$EVENTS_FILE"
+  return 0
+}
+
+stage() {
+  CURRENT_STAGE=$1
+  emit stage "$1" "${2:-}"
+  say "==> ${1//_/ }${2:+: $2}"
+}
+
+fail() {
+  FAIL_CODE=$1
+  FAIL_MESSAGE=$2
+  exit 1
+}
+
+start_operation() {
+  local requested_by=$1
+  mkdir -p -- "$OPERATIONS"
+  if [[ -z $OPERATION_ID ]]; then
+    OPERATION_ID=$(cat /proc/sys/kernel/random/uuid)
+  fi
+  [[ $OPERATION_ID =~ $UUID_RE ]] || abort "--operation must be a lowercase UUID"
+  EVENTS_FILE=$OPERATIONS/$OPERATION_ID.events
+  emit requested "$requested_by"
+  emit pid "$$"
+  say "Operation $OPERATION_ID"
+}
+
+# Puts the previous release back, but only when that is safe: when no migration has been applied, the
+# previous release still matches the database.
+restore_previous_release() {
+  if [[ $ACTIVATION_STARTED -eq 0 ]]; then
+    if [[ $MIGRATIONS_STARTED -eq 1 ]]; then
+      emit rollback unsafe "Migrations were attempted; the previous release may not match the database"
+    else
+      emit rollback not_needed
+    fi
+    return
+  fi
+  if [[ $MIGRATIONS_APPLIED -eq 1 ]]; then
+    emit rollback unsafe "Migrations were applied; restore the backup before running the previous release"
+    say "Automatic rollback is unsafe: this update applied database migrations."
+    return
+  fi
+  if [[ -z $PREVIOUS_RELEASE ]] || ! image_exists "emucat-api:$PREVIOUS_RELEASE" ||
+    ! image_exists "emucat-web:$PREVIOUS_RELEASE"; then
+    emit rollback failed "No previous release is available to restore"
+    return
+  fi
+  say "Restoring the previous release $PREVIOUS_RELEASE"
+  if compose_for "$PREVIOUS_RELEASE" up --detach --wait --wait-timeout "$EMUCAT_HEALTH_TIMEOUT_SECONDS" \
+    --remove-orphans && ingress_ready; then
+    emit rollback restored_previous "The previous release is running again"
+  else
+    emit rollback failed "The previous release did not come back healthy"
+  fi
+}
+
+on_exit() {
+  local status=$?
+  set +e
+  remove_db_option_file
+  [[ -n $EVENTS_FILE && $FINISHED -eq 0 ]] || return
+  if [[ $status -eq 0 ]]; then
+    return
+  fi
+  if [[ -z $FAIL_CODE ]]; then
+    FAIL_CODE=${CURRENT_STAGE}_failed
+    FAIL_MESSAGE="Unexpected failure while ${CURRENT_STAGE//_/ } (exit status $status). See the log."
+  fi
+  emit error "$FAIL_CODE" "$FAIL_MESSAGE"
+  printf 'error: %s\n' "$FAIL_MESSAGE" >&2
+  restore_previous_release
+  emit stage failed "$FAIL_MESSAGE"
+  emit 'done' failed
+  FINISHED=1
+}
+
+finish_success() {
+  local outcome=$1 message=$2
+  emit outcome "$outcome"
+  stage completed "$message"
+  emit 'done' succeeded
+  FINISHED=1
+}
+
+# --- Backups -------------------------------------------------------------------------------------------
+
+# Dumps the application database to $EMUCAT_BACKUP_DIR and sets BACKUP_FILE. The dump is written under a
+# temporary name and renamed only once it has been checked, so a file without the suffix is complete.
+BACKUP_FILE=
+backup_database() {
+  local label=$1 stamp partial
+  mkdir -p -- "$EMUCAT_BACKUP_DIR"
+  write_db_option_file
+  stamp=$(date -u +%Y%m%dT%H%M%S%3NZ)
+  BACKUP_FILE=$EMUCAT_BACKUP_DIR/emucat-db-$stamp-$label.sql.gz
+  partial=$BACKUP_FILE.partial
+  if ! mariadb-dump --defaults-extra-file="$DB_OPTION_FILE" --single-transaction --quick \
+    --routines --triggers --events --hex-blob --default-character-set=utf8mb4 \
+    -- "$APP_DB_NAME" | gzip -c >"$partial"; then
+    rm -f -- "$partial"
+    remove_db_option_file
+    return 1
+  fi
+  remove_db_option_file
+  if ! gzip -t -- "$partial" || ! gzip -dc -- "$partial" | tail -n 1 | grep -q '^-- Dump completed'; then
+    rm -f -- "$partial"
+    return 1
+  fi
+  chmod 640 -- "$partial"
+  mv -- "$partial" "$BACKUP_FILE"
+  prune_backups
+}
+
+# Only with an explicit retention count. 0, the default, keeps every backup.
+prune_backups() {
+  [[ $EMUCAT_BACKUP_RETENTION_COUNT -gt 0 ]] || return 0
+  local -a files=("$EMUCAT_BACKUP_DIR"/emucat-db-*.sql.gz)
+  local count=${#files[@]} index
+  ((count > EMUCAT_BACKUP_RETENTION_COUNT)) || return 0
+  # Names start with a UTC timestamp, so glob order is age order.
+  for ((index = 0; index < count - EMUCAT_BACKUP_RETENTION_COUNT; index++)); do
+    say "Removing old backup ${files[index]##*/} (EMUCAT_BACKUP_RETENTION_COUNT=$EMUCAT_BACKUP_RETENTION_COUNT)"
+    rm -f -- "${files[index]}"
+  done
+}
+
+applied_migrations() {
+  write_db_option_file
+  mariadb --defaults-extra-file="$DB_OPTION_FILE" --batch --skip-column-names \
+    --database="$APP_DB_NAME" -e 'SELECT version FROM schema_migrations ORDER BY version'
+  local status=$?
+  remove_db_option_file
+  return $status
+}
+
+# --- Releases ------------------------------------------------------------------------------------------
+
+record_release() {
+  local commit=$1 previous=$2 at
+  at=$(now_iso)
+  write_atomic "$CURRENT_FILE" <<JSON
+{
+  "commit": "$commit",
+  "deployedAt": "$at",
+  "operationId": "$OPERATION_ID",
+  "previous": "$previous",
+  "branch": "$(json_escape "$EMUCAT_BRANCH")",
+  "environment": "$EMUCAT_ENVIRONMENT"
+}
+JSON
+  printf '%s\t%s\t%s\t%s\n' "$at" "$commit" "$previous" "$OPERATION_ID" >>"$RELEASES/history.tsv"
+}
+
+# Removes images of releases older than the newest EMUCAT_KEEP_RELEASES. Never the current or previous one.
+prune_images() {
+  local current=$1 previous=$2 keep=() commit image
+  if [[ -f $RELEASES/history.tsv ]]; then
+    mapfile -t keep < <(cut -f2 "$RELEASES/history.tsv" | tac | awk '!seen[$0]++' |
+      head -n "$EMUCAT_KEEP_RELEASES")
+  fi
+  keep+=("$current" "$previous")
+  for image in $(docker image ls --format '{{.Repository}}:{{.Tag}}' \
+    --filter 'reference=emucat-api:*' --filter 'reference=emucat-web:*' 2>/dev/null); do
+    commit=${image##*:}
+    [[ $commit =~ $COMMIT_RE ]] || continue
+    if ! printf '%s\n' "${keep[@]}" | grep -qx -- "$commit"; then
+      say "Removing old image $image"
+      docker image rm -- "$image" >/dev/null 2>&1 || warn "could not remove $image"
+    fi
+  done
+}
+
+smoke_test() {
+  local release=$1 deadline revision page
+  deadline=$((SECONDS + EMUCAT_HEALTH_TIMEOUT_SECONDS))
+  until ingress_ready; do
+    ((SECONDS < deadline)) || fail health_check_failed "The application did not become ready through $INGRESS"
+    sleep 3
+  done
+  page=$(curl --silent --fail --max-time 10 "$INGRESS/" || true)
+  [[ $page == *'id="root"'* ]] || fail smoke_test_failed "The web application shell is not served"
+  page=$(curl --silent --fail --max-time 10 "$INGRESS/vms/qemu/emucat-smoke-test" || true)
+  [[ $page == *'id="root"'* ]] || fail smoke_test_failed "Client-side routes do not fall back to the app"
+  page=$(curl --silent --fail --max-time 10 "$INGRESS/api/v1/info" || true)
+  [[ $page == *'"name":"EmuCat"'* ]] || fail smoke_test_failed "The API is not reachable under /api/"
+  # A WebSocket handshake without credentials: 401 proves the upgrade reaches the API through the proxy.
+  page=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 --http1.1 \
+    --header 'Connection: Upgrade' --header 'Upgrade: websocket' --header 'Sec-WebSocket-Version: 13' \
+    --header 'Sec-WebSocket-Key: ZW11Y2F0LXNtb2tlLXRlc3Q=' "$INGRESS/api/v1/agent/ws" || true)
+  [[ $page == 401 ]] || fail smoke_test_failed "The agent WebSocket endpoint is not routed to the API"
+  for service in api web; do
+    revision=$(running_revision "$service" "$release")
+    [[ $revision == "$release" ]] ||
+      fail verification_failed "The running $service container is not built from $release"
+  done
+}
+
+# --- Commands ------------------------------------------------------------------------------------------
+
+usage() {
+  cat <<'EOF'
+Usage: emucatctl <command> [options]
+
+  install                 Prepare this host (as root): directories, mirror, tooling, deployment service.
+  check                   Check configuration, prerequisites and connectivity. Changes nothing.
+  status [--json]         Show the deployed release, containers and health.
+  check-update [--json]   Fetch the configured branch and report whether an update is available.
+  update [--yes] [--expect COMMIT]
+                          Deploy the newest commit of the configured branch.
+  backup                  Back up the application database now.
+  rollback-app [--to COMMIT] [--yes]
+                          Run a previously deployed release again, if the database allows it.
+  logs [api|web] [--follow] [--tail N]
+                          Show application container logs.
+  help                    Show this text.
+
+The branch, repository and every path come from /etc/emucat/deploy.env (or $EMUCAT_DEPLOY_CONFIG).
+EOF
+}
+
+# Commands other than install run as the deployment account, so that state files keep one owner.
+drop_privileges() {
+  if [[ $EUID -eq 0 ]] && id -u "$EMUCAT_DEPLOY_USER" >/dev/null 2>&1; then
+    exec runuser -u "$EMUCAT_DEPLOY_USER" -- env EMUCAT_DEPLOY_CONFIG="$CONFIG_PATH" "$0" "$@"
+  fi
+}
+
+confirm() {
+  local prompt=$1 answer
+  [[ -t 0 ]] || abort "refusing to continue without a terminal; pass --yes"
+  read -r -p "$prompt [y/N] " answer
+  [[ $answer == y || $answer == Y || $answer == yes ]] || abort "cancelled"
+}
+
+cmd_check_update() {
+  local json=0 remote subject committed current available
+  [[ ${1:-} == --json ]] && json=1
+  acquire_lock || { say "An update is in progress." >&2; exit $EXIT_BUSY; }
+  [[ -d $REPO ]] || abort "no repository mirror at $REPO; run emucatctl install"
+  git_repo config remote.origin.url "$EMUCAT_GIT_URL"
+  git_repo fetch --no-tags --prune --quiet origin \
+    "+refs/heads/$EMUCAT_BRANCH:refs/remotes/origin/$EMUCAT_BRANCH" ||
+    abort "cannot fetch branch $EMUCAT_BRANCH from the repository"
+  remote=$(git_repo rev-parse --verify --quiet "refs/remotes/origin/$EMUCAT_BRANCH^{commit}") ||
+    abort "branch $EMUCAT_BRANCH does not exist in the repository"
+  subject=$(git_repo log -1 --format=%s "$remote" | cut -c1-200)
+  committed=$(git_repo log -1 --format=%cI "$remote")
+  current=$(current_commit)
+  available=true
+  [[ $remote == "$current" ]] && available=false
+  write_atomic "$STATE/remote.json" <<JSON
+{
+  "commit": "$remote",
+  "subject": "$(json_escape "$subject")",
+  "committedAt": "$(date -u -d "$committed" +%Y-%m-%dT%H:%M:%S.000Z)",
+  "checkedAt": "$(now_iso)"
+}
+JSON
+  if [[ $json -eq 1 ]]; then
+    printf '{"branch":"%s","current":%s,"remote":%s,"updateAvailable":%s}\n' \
+      "$(json_escape "$EMUCAT_BRANCH")" "$(json_string_or_null "$current")" \
+      "$(tr -d '\n' <"$STATE/remote.json")" "$available"
+  else
+    say "Branch:    $EMUCAT_BRANCH"
+    say "Deployed:  ${current:-none}"
+    say "Latest:    $remote $subject"
+    [[ $available == true ]] && say "An update is available." || say "Up to date."
+  fi
+}
+
+cmd_update() {
+  local expect='' yes=0 requested_by="cli:${SUDO_USER:-${USER:-unknown}}" source current started
+  while (($#)); do
+    case $1 in
+      --expect) expect=${2:-}; shift 2 ;;
+      --operation) OPERATION_ID=${2:-}; shift 2 ;;
+      --requested-by) requested_by=${2:-}; shift 2 ;;
+      --yes) yes=1; shift ;;
+      *) abort "unknown option $1" ;;
+    esac
+  done
+  [[ -z $expect || $expect =~ $COMMIT_RE ]] || abort "--expect must be a full lowercase commit ID"
+  requested_by=${requested_by//[^A-Za-z0-9._:-]/_}
+  requested_by=${requested_by:0:64}
+  # From the deployment service there is no terminal, and it always passes --expect.
+  [[ $yes -eq 1 || -n $OPERATION_ID ]] ||
+    confirm "Deploy the newest commit of $EMUCAT_BRANCH to $EMUCAT_ENVIRONMENT? The application may be briefly unavailable."
+
+  start_operation "$requested_by"
+  trap on_exit EXIT
+  if ! acquire_lock; then
+    FAIL_CODE=update_in_progress
+    FAIL_MESSAGE="Another update holds the deployment lock"
+    emit error "$FAIL_CODE" "$FAIL_MESSAGE"
+    emit stage failed "$FAIL_MESSAGE"
+    emit rollback not_needed
+    emit 'done' failed
+    FINISHED=1
+    say "error: $FAIL_MESSAGE" >&2
+    exit $EXIT_BUSY
+  fi
+
+  stage checking_repository
+  [[ -d $REPO ]] || fail repository_missing "No repository mirror at $REPO; run emucatctl install"
+  [[ -f $EMUCAT_APP_ENV_FILE ]] || fail configuration_invalid "$EMUCAT_APP_ENV_FILE does not exist"
+  [[ -d $EMUCAT_MEDIA_DIR ]] || fail configuration_invalid "The media directory does not exist"
+  [[ -n $EMUCAT_SOCKET_GID ]] || fail configuration_invalid "The socket group $EMUCAT_SOCKET_GROUP does not exist"
+  docker info >/dev/null 2>&1 || fail docker_unavailable "Docker is not reachable"
+  current=$(current_commit)
+  PREVIOUS_RELEASE=$current
+  emit from "${current:-}"
+
+  stage fetching_source "branch $EMUCAT_BRANCH"
+  git_repo config remote.origin.url "$EMUCAT_GIT_URL"
+  git_repo fetch --no-tags --prune --quiet origin \
+    "+refs/heads/$EMUCAT_BRANCH:refs/remotes/origin/$EMUCAT_BRANCH" ||
+    fail fetch_failed "Cannot fetch branch $EMUCAT_BRANCH from the repository"
+  TARGET=$(git_repo rev-parse --verify --quiet "refs/remotes/origin/$EMUCAT_BRANCH^{commit}") ||
+    fail fetch_failed "Branch $EMUCAT_BRANCH does not exist in the repository"
+  [[ $TARGET =~ $COMMIT_RE ]] || fail fetch_failed "Cannot resolve the branch to a commit"
+  git_repo merge-base --is-ancestor "$TARGET" "refs/remotes/origin/$EMUCAT_BRANCH" ||
+    fail unauthorized_target "The target is not on branch $EMUCAT_BRANCH"
+  emit target "$TARGET"
+  say "Target $TARGET ($(git_repo log -1 --format=%s "$TARGET" | cut -c1-120))"
+  if [[ -n $expect && $expect != "$TARGET" ]]; then
+    fail target_changed "Branch $EMUCAT_BRANCH has moved since it was checked. Check for updates again."
+  fi
+  if [[ $TARGET == "$current" && $(running_revision api "$current") == "$current" ]] && ingress_ready; then
+    finish_success up_to_date "$TARGET is already deployed and healthy"
+    return 0
+  fi
+
+  source=$BUILDS/$TARGET
+  rm -rf -- "$source"
+  mkdir -p -- "$source"
+  git_repo archive --format=tar "$TARGET" | tar -x -C "$source" ||
+    fail fetch_failed "Cannot export commit $TARGET"
+
+  stage building "API and web images"
+  started=$(now_iso)
+  for component in api web; do
+    docker build --file "$source/deploy/docker/$component.Dockerfile" --target runtime \
+      --tag "emucat-$component:$TARGET" --build-arg "EMUCAT_COMMIT=$TARGET" \
+      --build-arg "EMUCAT_BUILD_TIME=$started" "$source" ||
+      fail build_failed "The $component image did not build"
+  done
+
+  stage testing
+  if [[ $EMUCAT_VERIFY == true ]]; then
+    for component in api web; do
+      docker build --file "$source/deploy/docker/$component.Dockerfile" --target verify "$source" ||
+        fail test_failed "The $component checks failed"
+    done
+  else
+    say "Skipped: EMUCAT_VERIFY is not true"
+  fi
+  mkdir -p -- "$RELEASES/$TARGET"
+  cp -- "$source/deploy/compose.yaml" "$RELEASES/$TARGET/compose.yaml"
+  (cd "$source/apps/api/migrations" && for file in *.sql; do printf '%s\n' "${file%.sql}"; done) \
+    >"$RELEASES/$TARGET/migrations.txt"
+  compose_for "$TARGET" config --quiet || fail configuration_invalid "The Compose configuration is invalid"
+
+  stage backing_up_database
+  if [[ -n ${current:-} ]] || [[ -n $(applied_migrations 2>/dev/null || true) ]]; then
+    backup_database "${current:0:12}" || fail backup_failed "The database backup failed; nothing was changed"
+    emit backup "${BACKUP_FILE##*/}"
+    say "Backup ${BACKUP_FILE}"
+  else
+    say "First deployment on an empty database: nothing to back up"
+  fi
+
+  stage applying_migrations
+  MIGRATIONS_STARTED=1
+  local output
+  if ! output=$(compose_for "$TARGET" run --rm --no-deps -T api node dist/db/migrate-cli.js 2>&1); then
+    say "$output"
+    MIGRATIONS_APPLIED=1
+    fail migration_failed "Database migrations failed. Restore ${BACKUP_FILE:+${BACKUP_FILE##*/} }before retrying"
+  fi
+  say "$output"
+  if [[ $output == *'Applied '[1-9]* ]]; then
+    MIGRATIONS_APPLIED=1
+  fi
+
+  stage starting_services
+  ACTIVATION_STARTED=1
+  compose_for "$TARGET" up --detach --wait --wait-timeout "$EMUCAT_HEALTH_TIMEOUT_SECONDS" \
+    --remove-orphans || fail start_failed "The new containers did not become healthy"
+
+  stage health_checking
+  smoke_test "$TARGET"
+
+  record_release "$TARGET" "${current:-}"
+  rm -rf -- "$source"
+  prune_images "$TARGET" "${current:-}"
+  finish_success updated "Deployed $TARGET"
+}
+
+cmd_backup() {
+  acquire_lock || { say "An update is in progress." >&2; exit $EXIT_BUSY; }
+  backup_database manual || abort "the backup failed"
+  say "Backup written to $BACKUP_FILE"
+}
+
+cmd_rollback() {
+  local to='' yes=0 current applied version
+  while (($#)); do
+    case $1 in
+      --to) to=${2:-}; shift 2 ;;
+      --yes) yes=1; shift ;;
+      *) abort "unknown option $1" ;;
+    esac
+  done
+  current=$(current_commit)
+  [[ -n $current ]] || abort "nothing is deployed"
+  [[ -n $to ]] || to=$(previous_commit)
+  [[ $to =~ $COMMIT_RE ]] || abort "no previous release is recorded; pass --to with a full commit ID"
+  [[ $to != "$current" ]] || abort "$to is already deployed"
+  [[ -f $RELEASES/$to/compose.yaml && -f $RELEASES/$to/migrations.txt ]] ||
+    abort "$to was never deployed here"
+  image_exists "emucat-api:$to" && image_exists "emucat-web:$to" ||
+    abort "the images of $to are no longer available; deploy it with an update instead"
+  acquire_lock || { say "An update is in progress." >&2; exit $EXIT_BUSY; }
+
+  applied=$(applied_migrations) || abort "cannot read the applied migrations from the database"
+  while IFS= read -r version; do
+    [[ -z $version ]] && continue
+    if ! grep -qx -- "$version" "$RELEASES/$to/migrations.txt"; then
+      printf 'error: rollback is unsafe: the database has migration %s, which %s does not know.\n' \
+        "$version" "$to" >&2
+      printf 'Restore the backup taken before that migration first, then run rollback-app again.\n' >&2
+      exit $EXIT_UNSAFE
+    fi
+  done <<<"$applied"
+  [[ $yes -eq 1 ]] || confirm "Run $to again instead of $current on $EMUCAT_ENVIRONMENT?"
+
+  start_operation "cli:rollback"
+  trap on_exit EXIT
+  emit from "$current"
+  emit target "$to"
+  PREVIOUS_RELEASE=$current
+  stage starting_services "rolling back to $to"
+  ACTIVATION_STARTED=1
+  compose_for "$to" up --detach --wait --wait-timeout "$EMUCAT_HEALTH_TIMEOUT_SECONDS" --remove-orphans ||
+    fail start_failed "The release $to did not become healthy"
+  stage health_checking
+  smoke_test "$to"
+  record_release "$to" "$current"
+  finish_success updated "Rolled back to $to"
+}
+
+cmd_status() {
+  local json=0 current running healthy=false active=
+  [[ ${1:-} == --json ]] && json=1
+  current=$(current_commit)
+  running=$(running_revision api "$current")
+  ingress_ready && healthy=true
+  if flock --nonblock --shared "$LOCK_FILE" true 2>/dev/null; then active=false; else active=true; fi
+  if [[ $json -eq 1 ]]; then
+    printf '{"environment":"%s","branch":"%s","deployed":%s,"running":%s,"healthy":%s,"updateRunning":%s}\n' \
+      "$EMUCAT_ENVIRONMENT" "$(json_escape "$EMUCAT_BRANCH")" "$(json_string_or_null "$current")" \
+      "$(json_string_or_null "$running")" "$healthy" "$active"
+    return
+  fi
+  say "Environment:      $EMUCAT_ENVIRONMENT"
+  say "Branch:           $EMUCAT_BRANCH"
+  say "Browser updates:  $([[ $EMUCAT_ADMIN_UPDATES_ENABLED == true ]] && echo enabled || echo disabled)"
+  if [[ -r $CURRENT_FILE ]]; then
+    say "Deployed:         $current ($(sed -n 's/.*"deployedAt": *"\([^"]*\)".*/\1/p' "$CURRENT_FILE"))"
+  else
+    say "Deployed:         nothing yet"
+  fi
+  say "Running API:      ${running:-not running}"
+  [[ -n $current && -n $running && $running != "$current" ]] &&
+    say "WARNING: the running containers are not the recorded release. Run emucatctl update."
+  say "Ready (ingress):  $healthy ($INGRESS)"
+  say "Update running:   $active"
+  local events
+  events=$(ls -t "$OPERATIONS"/*.events 2>/dev/null | head -n 1 || true)
+  if [[ -n $events ]]; then
+    say "Last operation:   $(basename "$events" .events)"
+    tail -n 3 "$events" | cut -f1,2,3,4 | sed 's/^/                  /'
+  fi
+  [[ -n $current && -f $RELEASES/$current/compose.yaml ]] && compose_for "$current" ps
+  return 0
+}
+
+cmd_logs() {
+  local current service='' args=(--tail 200)
+  current=$(current_commit)
+  [[ -n $current ]] || abort "nothing is deployed"
+  while (($#)); do
+    case $1 in
+      api | web) service=$1; shift ;;
+      --follow | -f) args+=(--follow); shift ;;
+      --tail) [[ ${2:-} =~ ^[0-9]+$ ]] || abort "--tail needs a number"; args=(--tail "$2"); shift 2 ;;
+      *) abort "unknown option $1" ;;
+    esac
+  done
+  compose_for "$current" logs "${args[@]}" ${service:+"$service"}
+}
+
+CHECK_FAILURES=0
+check_item() {
+  local label=$1
+  shift
+  if "$@" >/dev/null 2>&1; then
+    printf '  ok    %s\n' "$label"
+  else
+    printf '  FAIL  %s\n' "$label"
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+  fi
+}
+node_new_enough() {
+  local version
+  version=$(node --version 2>/dev/null) || return 1
+  [[ $version =~ ^v([0-9]+)\.([0-9]+) ]] || return 1
+  ((BASH_REMATCH[1] > 22 || (BASH_REMATCH[1] == 22 && BASH_REMATCH[2] >= 18)))
+}
+mode_at_most() {
+  local file=$1 max=$2 mode
+  mode=$(stat -c %a -- "$file") || return 1
+  (((8#$mode & ~8#$max) == 0))
+}
+database_answers() {
+  write_db_option_file
+  mariadb --defaults-extra-file="$DB_OPTION_FILE" --database="$APP_DB_NAME" -e 'SELECT 1'
+  local status=$?
+  remove_db_option_file
+  return $status
+}
+
+cmd_check() {
+  say "Configuration $CONFIG_PATH: environment $EMUCAT_ENVIRONMENT, branch $EMUCAT_BRANCH"
+  say "Browser updates: $EMUCAT_ADMIN_UPDATES_ENABLED"
+  say "Prerequisites"
+  for tool in docker git flock curl gzip mariadb mariadb-dump; do
+    check_item "$tool is installed" command -v "$tool"
+  done
+  check_item "docker compose v2 is available" docker compose version
+  check_item "Docker is reachable" docker info
+  check_item "node 22.18 or later (deployment service)" node_new_enough
+  say "Configuration files"
+  check_item "$CONFIG_PATH is not world-readable" mode_at_most "$CONFIG_PATH" 640
+  check_item "$EMUCAT_APP_ENV_FILE exists" test -r "$EMUCAT_APP_ENV_FILE"
+  check_item "$EMUCAT_APP_ENV_FILE is not world-readable" mode_at_most "$EMUCAT_APP_ENV_FILE" 640
+  check_item "$EMUCAT_DEPLOYER_TOKEN_FILE exists" test -r "$EMUCAT_DEPLOYER_TOKEN_FILE"
+  check_item "$EMUCAT_DEPLOYER_TOKEN_FILE is not world-readable" mode_at_most "$EMUCAT_DEPLOYER_TOKEN_FILE" 640
+  check_item "socket group $EMUCAT_SOCKET_GROUP exists" test -n "$EMUCAT_SOCKET_GID"
+  say "Directories"
+  check_item "repository mirror $REPO" test -d "$REPO"
+  check_item "media directory $EMUCAT_MEDIA_DIR" test -d "$EMUCAT_MEDIA_DIR"
+  check_item "media directory owned by UID 10001" test "$(stat -c %u -- "$EMUCAT_MEDIA_DIR" 2>/dev/null)" = 10001
+  check_item "backup directory $EMUCAT_BACKUP_DIR" test -d "$EMUCAT_BACKUP_DIR"
+  check_item "deployment service socket" test -S "$EMUCAT_SOCKET_DIR/deployer.sock"
+  say "Connectivity"
+  check_item "MariaDB accepts the application account ($EMUCAT_HOST_DB_HOST)" database_answers
+  check_item "the Git remote answers for $EMUCAT_BRANCH" git_repo ls-remote --exit-code --heads origin "$EMUCAT_BRANCH"
+  if ((CHECK_FAILURES > 0)); then
+    say "$CHECK_FAILURES check(s) failed."
+    exit 1
+  fi
+  say "All checks passed."
+}
+
+cmd_install() {
+  [[ $EUID -eq 0 ]] || abort "install must run as root"
+  local source_root=$TOOLING_DIR/.. tooling=$EMUCAT_ROOT/tooling staged unit
+  # Run from a checkout: deploy/bin/emucatctl, with apps/deployer next to it.
+  [[ -f $source_root/apps/deployer/src/main.ts ]] ||
+    abort "run install from a checkout of the repository (deploy/bin/emucatctl)"
+  id -u "$EMUCAT_DEPLOY_USER" >/dev/null 2>&1 ||
+    abort "create the account first: useradd --system --create-home --home-dir /var/lib/emucat-deploy --groups docker,$EMUCAT_SOCKET_GROUP $EMUCAT_DEPLOY_USER"
+  [[ -n $EMUCAT_SOCKET_GID ]] || abort "create the group first: groupadd --system $EMUCAT_SOCKET_GROUP"
+  for tool in docker git flock curl gzip mariadb mariadb-dump node systemctl runuser; do
+    command -v "$tool" >/dev/null || abort "$tool is not installed"
+  done
+  node_new_enough || abort "the deployment service needs Node.js 22.18 or later on the host"
+
+  say "Directories"
+  install -d -o root -g root -m 0755 "$EMUCAT_ROOT"
+  install -d -o "$EMUCAT_DEPLOY_USER" -g "$EMUCAT_DEPLOY_USER" -m 0750 \
+    "$STATE" "$OPERATIONS" "$RELEASES" "$BUILDS"
+  install -d -o "$EMUCAT_DEPLOY_USER" -g "$EMUCAT_DEPLOY_USER" -m 0750 "$EMUCAT_BACKUP_DIR"
+  if [[ ! -d $EMUCAT_MEDIA_DIR ]]; then
+    install -d -o 10001 -g 10001 -m 0750 "$EMUCAT_MEDIA_DIR"
+  elif [[ $(stat -c %u -- "$EMUCAT_MEDIA_DIR") != 10001 ]]; then
+    # Existing data is never changed automatically.
+    warn "$EMUCAT_MEDIA_DIR exists but is not owned by UID 10001; fix it by hand (see docs/deployment.md)"
+  fi
+
+  say "Deployment service token"
+  if [[ ! -s $EMUCAT_DEPLOYER_TOKEN_FILE ]]; then
+    install -d -m 0755 "$(dirname -- "$EMUCAT_DEPLOYER_TOKEN_FILE")"
+    (umask 077 && head -c 32 /dev/urandom | base64 | tr -d '=+/\n' >"$EMUCAT_DEPLOYER_TOKEN_FILE")
+  fi
+  chown "root:$EMUCAT_SOCKET_GROUP" -- "$EMUCAT_DEPLOYER_TOKEN_FILE"
+  chmod 0640 -- "$EMUCAT_DEPLOYER_TOKEN_FILE"
+
+  say "Tooling (root-owned, so the deployment account cannot change what it runs)"
+  staged=$(mktemp -d "$EMUCAT_ROOT/tooling.XXXXXX")
+  install -d -m 0755 "$staged/bin" "$staged/deployer" "$staged/systemd"
+  install -m 0755 "$source_root/deploy/bin/emucatctl" "$staged/bin/emucatctl"
+  cp -R -- "$source_root/apps/deployer/src" "$staged/deployer/src"
+  install -m 0644 "$source_root/deploy/systemd/emucat-deployer.service" "$staged/systemd/"
+  chown -R root:root -- "$staged"
+  chmod -R go-w -- "$staged"
+  chmod 0755 -- "$staged"
+  rm -rf -- "$tooling.old"
+  [[ -d $tooling ]] && mv -- "$tooling" "$tooling.old"
+  mv -- "$staged" "$tooling"
+  rm -rf -- "$tooling.old"
+
+  say "Repository mirror"
+  if [[ ! -d $REPO ]]; then
+    local git_env=(GIT_TERMINAL_PROMPT=0 "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+    if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
+      git_env[1]="GIT_SSH_COMMAND=ssh -i $EMUCAT_GIT_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
+      git_env[1]+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$STATE/known_hosts"
+    fi
+    runuser -u "$EMUCAT_DEPLOY_USER" -- env "${git_env[@]}" \
+      git clone --bare --no-tags --single-branch --branch "$EMUCAT_BRANCH" -- "$EMUCAT_GIT_URL" "$REPO" ||
+      abort "cannot clone $EMUCAT_BRANCH; check EMUCAT_GIT_URL, the deploy key and $STATE/known_hosts"
+  fi
+
+  say "systemd unit"
+  unit=/etc/systemd/system/emucat-deployer.service
+  sed -e "s#@DEPLOY_USER@#$EMUCAT_DEPLOY_USER#g" -e "s#@SOCKET_GROUP@#$EMUCAT_SOCKET_GROUP#g" \
+    -e "s#@ROOT@#$EMUCAT_ROOT#g" -e "s#@CONFIG@#$CONFIG_PATH#g" \
+    -e "s#@NODE@#$(command -v node)#g" -e "s#@BACKUP_DIR@#$EMUCAT_BACKUP_DIR#g" \
+    -e "s#@HOME@#$(getent passwd "$EMUCAT_DEPLOY_USER" | cut -d: -f6)#g" \
+    "$tooling/systemd/emucat-deployer.service" >"$unit.tmp"
+  chmod 0644 "$unit.tmp"
+  mv -- "$unit.tmp" "$unit"
+  systemctl daemon-reload
+  systemctl enable --now emucat-deployer.service
+  systemctl restart emucat-deployer.service
+
+  say ""
+  say "Installed. Next:"
+  say "  sudo $tooling/bin/emucatctl check"
+  say "  sudo $tooling/bin/emucatctl update"
+}
+
+main() {
+  local command=${1:-help}
+  [[ $# -gt 0 ]] && shift
+  case $command in
+    help | -h | --help) usage; return ;;
+  esac
+  load_config
+  case $command in
+    install) cmd_install "$@" ;;
+    check) drop_privileges check "$@"; cmd_check "$@" ;;
+    status) drop_privileges status "$@"; cmd_status "$@" ;;
+    check-update) drop_privileges check-update "$@"; cmd_check_update "$@" ;;
+    update) drop_privileges update "$@"; cmd_update "$@" ;;
+    backup) drop_privileges backup "$@"; cmd_backup "$@" ;;
+    rollback-app) drop_privileges rollback-app "$@"; cmd_rollback "$@" ;;
+    logs) drop_privileges logs "$@"; cmd_logs "$@" ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"

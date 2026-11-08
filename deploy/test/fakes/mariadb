@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# A stand-in for the mariadb client: answers the two queries emucatctl makes. The applied migrations are
+# the lines of fake/applied.
+set -uo pipefail
+fake=$(dirname -- "${EMUCAT_DEPLOY_CONFIG:?}")/fake
+printf 'mariadb %s\n' "$*" >>"$fake/calls"
+[[ ${1:-} == --defaults-extra-file=* ]] || exit 2
+case "$*" in
+  *schema_migrations*) cat "$fake/applied" 2>/dev/null; exit 0 ;;
+  *'SELECT 1'*) echo 1; exit 0 ;;
+esac
+exit 1

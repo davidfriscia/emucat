@@ -57,6 +57,8 @@ WebSocket endpoint.
 | `src/routes/admin-registrations.ts` | Registrations and repositories, for administrators              |
 | `src/registration/coordinator.ts`   | The registration state machine and all its SQL                  |
 | `src/registration/repositories.ts`  | SQL for repositories and which agents may use them              |
+| `src/routes/admin-system.ts`        | Version, and application updates relayed to the deployer        |
+| `src/deployment/client.ts`          | The deployment service client, over its Unix socket             |
 | `src/db/`                           | Connection pool and migration runner                            |
 | `migrations/`                       | Forward-only SQL migrations                                     |
 
@@ -66,6 +68,11 @@ endpoint need no database. See the [API reference](api.md) and [authentication](
 **Web structure.** `src/api.ts` is the only file that talks to the API, and it validates each response against the
 contracts. `src/auth.tsx` holds the signed-in state, `components/Guards.tsx` protects routes, and catalog filters
 live in the URL. Brand artwork is in `src/assets/brand`, described in the [brand guidelines](brand.md).
+
+**Deployment (`apps/deployer`, `deploy/`).** Production Dockerfiles for the API and the web app, one Compose
+file without a database, the `emucatctl` tool and a small deployment service that runs outside Docker, on a Unix
+socket, and performs updates the API asks for. The API itself holds no deployment privilege. See the
+[deployment guide](deployment.md) and [decision 0034](decisions/0034-deployment-and-admin-updates.md).
 
 **Contracts (`packages/contracts`).** The shared vocabulary: Zod schemas, types and pure domain rules,
 with no I/O. Both API and web depend on it. `fixtures/` holds language-neutral test vectors, which the

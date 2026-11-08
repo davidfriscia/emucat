@@ -63,6 +63,23 @@ const envSchema = z.object({
   PUBLIC_ORIGIN: emptyAsUndefined(z.url().optional()),
   // Comma-separated addresses or CIDR ranges of proxies whose X-Forwarded-For is believed.
   TRUST_PROXY: z.string().default(''),
+  // A label for the installation, such as test or production. Shown to administrators only.
+  EMUCAT_ENVIRONMENT: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]{0,31}$/, 'Expected a short lowercase name')
+    .default('development'),
+  // Set by the production image at build time. Never secrets.
+  EMUCAT_BUILD_COMMIT: emptyAsUndefined(
+    z
+      .string()
+      .regex(/^[0-9a-f]{40}$/, 'Expected a full commit ID')
+      .optional(),
+  ),
+  EMUCAT_BUILD_TIME: emptyAsUndefined(z.iso.datetime({ offset: true }).optional()),
+  // The local deployment service. Both unset, as in development, means administrators see that
+  // application updates are not configured.
+  DEPLOYER_SOCKET: emptyAsUndefined(z.string().min(1).optional()),
+  DEPLOYER_TOKEN_FILE: emptyAsUndefined(z.string().min(1).optional()),
 });
 
 export interface Config {
@@ -85,6 +102,9 @@ export interface Config {
   setupToken: string | undefined;
   publicOrigin: string | undefined;
   trustProxy: string[];
+  environment: string;
+  build: { commit: string | undefined; builtAt: string | undefined };
+  deployer: { socketPath: string; tokenFile: string } | undefined;
 }
 
 export class ConfigError extends Error {
@@ -101,6 +121,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new ConfigError(`Invalid configuration:\n  ${problems.join('\n  ')}`);
   }
   const values = parsed.data;
+  if ((values.DEPLOYER_SOCKET === undefined) !== (values.DEPLOYER_TOKEN_FILE === undefined)) {
+    throw new ConfigError(
+      'Invalid configuration:\n  DEPLOYER_SOCKET and DEPLOYER_TOKEN_FILE must be set together',
+    );
+  }
   return {
     host: values.API_HOST,
     port: values.API_PORT,
@@ -132,5 +157,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     trustProxy: values.TRUST_PROXY.split(',')
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0),
+    environment: values.EMUCAT_ENVIRONMENT,
+    build: { commit: values.EMUCAT_BUILD_COMMIT, builtAt: values.EMUCAT_BUILD_TIME },
+    deployer:
+      values.DEPLOYER_SOCKET && values.DEPLOYER_TOKEN_FILE
+        ? { socketPath: values.DEPLOYER_SOCKET, tokenFile: values.DEPLOYER_TOKEN_FILE }
+        : undefined,
   };
 }

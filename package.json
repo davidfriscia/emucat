@@ -24,7 +24,9 @@
     "db:up": "docker compose up --detach --wait mariadb",
     "db:down": "docker compose down",
     "db:reset": "docker compose down --volumes",
-    "db:migrate": "pnpm build:contracts && pnpm --filter @emucat/api db:migrate"
+    "db:migrate": "pnpm build:contracts && pnpm --filter @emucat/api db:migrate",
+    "test:deploy": "bash deploy/test/integration.sh",
+    "test:compose": "bash deploy/test/compose-smoke.sh"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

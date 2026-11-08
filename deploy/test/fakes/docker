@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# A stand-in for the Docker CLI in the deployment tests. It records every call and simulates images,
+# containers and failures. Behavior comes from files in $(dirname $EMUCAT_DEPLOY_CONFIG)/fake/:
+#   fail                 build | verify | migrate | up      makes that step fail
+#   build_sleep          seconds each image build takes
+#   migrations_applied   how many migrations the migration step reports
+set -uo pipefail
+fake=$(dirname -- "${EMUCAT_DEPLOY_CONFIG:?}")/fake
+mkdir -p "$fake"
+touch "$fake/images"
+printf 'docker %s\n' "$*" >>"$fake/calls"
+fail=$(cat "$fake/fail" 2>/dev/null || true)
+
+case ${1:-} in
+  info) exit 0 ;;
+  build)
+    target='' tag=''
+    while (($#)); do
+      case $1 in
+        --target) target=$2; shift ;;
+        --tag) tag=$2; shift ;;
+      esac
+      shift
+    done
+    # Output a secret, as a careless build step might: the log shown to administrators must hide it.
+    echo "#5 [build] DB_PASSWORD=$(sed -n 's/^DB_PASSWORD=//p' "$fake/../app.env") https://user:ghp_abcdefghijklmnopqrstuvwx@github.com/x.git"
+    sleep "$(cat "$fake/build_sleep" 2>/dev/null || echo 0)"
+    if [[ $target == runtime && $fail == build ]]; then echo "build failed" >&2; exit 1; fi
+    if [[ $target == verify && $fail == verify ]]; then echo "tests failed" >&2; exit 1; fi
+    [[ -n $tag ]] && { grep -qx -- "$tag" "$fake/images" || echo "$tag" >>"$fake/images"; }
+    exit 0
+    ;;
+  image)
+    case ${2:-} in
+      inspect) grep -qx -- "$3" "$fake/images"; exit ;;
+      ls) cat "$fake/images"; exit 0 ;;
+      rm) grep -vx -- "${4:-$3}" "$fake/images" >"$fake/images.new"; mv "$fake/images.new" "$fake/images"; exit 0 ;;
+    esac
+    ;;
+  inspect)
+    cat "$fake/running" 2>/dev/null
+    echo
+    exit 0
+    ;;
+  compose)
+    shift
+    while (($#)); do
+      case $1 in
+        --project-name | --project-directory | --file) shift 2 ;;
+        *) break ;;
+      esac
+    done
+    case ${1:-} in
+      config) exit 0 ;;
+      run)
+        if [[ $fail == migrate ]]; then echo "MigrationError: Migration 0002 failed"; exit 1; fi
+        count=$(cat "$fake/migrations_applied" 2>/dev/null || echo 0)
+        if ((count > 0)); then echo "Applied $count migration(s): 0002_next"; else echo "Database is up to date."; fi
+        echo "Previously applied: 1"
+        exit 0
+        ;;
+      up)
+        if [[ $fail == up ]]; then echo "container unhealthy" >&2; exit 1; fi
+        printf '%s' "${EMUCAT_RELEASE:?}" >"$fake/running"
+        exit 0
+        ;;
+      ps) [[ -s $fake/running ]] && echo "container-${2:-}"; exit 0 ;;
+      logs) echo "api | listening"; exit 0 ;;
+    esac
+    ;;
+esac
+echo "fake docker: unsupported call: $*" >&2
+exit 64

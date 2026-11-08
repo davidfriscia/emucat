@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# A stand-in for mariadb-dump: writes a small but complete dump, or fails halfway when fake/fail says
+# `backup`. It checks that credentials come from an option file, never from the command line.
+set -uo pipefail
+fake=$(dirname -- "${EMUCAT_DEPLOY_CONFIG:?}")/fake
+printf 'mariadb-dump %s\n' "$*" >>"$fake/calls"
+[[ ${1:-} == --defaults-extra-file=* ]] || { echo "credentials must come from an option file" >&2; exit 2; }
+grep -q '^password=' "${1#--defaults-extra-file=}" || { echo "no password in option file" >&2; exit 2; }
+echo "-- MariaDB dump 10.19"
+echo "CREATE TABLE \`users\` (id int);"
+if [[ $(cat "$fake/fail" 2>/dev/null) == backup ]]; then
+  echo "mariadb-dump: Got error: 2013: Lost connection" >&2
+  exit 2
+fi
+echo "-- Dump completed on 2026-11-08 12:00:00"

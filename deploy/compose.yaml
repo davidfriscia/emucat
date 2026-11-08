@@ -1,0 +1,125 @@
+# EmuCat application services for a Linux server (MARS, MOON, or any other). The same file is used
+# everywhere; only the host configuration differs. MariaDB is NOT a service here: the API connects to the
+# MariaDB server already installed on the host.
+#
+# This file is normally driven by `emucatctl`, which sets every variable below from
+# /etc/emucat/deploy.env. Running it by hand needs the same variables; see docs/deployment.md.
+#
+# Security boundaries enforced here:
+# - The API port is never published. The API sits on an internal network that only the web container
+#   shares, plus a network used to reach MariaDB on the host.
+# - The web ingress is bound to one configurable address, loopback by default, for the external proxy.
+# - No container is privileged, none gets the Docker socket, and the only host paths mounted are the media
+#   directory, the deployment-service socket directory (read-only) and one token file.
+
+name: ${EMUCAT_PROJECT:-emucat}
+
+x-hardening: &hardening
+  read_only: true
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: '5'
+
+services:
+  api:
+    <<: *hardening
+    image: emucat-api:${EMUCAT_RELEASE:?EMUCAT_RELEASE is set by emucatctl to the deployed commit}
+    env_file:
+      - path: ${EMUCAT_APP_ENV_FILE:-/etc/emucat/app.env}
+        required: true
+    environment:
+      # Fixed by the deployment, whatever app.env says.
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: '4000'
+      STORAGE_PATH: /data/storage
+      LOG_PRETTY: 'false'
+      EMUCAT_ENVIRONMENT: ${EMUCAT_ENVIRONMENT:?set EMUCAT_ENVIRONMENT}
+      # Only the web container can connect, so it is the only proxy believed.
+      TRUST_PROXY: ${EMUCAT_INTERNAL_SUBNET:-172.31.254.0/24}
+      DEPLOYER_SOCKET: /run/emucat-deployer/deployer.sock
+      DEPLOYER_TOKEN_FILE: /run/secrets/deployer_token
+    # host.docker.internal is how the API reaches MariaDB on the host. host-gateway is Docker's address
+    # for the host on the default bridge; set EMUCAT_DB_HOST_GATEWAY to another host address if MariaDB
+    # listens elsewhere.
+    extra_hosts:
+      - host.docker.internal:${EMUCAT_DB_HOST_GATEWAY:-host-gateway}
+    # The deployment-service socket is group-accessible; this adds that group to the API's user.
+    group_add:
+      - ${EMUCAT_SOCKET_GID:?set EMUCAT_SOCKET_GID to the GID of the socket group}
+    volumes:
+      - type: bind
+        source: ${EMUCAT_MEDIA_DIR:?set EMUCAT_MEDIA_DIR}
+        target: /data/storage
+      # A directory holding only the socket, so that a restarted service's new socket is seen.
+      - type: bind
+        source: ${EMUCAT_SOCKET_DIR:-/run/emucat-deployer}
+        target: /run/emucat-deployer
+        read_only: true
+    secrets:
+      - deployer_token
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks:
+      internal: {}
+      database: {}
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          # Screenshot decoding (sharp) is the heaviest work the API does.
+          memory: ${EMUCAT_API_MEMORY_LIMIT:-1g}
+          pids: 512
+
+  web:
+    <<: *hardening
+    image: emucat-web:${EMUCAT_RELEASE:?EMUCAT_RELEASE is set by emucatctl to the deployed commit}
+    environment:
+      EMUCAT_TRUSTED_PROXIES: ${EMUCAT_TRUSTED_PROXIES:-}
+    # nginx-unprivileged binds 8080; it needs no capabilities.
+    ports:
+      - ${EMUCAT_BIND_ADDRESS:-127.0.0.1}:${EMUCAT_HTTP_PORT:-8080}:8080
+    tmpfs:
+      - /tmp:size=128m,uid=101,gid=101,mode=0700
+      - /run/emucat-web:size=1m,uid=101,gid=101,mode=0700
+    networks:
+      edge: {}
+      internal: {}
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          pids: 256
+
+networks:
+  # The published ingress. Its gateway is the address host-local proxies appear to come from.
+  edge:
+    ipam:
+      config:
+        - subnet: ${EMUCAT_EDGE_SUBNET:-172.31.253.0/24}
+  # Web to API only. No route out, and the API's port is reachable from nowhere else.
+  internal:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${EMUCAT_INTERNAL_SUBNET:-172.31.254.0/24}
+  # The API's way to MariaDB on the host. Firewall the host so that this subnet reaches port 3306 only.
+  database:
+    ipam:
+      config:
+        - subnet: ${EMUCAT_DATABASE_SUBNET:-172.31.252.0/24}
+
+secrets:
+  deployer_token:
+    file: ${EMUCAT_DEPLOYER_TOKEN_FILE:-/etc/emucat/deployer.token}

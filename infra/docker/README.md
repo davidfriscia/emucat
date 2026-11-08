@@ -1,6 +1,8 @@
 # Docker infrastructure
 
-`compose.yaml` in the repository root defines the local MariaDB service. [`sftp-test`](sftp-test) is a real OpenSSH server for
+`compose.yaml` in the repository root defines the local MariaDB service, for development only. Server
+deployment uses [`deploy/compose.yaml`](../../deploy/compose.yaml), which has no database service; see the
+[deployment guide](../../docs/deployment.md). [`sftp-test`](sftp-test) is a real OpenSSH server for
 tests only, built and removed by `pnpm test:sftp` and `pnpm test:e2e`. It uses the restricted account the
 [repository guide](../../docs/repositories.md) recommends, with keys each test generates.
 

@@ -101,6 +101,24 @@ Requires a session with the `admin` role. Responses are `Cache-Control: no-store
 
 Media mutations return the VM's updated media list.
 
+### System and application updates
+
+Administrators only. State-changing requests also need the same-origin checks of every browser request.
+The API holds no deployment privilege: it relays these to the [deployment service](deployment.md#9-the-deployment-service)
+over a Unix socket. Without one (`DEPLOYER_SOCKET` unset) the update routes answer
+`503 deployment_service_not_configured`; when it does not answer, `503 deployment_service_unavailable`.
+
+| Method and path                              | Purpose                                                                                                                                                               |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /admin/system/version`                  | Environment, application version, build commit and time, deployed commit and time, status                                                                             |
+| `GET /admin/system/updates`                  | Branch, deployed release, newest remote commit, availability, active and last operations                                                                              |
+| `POST /admin/system/updates/check`           | Fetches the configured branch and returns the same view                                                                                                               |
+| `POST /admin/system/updates`                 | `{ expectedCommit }` only: `202` with the operation. `403 updates_disabled`, `409 update_in_progress`, `409 target_changed`, `409 already_current`, `409 not_checked` |
+| `GET /admin/system/updates/:operationId`     | One operation, with its stages                                                                                                                                        |
+| `GET /admin/system/updates/:operationId/log` | Its log, with secrets removed                                                                                                                                         |
+
+There is no parameter for a branch, a Git ref, a repository or a command.
+
 **There is no route that creates a VM**, and none that changes `emulator_type` or `vm_name`. A VM enters the
 catalog only through agent discovery followed by [an explicit registration](#registrations), which keeps it private.
 
