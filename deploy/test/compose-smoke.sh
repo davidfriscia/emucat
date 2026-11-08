@@ -35,6 +35,7 @@ cleanup() {
   set +e
   [[ -n ${COMPOSE_READY:-} ]] && compose down --timeout 5 >/dev/null 2>&1
   docker rm -f "$db_container" >/dev/null 2>&1
+  docker image rm "emucat-api:smoke-$id" "emucat-web:smoke-$id" >/dev/null 2>&1
   rm -rf "$work"
 }
 trap cleanup EXIT
