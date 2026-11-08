@@ -14,7 +14,11 @@ Requires=docker.service
 Type=simple
 User=@DEPLOY_USER@
 Group=@SOCKET_GROUP@
+# The account's own group, which can read the configuration in @ROOT@/config. Listed explicitly because
+# Group= replaces the primary group, and the socket must belong to @SOCKET_GROUP@.
+SupplementaryGroups=@DEPLOY_USER@
 Environment=EMUCAT_DEPLOY_CONFIG=@CONFIG@
+Environment=HOME=@ROOT@/state/home
 ExecStart=@NODE@ --disable-warning=ExperimentalWarning @ROOT@/tooling/deployer/src/main.ts
 Restart=on-failure
 RestartSec=5
@@ -34,7 +38,8 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=@ROOT@/state @ROOT@/releases @ROOT@/builds @ROOT@/repo.git @BACKUP_DIR@ -@HOME@
+# Everything else, including @ROOT@/config and @ROOT@/tooling, is read-only to this service.
+ReadWritePaths=@ROOT@/state @ROOT@/releases @ROOT@/repo.git @ROOT@/backups
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

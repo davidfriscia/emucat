@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# A stand-in for systemctl in the installation test: records the call and succeeds. No service starts.
+set -uo pipefail
+fake=$(dirname -- "${EMUCAT_DEPLOY_CONFIG:?}")/fake
+mkdir -p "$fake"
+printf 'systemctl %s\n' "$*" >>"$fake/calls"
+exit 0

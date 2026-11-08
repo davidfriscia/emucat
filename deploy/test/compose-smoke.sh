@@ -59,10 +59,12 @@ until docker exec "$db_container" healthcheck.sh --connect --innodb_initialized 
 sed "s/CHANGE_ME/$app_password/" "$repo/deploy/sql/bootstrap.sql" |
   docker exec -i "$db_container" mariadb -uroot "-p$root_password"
 
-mkdir -p "$work/media" "$work/socket"
-printf 'smoke-test-deployer-token-0123456789abcdef\n' >"$work/deployer.token"
+# The installed layout, in miniature: EMUCAT_ROOT/config and EMUCAT_ROOT/data/media.
+root=$work/opt/emucat
+mkdir -p "$root/config" "$root/data/media" "$work/socket"
+printf 'smoke-test-deployer-token-0123456789abcdef\n' >"$root/config/deployer.token"
 setup_token=smoke-setup-token-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
-cat >"$work/app.env" <<EOF
+cat >"$root/config/app.env" <<EOF
 DB_HOST=host.docker.internal
 DB_PORT=$db_port
 DB_NAME=emucat-db
@@ -76,10 +78,10 @@ EOF
 http_port=$((40000 + RANDOM % 10000))
 export EMUCAT_PROJECT=$project EMUCAT_RELEASE=smoke-$id EMUCAT_ENVIRONMENT=smoke
 export EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_SOCKET_DIR EMUCAT_DEPLOYER_TOKEN_FILE
-EMUCAT_APP_ENV_FILE=$(host_path "$work/app.env")
-EMUCAT_MEDIA_DIR=$(host_path "$work/media")
+EMUCAT_APP_ENV_FILE=$(host_path "$root/config/app.env")
+EMUCAT_MEDIA_DIR=$(host_path "$root/data/media")
 EMUCAT_SOCKET_DIR=$(host_path "$work/socket")
-EMUCAT_DEPLOYER_TOKEN_FILE=$(host_path "$work/deployer.token")
+EMUCAT_DEPLOYER_TOKEN_FILE=$(host_path "$root/config/deployer.token")
 export EMUCAT_SOCKET_GID=10001 EMUCAT_HTTP_PORT=$http_port EMUCAT_BIND_ADDRESS=127.0.0.1
 # Test-only networks, so as not to collide with a real installation on this machine.
 export EMUCAT_EDGE_SUBNET=172.31.243.0/24 EMUCAT_INTERNAL_SUBNET=172.31.244.0/24
@@ -100,6 +102,10 @@ has() { grep -qi -- "$2" <<<"$1"; }
 
 echo "Checks"
 check "migrations ran against the external database" has "$migrate" 'Applied [1-9]'
+for variable in EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_DEPLOYER_TOKEN_FILE; do
+  check "Compose has no default for $variable (no fallback outside EMUCAT_ROOT)" bash -c \
+    "! env -u $variable docker compose --file '$repo/deploy/compose.yaml' config --quiet 2>/dev/null"
+done
 check "no MariaDB service in the Compose project" bash -c "! docker compose --file '$repo/deploy/compose.yaml' config --services | grep -qi maria"
 check "the API container is healthy (ready = database and schema)" \
   test "$(docker inspect --format '{{.State.Health.Status}}' "$(compose ps -q api)")" = healthy
@@ -154,7 +160,7 @@ check "anonymous update requests are refused" test \
 echo "Replacing the containers"
 docker exec "$api" node -e "require('fs').writeFileSync('/data/storage/survives.txt','kept')"
 compose up --detach --wait --wait-timeout 120 --force-recreate >/dev/null
-check "media written by the API is on the host" test "$(cat "$work/media/survives.txt")" = kept
+check "media written by the API is on the host" test "$(cat "$root/data/media/survives.txt")" = kept
 check "media survives replacing the containers" \
   test "$(docker exec "$(compose ps -q api)" node -e "process.stdout.write(require('fs').readFileSync('/data/storage/survives.txt','utf8'))")" = kept
 check "the API cannot write outside its mounts" \

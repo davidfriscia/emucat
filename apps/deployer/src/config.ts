@@ -29,6 +29,17 @@ const ENVIRONMENT = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** Conservative: what `git check-ref-format --branch` accepts, minus anything unusual. */
 const BRANCH = /^(?![-.])(?!.*\.\.)(?!.*\/\/)(?!\/)(?!.*\/$)(?!.*\.lock$)[A-Za-z0-9._/-]{1,100}$/;
 
+/** The default host configuration file. Every other persistent path derives from EMUCAT_ROOT. */
+export const DEFAULT_CONFIG_PATH = '/opt/emucat/config/deploy.env';
+
+/** Path settings of the earlier layout, refused so that a stale file cannot point elsewhere. */
+const LEGACY_PATH_KEYS = [
+  'EMUCAT_APP_ENV_FILE',
+  'EMUCAT_DEPLOYER_TOKEN_FILE',
+  'EMUCAT_MEDIA_DIR',
+  'EMUCAT_BACKUP_DIR',
+];
+
 function absolute(name: string, value: string | undefined, fallback: string): string {
   const path = value && value !== '' ? value : fallback;
   if (!isAbsolute(path)) throw new DeployerConfigError(`${name} must be an absolute path`);
@@ -51,7 +62,20 @@ export function loadDeployerConfig(
   }
   const branch = values.get('EMUCAT_BRANCH') ?? '';
   if (!BRANCH.test(branch)) throw new DeployerConfigError('EMUCAT_BRANCH is not a valid branch');
-  const root = absolute('EMUCAT_ROOT', values.get('EMUCAT_ROOT'), '/opt/emucat');
+  for (const key of LEGACY_PATH_KEYS) {
+    if (values.has(key)) {
+      throw new DeployerConfigError(`${key} is no longer supported: paths derive from EMUCAT_ROOT`);
+    }
+  }
+  const root = absolute('EMUCAT_ROOT', values.get('EMUCAT_ROOT'), '/opt/emucat').replace(
+    /\/+$/,
+    '',
+  );
+  if (root === '') throw new DeployerConfigError('EMUCAT_ROOT must not be /');
+  const configDir = join(root, 'config');
+  if (configPath !== join(configDir, 'deploy.env')) {
+    throw new DeployerConfigError(`${configPath} must be ${join(configDir, 'deploy.env')}`);
+  }
   const stateDir = join(root, 'state');
   const port = values.get('EMUCAT_HTTP_PORT') || '8080';
   if (!/^\d{1,5}$/.test(port)) throw new DeployerConfigError('EMUCAT_HTTP_PORT is not a port');
@@ -74,16 +98,8 @@ export function loadDeployerConfig(
       absolute('EMUCAT_SOCKET_DIR', values.get('EMUCAT_SOCKET_DIR'), '/run/emucat-deployer'),
       'deployer.sock',
     ),
-    tokenFile: absolute(
-      'EMUCAT_DEPLOYER_TOKEN_FILE',
-      values.get('EMUCAT_DEPLOYER_TOKEN_FILE'),
-      '/etc/emucat/deployer.token',
-    ),
-    appEnvFile: absolute(
-      'EMUCAT_APP_ENV_FILE',
-      values.get('EMUCAT_APP_ENV_FILE'),
-      '/etc/emucat/app.env',
-    ),
+    tokenFile: join(configDir, 'deployer.token'),
+    appEnvFile: join(configDir, 'app.env'),
     healthUrl: `http://${healthHost}:${port}/api/v1/ready`,
   };
 }

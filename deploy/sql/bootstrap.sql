@@ -8,7 +8,7 @@
 -- `emucatctl update` applies, never here.
 --
 -- The names contain hyphens, so they are always quoted: backticks for the database, single quotes for
--- the account. Replace CHANGE_ME with the DB_PASSWORD from /etc/emucat/app.env (32+ random characters).
+-- the account. Replace CHANGE_ME with the DB_PASSWORD from /opt/emucat/config/app.env (32+ random characters).
 
 CREATE DATABASE IF NOT EXISTS `emucat-db`
   CHARACTER SET utf8mb4

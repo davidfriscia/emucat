@@ -3,7 +3,8 @@
 # MariaDB server already installed on the host.
 #
 # This file is normally driven by `emucatctl`, which sets every variable below from
-# /etc/emucat/deploy.env. Running it by hand needs the same variables; see docs/deployment.md.
+# /opt/emucat/config/deploy.env and the fixed layout under EMUCAT_ROOT. Running it by hand needs the same
+# variables; see docs/deployment.md. Paths have no defaults, so nothing can fall back to another location.
 #
 # Security boundaries enforced here:
 # - The API port is never published. The API sits on an internal network that only the web container
@@ -33,7 +34,7 @@ services:
     <<: *hardening
     image: emucat-api:${EMUCAT_RELEASE:?EMUCAT_RELEASE is set by emucatctl to the deployed commit}
     env_file:
-      - path: ${EMUCAT_APP_ENV_FILE:-/etc/emucat/app.env}
+      - path: ${EMUCAT_APP_ENV_FILE:?set EMUCAT_APP_ENV_FILE (EMUCAT_ROOT/config/app.env)}
         required: true
     environment:
       # Fixed by the deployment, whatever app.env says.
@@ -57,7 +58,7 @@ services:
       - ${EMUCAT_SOCKET_GID:?set EMUCAT_SOCKET_GID to the GID of the socket group}
     volumes:
       - type: bind
-        source: ${EMUCAT_MEDIA_DIR:?set EMUCAT_MEDIA_DIR}
+        source: ${EMUCAT_MEDIA_DIR:?set EMUCAT_MEDIA_DIR (EMUCAT_ROOT/data/media)}
         target: /data/storage
       # A directory holding only the socket, so that a restarted service's new socket is seen.
       - type: bind
@@ -122,4 +123,4 @@ networks:
 
 secrets:
   deployer_token:
-    file: ${EMUCAT_DEPLOYER_TOKEN_FILE:-/etc/emucat/deployer.token}
+    file: ${EMUCAT_DEPLOYER_TOKEN_FILE:?set EMUCAT_DEPLOYER_TOKEN_FILE (EMUCAT_ROOT/config/deployer.token)}

@@ -8,6 +8,10 @@ update it on demand from a fixed Git branch. Two servers use the same mechanism:
 | **MARS** | test       | `develop` | `https://emucat-test.dfri.info` | enabled                |
 | **MOON** | production | `main`    | configurable (`PUBLIC_ORIGIN`)  | disabled until enabled |
 
+Everything EmuCat keeps on a server lives under **`/opt/emucat`**, with the same layout on every host.
+Nothing in the configuration depends on a host's name: the MARS and MOON values are examples, all of them
+configurable.
+
 Nothing here has been run on MARS or MOON yet. The steps were exercised against disposable hosts and
 containers only (see [Testing](#testing-this-tooling)).
 
@@ -54,7 +58,7 @@ Actions, no container registry and no push-triggered deployment: images are buil
   └────┬───────────────────────────────┬──────────────────────────────────┘
        │ bind: media directory         │ bind (read-only): /run/emucat-deployer
        ▼                               ▼  deployer.sock, HTTP + bearer token
-  /srv/emucat/media              emucat-deployer.service (systemd, emucat-deploy)
+  /opt/emucat/data/media         emucat-deployer.service (systemd, emucat-deploy)
                                        │ runs the root-owned emucatctl
                                        ▼
                          git mirror · docker build · migrate · compose up
@@ -72,21 +76,39 @@ Actions, no container registry and no push-triggered deployment: images are buil
   listening on a Unix socket only. The API asks it, over that socket, for status and to start an update.
   It accepts nothing but fixed operations, and it keeps the state of every update on disk.
 
-Host layout after installation:
+Host layout after installation. `emucatctl init` and `install` create all of it with these owners and
+modes, and every `install` puts those of the directories and of `config/` back:
 
-| Path                         | Owner                              | Contents                                                 |
-| ---------------------------- | ---------------------------------- | -------------------------------------------------------- |
-| `/etc/emucat/deploy.env`     | `root:emucat-deploy` 0640          | How this host deploys (branch, paths, ports)             |
-| `/etc/emucat/app.env`        | `root:emucat-deploy` 0640          | The API's environment, including `DB_PASSWORD`           |
-| `/etc/emucat/deployer.token` | `root:emucat-socket` 0640          | Shared secret between the API and the deployment service |
-| `/etc/emucat/deploy_key`     | `emucat-deploy` 0600               | Read-only GitHub deploy key                              |
-| `/opt/emucat/tooling/`       | `root` 0755                        | `emucatctl`, the deployment service, the systemd unit    |
-| `/opt/emucat/repo.git`       | `emucat-deploy`                    | Bare mirror of the one configured branch                 |
-| `/opt/emucat/releases/<c>/`  | `emucat-deploy`                    | Each release's `compose.yaml` and migration list         |
-| `/opt/emucat/state/`         | `emucat-deploy`                    | Current release, update operations and their logs, lock  |
-| `/srv/emucat/media`          | UID/GID `10001` 0750               | Screenshots and other media (persistent)                 |
-| `/var/backups/emucat`        | `emucat-deploy` 0750               | Database dumps                                           |
-| `/run/emucat-deployer/`      | `emucat-deploy:emucat-socket` 0750 | The socket, mode 0660                                    |
+```
+/opt/emucat/                 root:root                    0755
+├── tooling/                 root:root                    0755  emucatctl, the deployment service, the unit template
+├── repo.git/                emucat-deploy:emucat-deploy  0750  bare mirror of the one configured branch
+├── releases/                emucat-deploy:emucat-deploy  0750  each release's compose.yaml and migration list
+├── config/                  root:emucat-deploy           0750
+│   ├── deploy.env           root:emucat-deploy           0640  how this host deploys (branch, address, port)
+│   ├── app.env              root:emucat-deploy           0640  the API's environment, including DB_PASSWORD
+│   ├── deployer.token       root:emucat-socket           0640  shared secret of the API and the deployment service
+│   ├── deploy_key           emucat-deploy:emucat-deploy  0600  read-only GitHub deploy key (and deploy_key.pub)
+│   └── known_hosts          root:emucat-deploy           0640  the verified host key of github.com
+├── state/                   emucat-deploy:emucat-deploy  0750  current release, operations and logs, lock
+│   ├── operations/                                       0750  one .events and one .log file per update
+│   ├── builds/                                           0750  temporary source exports during an update
+│   └── home/                                             0700  the deployment account's home (Docker, Git)
+├── data/                    root:root                    0755
+│   └── media/               10001:10001                  0750  screenshots and other media (persistent)
+└── backups/                 emucat-deploy:emucat-deploy  0750  database dumps, 0640 each
+```
+
+Only two things are outside `/opt/emucat`, both deliberately:
+
+| Path                                          | Owner                              | Why there                                     |
+| --------------------------------------------- | ---------------------------------- | --------------------------------------------- |
+| `/etc/systemd/system/emucat-deployer.service` | `root` 0644                        | systemd only loads units from its search path |
+| `/run/emucat-deployer/`                       | `emucat-deploy:emucat-socket` 0750 | The socket (0660); transient, made by systemd |
+
+The unit is a real file written by `install` (not a link), and what it runs is in
+`/opt/emucat/tooling`. There are no EmuCat files in `/etc/emucat`, `/srv` or `/var/backups`, and nothing
+needs to exist outside `/opt/emucat` before installing.
 
 ## 2. Host prerequisites
 
@@ -104,13 +126,14 @@ Accounts, created once by root:
 
 ```bash
 groupadd --system emucat-socket
-useradd --system --create-home --home-dir /var/lib/emucat-deploy \
+useradd --system --user-group --no-create-home --home-dir /opt/emucat/state/home \
   --groups docker,emucat-socket --shell /usr/sbin/nologin emucat-deploy
 ```
 
 `emucat-deploy` is in the `docker` group, **which is equivalent to root on this host**. No person logs in
-as it. `emucat-socket` exists only so that the API container (by GID) and the deployment service share
-the socket.
+as it. Its home is inside the layout and is created by `emucatctl init`, so `useradd` creates no directory.
+`emucat-socket` exists only so that the API container (by GID) and the deployment service share the
+socket.
 
 ## 3. External MariaDB
 
@@ -149,10 +172,10 @@ Other databases on the server are never touched: the application account can onl
 
 ## 4. Database bootstrap
 
-Once per server, as a MariaDB administrator:
+Once per server, as a MariaDB administrator (already done on MARS and MOON; skip this there):
 
 ```bash
-openssl rand -base64 33          # the new DB_PASSWORD; put it in /etc/emucat/app.env
+openssl rand -base64 33          # the new DB_PASSWORD; it goes into /opt/emucat/config/app.env
 sed "s/CHANGE_ME/<password>/" deploy/sql/bootstrap.sql | sudo mariadb
 ```
 
@@ -166,35 +189,39 @@ database.
 
 ## 5. Configuration files and environment variables
 
-Two files under `/etc/emucat`, never committed. Both are literal `KEY=VALUE` lines: no quotes, no
+Two files in `/opt/emucat/config`, never committed. `emucatctl init` creates both from the examples
+when they are missing and never overwrites them. Both are literal `KEY=VALUE` lines: no quotes, no
 variables. They are parsed as data, never sourced by a shell.
 
-**`deploy.env`**: how the host deploys. Start from
-[`deploy/config/deploy.env.example`](../deploy/config/deploy.env.example) (MARS) or
-[`moon.deploy.env.example`](../deploy/config/moon.deploy.env.example) (MOON).
+**`deploy.env`**: how the host deploys. Starts from
+[`deploy/config/deploy.env.example`](../deploy/config/deploy.env.example) (test server, MARS values) or,
+with `init --template`, [`moon.deploy.env.example`](../deploy/config/moon.deploy.env.example) (production).
 
-| Variable                                        | Meaning                                                                       |
-| ----------------------------------------------- | ----------------------------------------------------------------------------- |
-| `EMUCAT_ENVIRONMENT`                            | Label shown in Settings: `test`, `production`                                 |
-| `EMUCAT_BRANCH`                                 | The only branch this host deploys                                             |
-| `EMUCAT_GIT_URL`                                | Repository URL, read-only (SSH with a deploy key recommended). Never a token  |
-| `EMUCAT_GIT_SSH_KEY`                            | Private deploy key, or empty for a public HTTPS URL                           |
-| `EMUCAT_PUBLIC_URL`                             | Informational                                                                 |
-| `EMUCAT_ADMIN_UPDATES_ENABLED`                  | Exactly `true` enables the Install button; anything else disables it          |
-| `EMUCAT_ROOT`                                   | `/opt/emucat`                                                                 |
-| `EMUCAT_APP_ENV_FILE`                           | `/etc/emucat/app.env`                                                         |
-| `EMUCAT_DEPLOYER_TOKEN_FILE`                    | `/etc/emucat/deployer.token`, generated by `install`                          |
-| `EMUCAT_MEDIA_DIR`                              | Persistent media, owned by UID 10001                                          |
-| `EMUCAT_BACKUP_DIR`                             | Database dumps                                                                |
-| `EMUCAT_BACKUP_RETENTION_COUNT`                 | `0` keeps every dump; `N` keeps the newest N                                  |
-| `EMUCAT_DEPLOY_USER`, `EMUCAT_SOCKET_GROUP`     | The accounts from section 2                                                   |
-| `EMUCAT_BIND_ADDRESS`, `EMUCAT_HTTP_PORT`       | Where the web container listens for the proxy                                 |
-| `EMUCAT_TRUSTED_PROXIES`                        | Addresses whose `X-Forwarded-For` is believed, as the web container sees them |
-| `EMUCAT_*_SUBNET`                               | The three Docker networks; change only on a collision                         |
-| `EMUCAT_DB_HOST_GATEWAY`, `EMUCAT_HOST_DB_HOST` | How containers and the host reach MariaDB                                     |
-| `EMUCAT_VERIFY`                                 | Run type checks and database-free tests while building                        |
-| `EMUCAT_KEEP_RELEASES`                          | Images of this many releases are kept for `rollback-app`                      |
-| `EMUCAT_HEALTH_TIMEOUT_SECONDS`                 | How long a new release has to become healthy                                  |
+There are **no path settings** besides `EMUCAT_ROOT`: every file and directory derives from it, with the
+layout in section 1. `deploy.env` must be `EMUCAT_ROOT/config/deploy.env`; for a root other than
+`/opt/emucat`, set `EMUCAT_DEPLOY_CONFIG=<root>/config/deploy.env` when running `emucatctl`. The settings of
+the earlier layout (`EMUCAT_APP_ENV_FILE`, `EMUCAT_DEPLOYER_TOKEN_FILE`, `EMUCAT_MEDIA_DIR`,
+`EMUCAT_BACKUP_DIR`) are refused, so a stale file cannot point anywhere else.
+
+| Variable                                        | Meaning                                                                        |
+| ----------------------------------------------- | ------------------------------------------------------------------------------ |
+| `EMUCAT_ENVIRONMENT`                            | Label shown in Settings: `test`, `production`                                  |
+| `EMUCAT_BRANCH`                                 | The only branch this host deploys                                              |
+| `EMUCAT_GIT_URL`                                | Repository URL, read-only (SSH with a deploy key recommended). Never a token   |
+| `EMUCAT_GIT_SSH_KEY`                            | `/opt/emucat/config/deploy_key` (created by `init`), or empty for public HTTPS |
+| `EMUCAT_PUBLIC_URL`                             | Informational                                                                  |
+| `EMUCAT_ADMIN_UPDATES_ENABLED`                  | Exactly `true` enables the Install button; anything else disables it           |
+| `EMUCAT_ROOT`                                   | `/opt/emucat`; everything persistent is under it                               |
+| `EMUCAT_BACKUP_RETENTION_COUNT`                 | `0` keeps every dump; `N` keeps the newest N                                   |
+| `EMUCAT_DEPLOY_USER`, `EMUCAT_SOCKET_GROUP`     | The accounts from section 2                                                    |
+| `EMUCAT_SOCKET_DIR`                             | `/run/emucat-deployer`; must match the unit's `RuntimeDirectory`               |
+| `EMUCAT_BIND_ADDRESS`, `EMUCAT_HTTP_PORT`       | Where the web container listens for the proxy (MARS: `10.0.0.2`, `8095`)       |
+| `EMUCAT_TRUSTED_PROXIES`                        | Addresses whose `X-Forwarded-For` is believed, as the web container sees them  |
+| `EMUCAT_*_SUBNET`                               | The three Docker networks; change only on a collision                          |
+| `EMUCAT_DB_HOST_GATEWAY`, `EMUCAT_HOST_DB_HOST` | How containers and the host reach MariaDB                                      |
+| `EMUCAT_VERIFY`                                 | Run type checks and database-free tests while building                         |
+| `EMUCAT_KEEP_RELEASES`                          | Images of this many releases are kept for `rollback-app`                       |
+| `EMUCAT_HEALTH_TIMEOUT_SECONDS`                 | How long a new release has to become healthy                                   |
 
 **`app.env`**: the API container's environment. Start from
 [`deploy/config/app.env.example`](../deploy/config/app.env.example):
@@ -256,48 +283,76 @@ Compose file it was tested with.
   → host).
 - Both containers: read-only root file system, `cap_drop: ALL`, `no-new-privileges`, an init process,
   `tmpfs` for `/tmp`, memory and PID limits. Not privileged.
-- The API mounts exactly: the media directory (read-write), the socket directory (read-only) and the
-  deployment token (a Compose secret). **No Docker socket, no host root.**
+- The API mounts exactly: `/opt/emucat/data/media` (read-write), the socket directory (read-only) and
+  `/opt/emucat/config/deployer.token` (a Compose secret). **No Docker socket, no host root, nothing else
+  from `config/`.** These paths have no defaults in `compose.yaml`: `emucatctl` always passes them.
 - The web container publishes `EMUCAT_BIND_ADDRESS:EMUCAT_HTTP_PORT` and waits for a healthy API.
 
 Do not run `docker compose` by hand against it; use `emucatctl`, which sets the variables and the release.
 
 ## 8. First installation
 
-As root, from a checkout of the branch being installed (cloned with the deploy key, anywhere, for example
-`/root/emucat`):
+Prerequisites: sections 2 to 4 (packages, the two accounts, MariaDB with the `emucat-db` database and
+`emucat-usr` account). Nothing else needs to exist, in `/opt/emucat` or anywhere else.
+
+`init` and `install` run as root **from a copy of the repository** (they install the tooling from it).
+Any temporary copy of the branch being installed works; delete it afterwards. From a workstation that can
+read the repository:
 
 ```bash
-install -d -m 0755 /etc/emucat
-install -m 0640 -g emucat-deploy deploy/config/deploy.env.example /etc/emucat/deploy.env
-install -m 0640 -g emucat-deploy deploy/config/app.env.example /etc/emucat/app.env
-editor /etc/emucat/deploy.env /etc/emucat/app.env      # fill in the values; DB_PASSWORD from section 4
-install -m 0600 -o emucat-deploy deploy_key /etc/emucat/deploy_key
-install -d -o emucat-deploy -m 0750 /opt/emucat/state
-ssh-keyscan github.com > /opt/emucat/state/known_hosts  # then verify the fingerprints against GitHub's
-chown emucat-deploy /opt/emucat/state/known_hosts
-
-deploy/bin/emucatctl install       # directories, tooling, token, mirror, systemd unit
-/opt/emucat/tooling/bin/emucatctl check
-/opt/emucat/tooling/bin/emucatctl update
+git archive --format=tar --prefix=emucat-src/ origin/develop | ssh <server> 'rm -rf ~/emucat-src && tar -x -C ~'
 ```
 
-`install` is repeatable. It creates the directories (the media directory owned by 10001 if it does not
-exist, and warns, without changing it, if it exists with another owner), generates the deployment token
-once, copies `emucatctl` and the deployment service to `/opt/emucat/tooling` owned by root, clones the
-bare mirror of the configured branch, and installs and starts `emucat-deployer.service`.
+Then, on the server:
+
+```bash
+cd ~/emucat-src
+sudo deploy/bin/emucatctl init        # layout, deploy.env, app.env, token, deploy key; lists what is left
+```
+
+`init` creates the whole layout of section 1, writes `config/deploy.env` from
+`deploy/config/deploy.env.example` (or `--template <file>`), `config/app.env` from `app.env.example`,
+generates `config/deployer.token`, and, when `ssh-keygen` is available and `EMUCAT_GIT_SSH_KEY` is
+missing, a new ed25519 deploy key whose public half it prints. It never overwrites an existing file, so it
+is safe to run again; it ends with the list of what still has to be filled in:
+
+```bash
+sudoedit /opt/emucat/config/deploy.env     # EMUCAT_GIT_URL; review branch, address, port, proxies
+sudoedit /opt/emucat/config/app.env        # DB_PASSWORD (section 4); check DB_NAME, DB_USER, PUBLIC_ORIGIN
+# GitHub > repository > Settings > Deploy keys: add the printed public key, write access OFF.
+ssh-keyscan -t ed25519 github.com | sudo tee /opt/emucat/config/known_hosts >/dev/null
+sudo ssh-keygen -lf /opt/emucat/config/known_hosts
+#   must print SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU; compare with GitHub's published
+#   fingerprints (docs.github.com, "GitHub's SSH key fingerprints") before going on.
+
+sudo deploy/bin/emucatctl install     # tooling, mirror, systemd unit; refuses while anything is missing
+sudo /opt/emucat/tooling/bin/emucatctl check
+sudo /opt/emucat/tooling/bin/emucatctl update
+rm -rf ~/emucat-src
+```
+
+To use an existing deploy key instead, put it at `/opt/emucat/config/deploy_key` before `init` (or
+before `install`); its owner and mode are set for you.
+
+`install` is repeatable. It checks the configuration and prerequisites, re-creates any missing
+directory and puts owners and modes back (it never changes existing media: if `data/media` is not owned
+by 10001 it only warns), copies `emucatctl` and the deployment service to `/opt/emucat/tooling` owned by
+root, clones the bare mirror of the configured branch into `repo.git`, writes
+`/etc/systemd/system/emucat-deployer.service` from the template, and starts the service.
 
 The first `update` builds, backs up the (empty) database, applies all migrations and starts the
 containers. Then create the first administrator at the public address: the setup token is `SETUP_TOKEN`
 or, when empty, printed by `emucatctl logs api`.
 
-Moving existing media: copy it into `EMUCAT_MEDIA_DIR` and `chown -R 10001:10001` it, while the
+Moving existing media: copy it into `/opt/emucat/data/media` and `chown -R 10001:10001` it, while the
 application is stopped.
 
 ## 9. The deployment service
 
 `emucat-deployer.service` runs `/opt/emucat/tooling/deployer/src/main.ts` as `emucat-deploy`, group
-`emucat-socket`. It:
+`emucat-socket` (plus the account's own group, which can read `config/`), with
+`HOME=/opt/emucat/state/home`. systemd makes the whole file system read-only to it except `state/`,
+`releases/`, `repo.git/` and `backups/`; `config/` and `tooling/` are read-only even to its account. It:
 
 - listens on `/run/emucat-deployer/deployer.sock` only (mode 0660, no TCP port) and requires
   `Authorization: Bearer <deployer.token>` on every request;
@@ -364,7 +419,7 @@ Before every update `emucatctl` dumps `emucat-db` with `mariadb-dump --single-tr
 --triggers --events`, using the application account through a temporary option file (the password never
 appears in a process list). The dump is written to `.partial`, checked with `gzip -t` and for the
 "Dump completed" trailer, and only then renamed to
-`/var/backups/emucat/emucat-db-<time>-<label>.sql.gz`. A failed backup stops the update.
+`/opt/emucat/backups/emucat-db-<time>-<label>.sql.gz` (mode 0640). A failed backup stops the update.
 
 ```bash
 sudo /opt/emucat/tooling/bin/emucatctl backup            # a manual dump, same checks
@@ -377,11 +432,12 @@ Restoring a dump is deliberately manual, with the application stopped:
 
 ```bash
 docker stop emucat-web-1 emucat-api-1
-gunzip -c /var/backups/emucat/<dump>.sql.gz | mariadb -u emucat-usr -p emucat-db
+sudo gunzip -c /opt/emucat/backups/<dump>.sql.gz | mariadb -u emucat-usr -p emucat-db
 sudo /opt/emucat/tooling/bin/emucatctl rollback-app --to <the commit that matches the dump>
 ```
 
-Media is not in the dumps: back up `EMUCAT_MEDIA_DIR` with the host's usual file backups.
+Media is not in the dumps. Back up `/opt/emucat/data/media` and `/opt/emucat/backups` (and, separately and
+securely, `/opt/emucat/config`) with the host's usual file backups.
 
 ## 13. Rolling back, and its limits
 
@@ -407,8 +463,9 @@ is an nginx example for MARS. The proxy must:
 - pass WebSocket upgrades (next section).
 
 The web container believes `X-Forwarded-For` only from `EMUCAT_TRUSTED_PROXIES`. A proxy on the same host
-connecting to `127.0.0.1` arrives from the edge network's gateway, `172.31.253.1` by default. The API in
-turn trusts only the web container's network. Forwarded headers from anyone else are ignored.
+arrives from the edge network's gateway, `172.31.253.1` by default (Docker's userland proxy); a proxy on
+another machine usually arrives with its own address, which must then be added. The API in turn trusts
+only the web container's network. Forwarded headers from anyone else are ignored.
 
 `PUBLIC_ORIGIN` must be the exact public address (`https://emucat-test.dfri.info`): state-changing
 requests whose `Origin` differs are refused.
@@ -425,16 +482,50 @@ credential).
 
 ## 16. MARS
 
-Test server, branch `develop`, `https://emucat-test.dfri.info`, updates from Settings enabled.
-[`deploy.env.example`](../deploy/config/deploy.env.example) is the MARS configuration; set
-`EMUCAT_GIT_URL` to the real repository, and in `app.env` set `PUBLIC_ORIGIN=https://emucat-test.dfri.info`.
+Test server, branch `develop`, `https://emucat-test.dfri.info`, updates from Settings enabled. The
+default [`deploy.env.example`](../deploy/config/deploy.env.example) has the MARS values: the web container
+listens on `10.0.0.2:8095` for the reverse proxy, and `app.env.example` has
+`PUBLIC_ORIGIN=https://emucat-test.dfri.info`. Only `EMUCAT_GIT_URL` and `DB_PASSWORD` must be filled in.
+
+Before installing, on MARS: `10.0.0.2` is an address of the host, port 8095 on it is reachable from the
+reverse proxy only, and MariaDB accepts `emucat-usr` from `127.0.0.1` and the database network (section 3).
+
+```bash
+# On the workstation (after the tooling is on origin/develop):
+git fetch origin
+git archive --format=tar --prefix=emucat-src/ origin/develop | ssh mars 'rm -rf ~/emucat-src && tar -x -C ~'
+
+# On MARS:
+sudo groupadd --system emucat-socket
+sudo useradd --system --user-group --no-create-home --home-dir /opt/emucat/state/home \
+  --groups docker,emucat-socket --shell /usr/sbin/nologin emucat-deploy
+cd ~/emucat-src
+sudo deploy/bin/emucatctl init
+sudo sed -i 's#^EMUCAT_GIT_URL=.*#EMUCAT_GIT_URL=git@github.com:davidfriscia/emucat.git#' /opt/emucat/config/deploy.env
+sudoedit /opt/emucat/config/app.env      # DB_PASSWORD of emucat-usr
+# Add the public key printed by init as a read-only deploy key of the GitHub repository.
+ssh-keyscan -t ed25519 github.com | sudo tee /opt/emucat/config/known_hosts >/dev/null
+sudo ssh-keygen -lf /opt/emucat/config/known_hosts   # verify the fingerprint (section 8)
+sudo deploy/bin/emucatctl install
+sudo /opt/emucat/tooling/bin/emucatctl check
+sudo /opt/emucat/tooling/bin/emucatctl update
+cd ~ && rm -rf ~/emucat-src
+```
 
 ## 17. MOON
 
-Production, branch `main`. Start from
-[`moon.deploy.env.example`](../deploy/config/moon.deploy.env.example): `EMUCAT_ENVIRONMENT=production`,
-`EMUCAT_BRANCH=main`, `EMUCAT_ADMIN_UPDATES_ENABLED=false`, and set `EMUCAT_PUBLIC_URL` and `PUBLIC_ORIGIN`
-to the chosen public address. Everything else is identical to MARS. Use a separate deploy key.
+Production, branch `main`, the same `/opt/emucat` layout and the same steps as MARS (copy from
+`origin/main`), except that `init` starts from the production example:
+
+```bash
+sudo deploy/bin/emucatctl init --template deploy/config/moon.deploy.env.example
+```
+
+[`moon.deploy.env.example`](../deploy/config/moon.deploy.env.example) has
+`EMUCAT_ENVIRONMENT=production`, `EMUCAT_BRANCH=main`, `EMUCAT_ADMIN_UPDATES_ENABLED=false`, and a loopback
+binding until the production proxy is known. Set `EMUCAT_PUBLIC_URL`, `PUBLIC_ORIGIN`,
+`EMUCAT_BIND_ADDRESS` and `EMUCAT_HTTP_PORT` to the production values. `init` generates a separate deploy
+key on each host.
 
 ## 18. Disabling updates in production
 
@@ -468,7 +559,8 @@ host.
 - The token is compared in constant time; the socket is reachable only by `emucat-socket` members.
 - Values from the browser are validated twice (API and service) and never reach a shell: processes are
   started with argument arrays, and commit IDs must be 40 lowercase hex digits.
-- Logs shown in Settings are sanitized; `/etc/emucat/*` is never readable by the application.
+- Logs shown in Settings are sanitized; `/opt/emucat/config` is never mounted into or readable by the
+  application, except the one token file, passed as a Compose secret.
 - Authentication, sessions, roles and agent pairing are unchanged. There is no OAuth or external
   identity provider.
 
@@ -481,12 +573,12 @@ host.
 | `update` exits 75                          | Another update holds the lock; `emucatctl status`                                                                                      |
 | "target_changed"                           | The branch moved after the check; check again                                                                                          |
 | Build or test stage fails                  | `state/operations/<id>.log`; the running release is untouched                                                                          |
-| Backup fails                               | MariaDB reachable from the host as `emucat-usr`? Disk space in `EMUCAT_BACKUP_DIR`                                                     |
+| Backup fails                               | MariaDB reachable from the host as `emucat-usr`? Disk space in `/opt/emucat/backups`                                                   |
 | API unhealthy after start                  | `emucatctl logs api`: database address, firewall, `bind-address`, migrations                                                           |
 | `cross_origin_rejected` at sign-in         | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
 | Client addresses are the proxy's           | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
 | Agents disconnect every minute             | Proxy WebSocket timeouts (section 15)                                                                                                  |
-| Media permission errors                    | `EMUCAT_MEDIA_DIR` must be owned by 10001:10001                                                                                        |
+| Media permission errors                    | `/opt/emucat/data/media` must be owned by 10001:10001                                                                                  |
 | An update shows "interrupted"              | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
 | `rollback-app` exits 3                     | The database is newer than that release; restore a dump or fix forward                                                                 |
 
@@ -495,11 +587,11 @@ mirror and the socket without changing anything.
 
 ## Testing this tooling
 
-| Command             | What it runs                                                                                                                                                               |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm test`         | Includes the deployment service's unit tests and the API's update routes                                                                                                   |
-| `pnpm test:deploy`  | `emucatctl` and the real deployment service against disposable hosts, in a Linux container with fake `docker`, `curl` and MariaDB clients                                  |
-| `pnpm test:compose` | Builds both images, runs `deploy/compose.yaml` against a disposable MariaDB outside Compose, and checks routing, caching, health, container security and media persistence |
+| Command             | What it runs                                                                                                                                                                                                                                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm test`         | Includes the deployment service's unit tests and the API's update routes                                                                                                                                                                                                                                    |
+| `pnpm test:deploy`  | `emucatctl` and the real deployment service against disposable hosts, in a Linux container with fake `docker`, `curl` and MariaDB clients; then, as root in a fresh container, `init`, `install`, `check`, `update`, `backup` and `rollback-app` into the real `/opt/emucat`, checking every owner and mode |
+| `pnpm test:compose` | Builds both images, runs `deploy/compose.yaml` against a disposable MariaDB outside Compose, and checks routing, caching, health, container security and media persistence                                                                                                                                  |
 
 Both Docker-based tests create only resources named `emucat-smoke-*` or `emucat-deploy-test`, and remove
 them.

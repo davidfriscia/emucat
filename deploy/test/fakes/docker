@@ -44,6 +44,10 @@ case ${1:-} in
     ;;
   compose)
     shift
+    # The host paths Compose would mount, so that tests can check where they point.
+    printf 'EMUCAT_APP_ENV_FILE=%s EMUCAT_DEPLOYER_TOKEN_FILE=%s EMUCAT_MEDIA_DIR=%s EMUCAT_SOCKET_DIR=%s\n' \
+      "${EMUCAT_APP_ENV_FILE:-}" "${EMUCAT_DEPLOYER_TOKEN_FILE:-}" "${EMUCAT_MEDIA_DIR:-}" \
+      "${EMUCAT_SOCKET_DIR:-}" >>"$fake/compose-env"
     while (($#)); do
       case $1 in
         --project-name | --project-directory | --file) shift 2 ;;
@@ -51,6 +55,7 @@ case ${1:-} in
       esac
     done
     case ${1:-} in
+      version) echo 'Docker Compose version v2 (fake)'; exit 0 ;;
       config) exit 0 ;;
       run)
         if [[ $fail == migrate ]]; then echo "MigrationError: Migration 0002 failed"; exit 1; fi

@@ -9,7 +9,8 @@ function commandEnvironment(config: DeployerConfig): NodeJS.ProcessEnv {
   return {
     PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
     LANG: 'C.UTF-8',
-    HOME: process.env.HOME ?? config.root,
+    // The deployment account's home inside the layout (Docker and Git keep their client files there).
+    HOME: join(config.stateDir, 'home'),
     EMUCAT_DEPLOY_CONFIG: config.configPath,
   };
 }

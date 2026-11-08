@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # emucatctl: installs, updates and inspects an EmuCat deployment on a Linux host.
 #
-# The same script runs on every server; /etc/emucat/deploy.env says which environment, branch and paths.
+# The same script runs on every server; /opt/emucat/config/deploy.env says which environment and branch.
 # It is installed root-owned in $EMUCAT_ROOT/tooling and is the only program the deployment service runs.
 # See docs/deployment.md. Run `emucatctl help` for the commands.
+#
+# Everything persistent lives under EMUCAT_ROOT (/opt/emucat by default); see layout_paths below. The only
+# things outside it are the systemd unit (in the unit search path) and the runtime socket directory.
 #
 # Safety rules this script keeps:
 # - The branch comes from host configuration only. Nothing deploys a ref given on the command line or by a
@@ -22,7 +25,7 @@ readonly EXIT_BUSY=75
 readonly EXIT_UNSAFE=3
 readonly COMMIT_RE='^[0-9a-f]{40}$'
 readonly UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-readonly CONFIG_PATH=${EMUCAT_DEPLOY_CONFIG:-/etc/emucat/deploy.env}
+readonly CONFIG_PATH=${EMUCAT_DEPLOY_CONFIG:-/opt/emucat/config/deploy.env}
 TOOLING_DIR=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
 readonly TOOLING_DIR
 
@@ -59,8 +62,19 @@ require_absolute() {
     abort "$name must be a plain absolute path"
 }
 
+# Path settings of the earlier layout. Every persistent path now derives from EMUCAT_ROOT, so these are
+# refused rather than silently ignored.
+readonly LEGACY_PATH_KEYS=(EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR EMUCAT_BACKUP_DIR)
+
 load_config() {
+  local name
+  # Compose reads these names; they are derived below, never taken from the caller's environment.
+  for name in "${LEGACY_PATH_KEYS[@]}"; do unset "$name"; done
   read_env_file "$CONFIG_PATH" '^EMUCAT_[A-Z0-9_]+$'
+  for name in "${LEGACY_PATH_KEYS[@]}"; do
+    [[ -z ${!name+set} ]] ||
+      abort "$name is no longer supported: every path derives from EMUCAT_ROOT. Remove it from $CONFIG_PATH"
+  done
   : "${EMUCAT_ENVIRONMENT:?EMUCAT_ENVIRONMENT is required in $CONFIG_PATH}"
   : "${EMUCAT_BRANCH:?EMUCAT_BRANCH is required in $CONFIG_PATH}"
   : "${EMUCAT_GIT_URL:?EMUCAT_GIT_URL is required in $CONFIG_PATH}"
@@ -73,10 +87,6 @@ load_config() {
 
   : "${EMUCAT_ROOT:=/opt/emucat}"
   : "${EMUCAT_PROJECT:=emucat}"
-  : "${EMUCAT_APP_ENV_FILE:=/etc/emucat/app.env}"
-  : "${EMUCAT_DEPLOYER_TOKEN_FILE:=/etc/emucat/deployer.token}"
-  : "${EMUCAT_MEDIA_DIR:=/srv/emucat/media}"
-  : "${EMUCAT_BACKUP_DIR:=/var/backups/emucat}"
   : "${EMUCAT_SOCKET_DIR:=/run/emucat-deployer}"
   : "${EMUCAT_DEPLOY_USER:=emucat-deploy}"
   : "${EMUCAT_SOCKET_GROUP:=emucat-socket}"
@@ -97,11 +107,13 @@ load_config() {
   : "${EMUCAT_GIT_SSH_KEY:=}"
   : "${EMUCAT_PUBLIC_URL:=}"
 
-  local name
-  for name in EMUCAT_ROOT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR \
-    EMUCAT_BACKUP_DIR EMUCAT_SOCKET_DIR; do
+  for name in EMUCAT_ROOT EMUCAT_SOCKET_DIR; do
     require_absolute "$name"
   done
+  EMUCAT_ROOT=${EMUCAT_ROOT%/}
+  [[ -n $EMUCAT_ROOT ]] || abort "EMUCAT_ROOT must not be /"
+  [[ $CONFIG_PATH == "$EMUCAT_ROOT/config/deploy.env" ]] ||
+    abort "$CONFIG_PATH must be $EMUCAT_ROOT/config/deploy.env: the configuration lives under EMUCAT_ROOT"
   [[ -z $EMUCAT_GIT_SSH_KEY ]] || require_absolute EMUCAT_GIT_SSH_KEY
   [[ $EMUCAT_PROJECT =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || abort "EMUCAT_PROJECT is not valid"
   [[ $EMUCAT_HTTP_PORT =~ ^[0-9]{1,5}$ ]] || abort "EMUCAT_HTTP_PORT is not a port"
@@ -117,23 +129,44 @@ load_config() {
     EMUCAT_SOCKET_GID=$(getent group "$EMUCAT_SOCKET_GROUP" 2>/dev/null | cut -d: -f3 || true)
   fi
 
-  readonly REPO=$EMUCAT_ROOT/repo.git
-  readonly STATE=$EMUCAT_ROOT/state
-  readonly RELEASES=$EMUCAT_ROOT/releases
-  readonly BUILDS=$EMUCAT_ROOT/builds
-  readonly OPERATIONS=$STATE/operations
-  readonly LOCK_FILE=$STATE/deploy.lock
-  readonly CURRENT_FILE=$STATE/current-release.json
+  layout_paths
   local host=$EMUCAT_BIND_ADDRESS
   [[ $host == 0.0.0.0 ]] && host=127.0.0.1
   [[ $host == *:* ]] && host="[$host]"
   readonly INGRESS="http://$host:$EMUCAT_HTTP_PORT"
 
-  # Everything Compose substitutes into compose.yaml.
+  # Everything Compose substitutes into compose.yaml. The three file and directory paths are derived.
   export EMUCAT_PROJECT EMUCAT_ENVIRONMENT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR \
     EMUCAT_SOCKET_DIR EMUCAT_SOCKET_GID EMUCAT_BIND_ADDRESS EMUCAT_HTTP_PORT EMUCAT_TRUSTED_PROXIES \
     EMUCAT_DB_HOST_GATEWAY EMUCAT_EDGE_SUBNET EMUCAT_INTERNAL_SUBNET EMUCAT_DATABASE_SUBNET \
     EMUCAT_API_MEMORY_LIMIT
+}
+
+# The one place that says where things live. Nothing persistent is outside EMUCAT_ROOT.
+#   tooling/     root-owned emucatctl, deployment service and unit template (written by install only)
+#   repo.git/    bare mirror of the configured branch
+#   releases/    each deployed release's compose.yaml and migration list, and history.tsv
+#   config/      deploy.env, app.env, deployer.token, deploy_key, known_hosts
+#   state/       current release, operations and their logs, the lock, build exports, the account's home
+#   data/media/  screenshots and other media, owned by the API container's UID
+#   backups/     database dumps
+layout_paths() {
+  readonly TOOLING=$EMUCAT_ROOT/tooling
+  readonly REPO=$EMUCAT_ROOT/repo.git
+  readonly RELEASES=$EMUCAT_ROOT/releases
+  readonly CONFIG_DIR=$EMUCAT_ROOT/config
+  readonly STATE=$EMUCAT_ROOT/state
+  readonly DATA_DIR=$EMUCAT_ROOT/data
+  readonly BACKUP_DIR=$EMUCAT_ROOT/backups
+  readonly BUILDS=$STATE/builds
+  readonly DEPLOY_HOME=$STATE/home
+  readonly OPERATIONS=$STATE/operations
+  readonly LOCK_FILE=$STATE/deploy.lock
+  readonly CURRENT_FILE=$STATE/current-release.json
+  readonly KNOWN_HOSTS=$CONFIG_DIR/known_hosts
+  readonly EMUCAT_APP_ENV_FILE=$CONFIG_DIR/app.env
+  readonly EMUCAT_DEPLOYER_TOKEN_FILE=$CONFIG_DIR/deployer.token
+  readonly EMUCAT_MEDIA_DIR=$DATA_DIR/media
 }
 
 load_app_database() {
@@ -167,7 +200,7 @@ git_repo() {
   local ssh_command=
   if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
     ssh_command="ssh -i $EMUCAT_GIT_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
-    ssh_command+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$STATE/known_hosts"
+    ssh_command+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
   fi
   GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND=${ssh_command:-ssh -o BatchMode=yes} git -C "$REPO" "$@"
 }
@@ -352,15 +385,15 @@ finish_success() {
 
 # --- Backups -------------------------------------------------------------------------------------------
 
-# Dumps the application database to $EMUCAT_BACKUP_DIR and sets BACKUP_FILE. The dump is written under a
+# Dumps the application database to $BACKUP_DIR and sets BACKUP_FILE. The dump is written under a
 # temporary name and renamed only once it has been checked, so a file without the suffix is complete.
 BACKUP_FILE=
 backup_database() {
   local label=$1 stamp partial
-  mkdir -p -- "$EMUCAT_BACKUP_DIR"
+  mkdir -p -- "$BACKUP_DIR"
   write_db_option_file
   stamp=$(date -u +%Y%m%dT%H%M%S%3NZ)
-  BACKUP_FILE=$EMUCAT_BACKUP_DIR/emucat-db-$stamp-$label.sql.gz
+  BACKUP_FILE=$BACKUP_DIR/emucat-db-$stamp-$label.sql.gz
   partial=$BACKUP_FILE.partial
   if ! mariadb-dump --defaults-extra-file="$DB_OPTION_FILE" --single-transaction --quick \
     --routines --triggers --events --hex-blob --default-character-set=utf8mb4 \
@@ -382,7 +415,7 @@ backup_database() {
 # Only with an explicit retention count. 0, the default, keeps every backup.
 prune_backups() {
   [[ $EMUCAT_BACKUP_RETENTION_COUNT -gt 0 ]] || return 0
-  local -a files=("$EMUCAT_BACKUP_DIR"/emucat-db-*.sql.gz)
+  local -a files=("$BACKUP_DIR"/emucat-db-*.sql.gz)
   local count=${#files[@]} index
   ((count > EMUCAT_BACKUP_RETENTION_COUNT)) || return 0
   # Names start with a UTC timestamp, so glob order is age order.
@@ -469,8 +502,10 @@ usage() {
   cat <<'EOF'
 Usage: emucatctl <command> [options]
 
+  init [--template FILE]  Create the directory layout and a starting configuration (as root, from a
+                          checkout). Never overwrites a file. Edit the configuration, then run install.
   install                 Prepare this host (as root): directories, mirror, tooling, deployment service.
-  check                   Check configuration, prerequisites and connectivity. Changes nothing.
+  check                 Check configuration, prerequisites and connectivity. Changes nothing.
   status [--json]         Show the deployed release, containers and health.
   check-update [--json]   Fetch the configured branch and report whether an update is available.
   update [--yes] [--expect COMMIT]
@@ -482,7 +517,8 @@ Usage: emucatctl <command> [options]
                           Show application container logs.
   help                    Show this text.
 
-The branch, repository and every path come from /etc/emucat/deploy.env (or $EMUCAT_DEPLOY_CONFIG).
+The branch and repository come from /opt/emucat/config/deploy.env, and every path derives from its
+EMUCAT_ROOT. For another root, set EMUCAT_DEPLOY_CONFIG to <root>/config/deploy.env.
 EOF
 }
 
@@ -790,6 +826,11 @@ mode_at_most() {
   mode=$(stat -c %a -- "$file") || return 1
   (((8#$mode & ~8#$max) == 0))
 }
+owned_with_mode() {
+  local path=$1 uid=$2 max=$3
+  [[ -e $path && ! -L $path ]] || return 1
+  [[ $(stat -c %u -- "$path") == "$uid" ]] && mode_at_most "$path" "$max"
+}
 database_answers() {
   write_db_option_file
   mariadb --defaults-extra-file="$DB_OPTION_FILE" --database="$APP_DB_NAME" -e 'SELECT 1'
@@ -808,18 +849,30 @@ cmd_check() {
   check_item "docker compose v2 is available" docker compose version
   check_item "Docker is reachable" docker info
   check_item "node 22.18 or later (deployment service)" node_new_enough
-  say "Configuration files"
-  check_item "$CONFIG_PATH is not world-readable" mode_at_most "$CONFIG_PATH" 640
+  say "Configuration files ($CONFIG_DIR)"
+  check_item "$CONFIG_DIR is root-owned and closed to others" owned_with_mode "$CONFIG_DIR" 0 750
+  check_item "$CONFIG_PATH is root-owned and not world-readable" owned_with_mode "$CONFIG_PATH" 0 640
   check_item "$EMUCAT_APP_ENV_FILE exists" test -r "$EMUCAT_APP_ENV_FILE"
-  check_item "$EMUCAT_APP_ENV_FILE is not world-readable" mode_at_most "$EMUCAT_APP_ENV_FILE" 640
+  check_item "$EMUCAT_APP_ENV_FILE is root-owned and not world-readable" \
+    owned_with_mode "$EMUCAT_APP_ENV_FILE" 0 640
   check_item "$EMUCAT_DEPLOYER_TOKEN_FILE exists" test -r "$EMUCAT_DEPLOYER_TOKEN_FILE"
-  check_item "$EMUCAT_DEPLOYER_TOKEN_FILE is not world-readable" mode_at_most "$EMUCAT_DEPLOYER_TOKEN_FILE" 640
+  check_item "$EMUCAT_DEPLOYER_TOKEN_FILE is root-owned and not world-readable" \
+    owned_with_mode "$EMUCAT_DEPLOYER_TOKEN_FILE" 0 640
+  if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
+    check_item "$EMUCAT_GIT_SSH_KEY is readable by $EMUCAT_DEPLOY_USER only" mode_at_most "$EMUCAT_GIT_SSH_KEY" 600
+    check_item "$KNOWN_HOSTS exists and is root-owned" owned_with_mode "$KNOWN_HOSTS" 0 644
+  fi
   check_item "socket group $EMUCAT_SOCKET_GROUP exists" test -n "$EMUCAT_SOCKET_GID"
-  say "Directories"
-  check_item "repository mirror $REPO" test -d "$REPO"
+  say "Directories ($EMUCAT_ROOT)"
+  check_item "$EMUCAT_ROOT is root-owned and writable by root only" owned_with_mode "$EMUCAT_ROOT" 0 755
+  check_item "tooling $TOOLING is root-owned and writable by root only" owned_with_mode "$TOOLING" 0 755
+  check_item "the installed emucatctl is root-owned" owned_with_mode "$TOOLING/bin/emucatctl" 0 755
+  check_item "repository mirror $REPO" test -f "$REPO/HEAD"
+  for dir in "$RELEASES" "$STATE" "$OPERATIONS" "$BUILDS" "$BACKUP_DIR"; do
+    check_item "$dir is writable by the deployment account" test -d "$dir" -a -w "$dir"
+  done
   check_item "media directory $EMUCAT_MEDIA_DIR" test -d "$EMUCAT_MEDIA_DIR"
   check_item "media directory owned by UID 10001" test "$(stat -c %u -- "$EMUCAT_MEDIA_DIR" 2>/dev/null)" = 10001
-  check_item "backup directory $EMUCAT_BACKUP_DIR" test -d "$EMUCAT_BACKUP_DIR"
   check_item "deployment service socket" test -S "$EMUCAT_SOCKET_DIR/deployer.sock"
   say "Connectivity"
   check_item "MariaDB accepts the application account ($EMUCAT_HOST_DB_HOST)" database_answers
@@ -831,73 +884,215 @@ cmd_check() {
   say "All checks passed."
 }
 
-cmd_install() {
-  [[ $EUID -eq 0 ]] || abort "install must run as root"
-  local source_root=$TOOLING_DIR/.. tooling=$EMUCAT_ROOT/tooling staged unit
-  # Run from a checkout: deploy/bin/emucatctl, with apps/deployer next to it.
-  [[ -f $source_root/apps/deployer/src/main.ts ]] ||
-    abort "run install from a checkout of the repository (deploy/bin/emucatctl)"
-  id -u "$EMUCAT_DEPLOY_USER" >/dev/null 2>&1 ||
-    abort "create the account first: useradd --system --create-home --home-dir /var/lib/emucat-deploy --groups docker,$EMUCAT_SOCKET_GROUP $EMUCAT_DEPLOY_USER"
-  [[ -n $EMUCAT_SOCKET_GID ]] || abort "create the group first: groupadd --system $EMUCAT_SOCKET_GROUP"
-  for tool in docker git flock curl gzip mariadb mariadb-dump node systemctl runuser; do
-    command -v "$tool" >/dev/null || abort "$tool is not installed"
-  done
-  node_new_enough || abort "the deployment service needs Node.js 22.18 or later on the host"
+# --- Installation --------------------------------------------------------------------------------------
+# init and install run as root, from a checkout of the repository. Both are repeatable, and neither ever
+# replaces an existing configuration file, secret, release, backup or media file.
 
-  say "Directories"
-  install -d -o root -g root -m 0755 "$EMUCAT_ROOT"
+ACCOUNT_HINT="groupadd --system emucat-socket && useradd --system --user-group --no-create-home \
+--home-dir /opt/emucat/state/home --groups docker,emucat-socket --shell /usr/sbin/nologin emucat-deploy"
+
+require_root() { [[ $EUID -eq 0 ]] || abort "$1 must run as root"; }
+
+source_root() {
+  # deploy/bin/emucatctl in a checkout, with apps/deployer and deploy/config next to it.
+  local root=$TOOLING_DIR/..
+  [[ -f $root/apps/deployer/src/main.ts && -f $root/deploy/config/app.env.example ]] ||
+    abort "run this from a checkout of the repository (deploy/bin/emucatctl), not from the installed tooling"
+  printf '%s' "$(cd -- "$root" && pwd)"
+}
+
+require_accounts() {
+  id -u "$EMUCAT_DEPLOY_USER" >/dev/null 2>&1 ||
+    abort "create the deployment account first: $ACCOUNT_HINT"
+  getent group "$EMUCAT_DEPLOY_USER" >/dev/null 2>&1 ||
+    abort "the deployment account needs its own group $EMUCAT_DEPLOY_USER (useradd --user-group)"
+  [[ -n $EMUCAT_SOCKET_GID ]] || abort "create the socket group first: $ACCOUNT_HINT"
+}
+
+# A configuration file must be a plain file: never follow a link someone else planted.
+secure_file() {
+  local path=$1 owner=$2 mode=$3
+  [[ -e $path ]] || return 0
+  [[ -f $path && ! -L $path ]] || abort "$path must be a regular file, not a link or directory"
+  chown -- "$owner" "$path"
+  chmod -- "$mode" "$path"
+}
+
+# The whole layout under EMUCAT_ROOT, with its owners and modes. Existing directories keep their contents.
+create_layout() {
+  say "Directories under $EMUCAT_ROOT"
+  local dir
+  for dir in "$EMUCAT_ROOT" "$TOOLING" "$CONFIG_DIR" "$DATA_DIR"; do
+    [[ ! -L $dir ]] || abort "$dir must be a directory, not a link"
+  done
+  install -d -o root -g root -m 0755 "$EMUCAT_ROOT" "$DATA_DIR"
+  # Readable by the deployment account (deploy.env, app.env, known_hosts), writable by root only.
+  install -d -o root -g "$EMUCAT_DEPLOY_USER" -m 0750 "$CONFIG_DIR"
   install -d -o "$EMUCAT_DEPLOY_USER" -g "$EMUCAT_DEPLOY_USER" -m 0750 \
-    "$STATE" "$OPERATIONS" "$RELEASES" "$BUILDS"
-  install -d -o "$EMUCAT_DEPLOY_USER" -g "$EMUCAT_DEPLOY_USER" -m 0750 "$EMUCAT_BACKUP_DIR"
+    "$REPO" "$RELEASES" "$STATE" "$OPERATIONS" "$BUILDS" "$BACKUP_DIR"
+  install -d -o "$EMUCAT_DEPLOY_USER" -g "$EMUCAT_DEPLOY_USER" -m 0700 "$DEPLOY_HOME"
   if [[ ! -d $EMUCAT_MEDIA_DIR ]]; then
     install -d -o 10001 -g 10001 -m 0750 "$EMUCAT_MEDIA_DIR"
   elif [[ $(stat -c %u -- "$EMUCAT_MEDIA_DIR") != 10001 ]]; then
     # Existing data is never changed automatically.
     warn "$EMUCAT_MEDIA_DIR exists but is not owned by UID 10001; fix it by hand (see docs/deployment.md)"
   fi
+}
 
-  say "Deployment service token"
+create_token() {
   if [[ ! -s $EMUCAT_DEPLOYER_TOKEN_FILE ]]; then
-    install -d -m 0755 "$(dirname -- "$EMUCAT_DEPLOYER_TOKEN_FILE")"
+    say "Deployment service token"
     (umask 077 && head -c 32 /dev/urandom | base64 | tr -d '=+/\n' >"$EMUCAT_DEPLOYER_TOKEN_FILE")
   fi
-  chown "root:$EMUCAT_SOCKET_GROUP" -- "$EMUCAT_DEPLOYER_TOKEN_FILE"
-  chmod 0640 -- "$EMUCAT_DEPLOYER_TOKEN_FILE"
+}
+
+# Owners and modes of everything in config/. The token is for the socket group (the API container and the
+# deployment service); the deploy key is for the deployment account alone; the rest is read-only to it.
+secure_configuration() {
+  secure_file "$CONFIG_PATH" "root:$EMUCAT_DEPLOY_USER" 0640
+  secure_file "$EMUCAT_APP_ENV_FILE" "root:$EMUCAT_DEPLOY_USER" 0640
+  secure_file "$KNOWN_HOSTS" "root:$EMUCAT_DEPLOY_USER" 0640
+  secure_file "$EMUCAT_DEPLOYER_TOKEN_FILE" "root:$EMUCAT_SOCKET_GROUP" 0640
+  if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
+    secure_file "$EMUCAT_GIT_SSH_KEY" "$EMUCAT_DEPLOY_USER:$EMUCAT_DEPLOY_USER" 0600
+    secure_file "$EMUCAT_GIT_SSH_KEY.pub" "root:$EMUCAT_DEPLOY_USER" 0644
+  fi
+}
+
+# What is still missing before install can succeed. Prints one line per item; fails if there is any.
+configuration_todo() {
+  local todo=0 password
+  if [[ $EMUCAT_GIT_URL == *OWNER* ]]; then
+    say "  - set EMUCAT_GIT_URL in $CONFIG_PATH"; todo=1
+  fi
+  password=$(sed -n 's/^DB_PASSWORD=//p' "$EMUCAT_APP_ENV_FILE" 2>/dev/null | tail -n 1)
+  if [[ -z $password ]]; then
+    say "  - set DB_PASSWORD (and check DB_NAME, DB_USER, PUBLIC_ORIGIN) in $EMUCAT_APP_ENV_FILE"; todo=1
+  fi
+  if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
+    if [[ ! -s $EMUCAT_GIT_SSH_KEY ]]; then
+      say "  - put the read-only deploy key in $EMUCAT_GIT_SSH_KEY"; todo=1
+    fi
+    if [[ ! -s $KNOWN_HOSTS ]]; then
+      say "  - put the verified host key of the Git server in $KNOWN_HOSTS"; todo=1
+    fi
+  fi
+  return $todo
+}
+
+cmd_init() {
+  require_root init
+  local template='' source
+  while (($#)); do
+    case $1 in
+      --template) template=${2:-}; shift 2 ;;
+      *) abort "unknown option $1" ;;
+    esac
+  done
+  source=$(source_root)
+  : "${template:=$source/deploy/config/deploy.env.example}"
+  [[ -f $template ]] || abort "no template at $template"
+
+  if [[ ! -e $CONFIG_PATH ]]; then
+    # The root and the accounts come from the template, so that the new file gets the right place and group.
+    local TEMPLATE_EMUCAT_ROOT=/opt/emucat TEMPLATE_EMUCAT_DEPLOY_USER=emucat-deploy config_dir
+    read_env_file "$template" '^EMUCAT_(ROOT|DEPLOY_USER)$' TEMPLATE_
+    config_dir=$(dirname -- "$CONFIG_PATH")
+    [[ $config_dir == "${TEMPLATE_EMUCAT_ROOT%/}/config" ]] ||
+      abort "$CONFIG_PATH is not under EMUCAT_ROOT=$TEMPLATE_EMUCAT_ROOT of $template"
+    id -u "$TEMPLATE_EMUCAT_DEPLOY_USER" >/dev/null 2>&1 ||
+      abort "create the deployment account first: $ACCOUNT_HINT"
+    [[ ! -L $TEMPLATE_EMUCAT_ROOT && ! -L $config_dir ]] || abort "$config_dir must not be a link"
+    install -d -o root -g root -m 0755 "$TEMPLATE_EMUCAT_ROOT"
+    install -d -o root -g "$TEMPLATE_EMUCAT_DEPLOY_USER" -m 0750 "$config_dir"
+    install -o root -g "$TEMPLATE_EMUCAT_DEPLOY_USER" -m 0640 -- "$template" "$CONFIG_PATH"
+    say "Created $CONFIG_PATH from ${template#"$source"/}"
+  else
+    say "Keeping the existing $CONFIG_PATH"
+  fi
+
+  load_config
+  require_accounts
+  create_layout
+  if [[ ! -e $EMUCAT_APP_ENV_FILE ]]; then
+    install -o root -g "$EMUCAT_DEPLOY_USER" -m 0640 -- "$source/deploy/config/app.env.example" \
+      "$EMUCAT_APP_ENV_FILE"
+    say "Created $EMUCAT_APP_ENV_FILE"
+  fi
+  create_token
+  if [[ -n $EMUCAT_GIT_SSH_KEY && ! -e $EMUCAT_GIT_SSH_KEY ]] && command -v ssh-keygen >/dev/null; then
+    [[ $(dirname -- "$EMUCAT_GIT_SSH_KEY") == "$CONFIG_DIR" ]] ||
+      abort "EMUCAT_GIT_SSH_KEY must be in $CONFIG_DIR for init to create it"
+    ssh-keygen -q -t ed25519 -N '' -C "emucat-deploy ($EMUCAT_ENVIRONMENT)" -f "$EMUCAT_GIT_SSH_KEY"
+    say "Created the deploy key $EMUCAT_GIT_SSH_KEY. Add this public key to the GitHub repository as a"
+    say "read-only deploy key (Settings > Deploy keys, write access off):"
+    say "  $(cat -- "$EMUCAT_GIT_SSH_KEY.pub")"
+  fi
+  secure_configuration
+
+  say ""
+  local todo
+  if todo=$(configuration_todo); then
+    say "The configuration is complete. Next: sudo $0 install"
+  else
+    say "Before install:"
+    say "$todo"
+    say "Then run: sudo $0 install"
+  fi
+}
+
+cmd_install() {
+  require_root install
+  local source staged unit todo
+  source=$(source_root)
+  require_accounts
+  for tool in docker git flock curl gzip mariadb mariadb-dump node systemctl runuser; do
+    command -v "$tool" >/dev/null || abort "$tool is not installed"
+  done
+  node_new_enough || abort "the deployment service needs Node.js 22.18 or later on the host"
+  [[ -f $EMUCAT_APP_ENV_FILE ]] || abort "$EMUCAT_APP_ENV_FILE does not exist; run emucatctl init first"
+  if ! todo=$(configuration_todo); then
+    printf '%s\n' "$todo" >&2
+    abort "finish the configuration above first (emucatctl init creates the missing files)"
+  fi
+
+  create_layout
+  create_token
+  secure_configuration
 
   say "Tooling (root-owned, so the deployment account cannot change what it runs)"
   staged=$(mktemp -d "$EMUCAT_ROOT/tooling.XXXXXX")
   install -d -m 0755 "$staged/bin" "$staged/deployer" "$staged/systemd"
-  install -m 0755 "$source_root/deploy/bin/emucatctl" "$staged/bin/emucatctl"
-  cp -R -- "$source_root/apps/deployer/src" "$staged/deployer/src"
-  install -m 0644 "$source_root/deploy/systemd/emucat-deployer.service" "$staged/systemd/"
+  install -m 0755 "$source/deploy/bin/emucatctl" "$staged/bin/emucatctl"
+  cp -R -- "$source/apps/deployer/src" "$staged/deployer/src"
+  install -m 0644 "$source/deploy/systemd/emucat-deployer.service" "$staged/systemd/"
   chown -R root:root -- "$staged"
   chmod -R go-w -- "$staged"
   chmod 0755 -- "$staged"
-  rm -rf -- "$tooling.old"
-  [[ -d $tooling ]] && mv -- "$tooling" "$tooling.old"
-  mv -- "$staged" "$tooling"
-  rm -rf -- "$tooling.old"
+  rm -rf -- "$TOOLING.old"
+  [[ -d $TOOLING ]] && mv -- "$TOOLING" "$TOOLING.old"
+  mv -- "$staged" "$TOOLING"
+  rm -rf -- "$TOOLING.old"
 
   say "Repository mirror"
-  if [[ ! -d $REPO ]]; then
-    local git_env=(GIT_TERMINAL_PROMPT=0 "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+  if [[ ! -f $REPO/HEAD ]]; then
+    local git_env=(GIT_TERMINAL_PROMPT=0 "GIT_SSH_COMMAND=ssh -o BatchMode=yes" "HOME=$DEPLOY_HOME")
     if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
       git_env[1]="GIT_SSH_COMMAND=ssh -i $EMUCAT_GIT_SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes"
-      git_env[1]+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$STATE/known_hosts"
+      git_env[1]+=" -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
     fi
+    # Into the empty directory create_layout made, owned by the deployment account.
     runuser -u "$EMUCAT_DEPLOY_USER" -- env "${git_env[@]}" \
       git clone --bare --no-tags --single-branch --branch "$EMUCAT_BRANCH" -- "$EMUCAT_GIT_URL" "$REPO" ||
-      abort "cannot clone $EMUCAT_BRANCH; check EMUCAT_GIT_URL, the deploy key and $STATE/known_hosts"
+      abort "cannot clone $EMUCAT_BRANCH; check EMUCAT_GIT_URL, the deploy key and $KNOWN_HOSTS"
   fi
 
+  # The unit stays in the systemd search path; what it runs is in $TOOLING.
   say "systemd unit"
   unit=/etc/systemd/system/emucat-deployer.service
   sed -e "s#@DEPLOY_USER@#$EMUCAT_DEPLOY_USER#g" -e "s#@SOCKET_GROUP@#$EMUCAT_SOCKET_GROUP#g" \
-    -e "s#@ROOT@#$EMUCAT_ROOT#g" -e "s#@CONFIG@#$CONFIG_PATH#g" \
-    -e "s#@NODE@#$(command -v node)#g" -e "s#@BACKUP_DIR@#$EMUCAT_BACKUP_DIR#g" \
-    -e "s#@HOME@#$(getent passwd "$EMUCAT_DEPLOY_USER" | cut -d: -f6)#g" \
-    "$tooling/systemd/emucat-deployer.service" >"$unit.tmp"
+    -e "s#@ROOT@#$EMUCAT_ROOT#g" -e "s#@CONFIG@#$CONFIG_PATH#g" -e "s#@NODE@#$(command -v node)#g" \
+    "$TOOLING/systemd/emucat-deployer.service" >"$unit.tmp"
   chmod 0644 "$unit.tmp"
   mv -- "$unit.tmp" "$unit"
   systemctl daemon-reload
@@ -906,8 +1101,8 @@ cmd_install() {
 
   say ""
   say "Installed. Next:"
-  say "  sudo $tooling/bin/emucatctl check"
-  say "  sudo $tooling/bin/emucatctl update"
+  say "  sudo $TOOLING/bin/emucatctl check"
+  say "  sudo $TOOLING/bin/emucatctl update"
 }
 
 main() {
@@ -915,6 +1110,7 @@ main() {
   [[ $# -gt 0 ]] && shift
   case $command in
     help | -h | --help) usage; return ;;
+    init) cmd_init "$@"; return ;;
   esac
   load_config
   case $command in

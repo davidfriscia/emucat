@@ -352,7 +352,7 @@ describe('configuration', () => {
     h.writeConfig({ EMUCAT_ENVIRONMENT: `$(touch ${marker})` });
     assert.equal(h.run('status').status, 1);
     writeFileSync(
-      join(h.dir, 'etc/app.env'),
+      join(h.configDir, 'app.env'),
       `DB_NAME=emucat-db\nDB_USER=emucat-usr\nDB_PASSWORD=$(touch ${marker})\n`,
     );
     h.writeConfig();
@@ -362,9 +362,84 @@ describe('configuration', () => {
 
   it('refuses the MariaDB root account for the application', () => {
     const h = host();
-    writeFileSync(join(h.dir, 'etc/app.env'), 'DB_NAME=emucat-db\nDB_USER=root\nDB_PASSWORD=x\n');
+    writeFileSync(join(h.configDir, 'app.env'), 'DB_NAME=emucat-db\nDB_USER=root\nDB_PASSWORD=x\n');
     const result = h.run('backup');
     assert.equal(result.status, 1);
     assert.match(result.stderr, /root account/);
+  });
+});
+
+describe('layout', () => {
+  it('keeps releases, state, backups and every path given to Compose under EMUCAT_ROOT', () => {
+    const h = host();
+    const first = develop(h);
+    assert.equal(update(h).done, 'succeeded');
+    h.setFake('applied', '0001_initial_schema\n');
+    assert.equal(h.run('backup').status, 0);
+    const second = h.commit('develop', 'Second release');
+    assert.equal(update(h).done, 'succeeded');
+    const rollback = h.run('rollback-app', '--yes');
+    assert.equal(rollback.status, 0, rollback.stderr);
+
+    for (const commit of [first, second]) {
+      assert.ok(existsSync(join(h.root, `releases/${commit}/compose.yaml`)));
+      assert.ok(existsSync(join(h.root, `releases/${commit}/migrations.txt`)));
+    }
+    assert.ok(existsSync(join(h.root, 'releases/history.tsv')));
+    assert.ok(existsSync(join(h.root, 'state/current-release.json')));
+    // Build exports are temporary and removed after a successful update.
+    assert.deepEqual(readdirSync(join(h.root, 'state/builds')), []);
+    assert.ok(readdirSync(h.backups).some((file) => /^emucat-db-.*-manual\.sql\.gz$/.test(file)));
+
+    // What Compose was given, for every update and the rollback.
+    const environments = readFileSync(join(h.fake, 'compose-env'), 'utf8').trim().split('\n');
+    assert.ok(environments.length >= 3);
+    for (const line of environments) {
+      assert.equal(
+        line,
+        [
+          `EMUCAT_APP_ENV_FILE=${join(h.root, 'config/app.env')}`,
+          `EMUCAT_DEPLOYER_TOKEN_FILE=${join(h.root, 'config/deployer.token')}`,
+          `EMUCAT_MEDIA_DIR=${join(h.root, 'data/media')}`,
+          `EMUCAT_SOCKET_DIR=${h.socketDir}`,
+        ].join(' '),
+      );
+    }
+  });
+
+  for (const line of [
+    'EMUCAT_APP_ENV_FILE=/etc/emucat/app.env',
+    'EMUCAT_DEPLOYER_TOKEN_FILE=/etc/emucat/deployer.token',
+    'EMUCAT_MEDIA_DIR=/srv/emucat/media',
+    'EMUCAT_BACKUP_DIR=/var/backups/emucat',
+  ]) {
+    it(`refuses the old path setting ${line}`, () => {
+      const h = host();
+      const [key, value] = line.split('=') as [string, string];
+      h.writeConfig({ [key]: value });
+      for (const command of ['status', 'backup', 'update']) {
+        const result = h.run(command, '--yes');
+        assert.equal(result.status, 1, command);
+        assert.match(result.stderr, /no longer supported/);
+      }
+      assert.equal(builds(h).length, 0);
+    });
+  }
+
+  it('refuses a configuration file that is not EMUCAT_ROOT/config/deploy.env', () => {
+    const h = host();
+    h.writeConfig({ EMUCAT_ROOT: join(h.dir, 'elsewhere') });
+    const result = h.run('status');
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /must be .*elsewhere\/config\/deploy\.env/);
+  });
+
+  it('refuses init and install without root', () => {
+    const h = host();
+    for (const command of ['init', 'install']) {
+      const result = h.run(command);
+      assert.equal(result.status, 1, command);
+      assert.match(result.stderr, /must run as root/);
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { chmodSync, lstatSync, readFileSync, unlinkSync } from 'node:fs';
-import { DeployerConfigError, loadDeployerConfig } from './config.ts';
+import { DEFAULT_CONFIG_PATH, DeployerConfigError, loadDeployerConfig } from './config.ts';
 import { readEnvFile } from './envfile.ts';
 import { createControlServer } from './http.ts';
 import { hostRunner } from './runner.ts';
@@ -19,7 +19,7 @@ function log(message: string): void {
 }
 
 function main(): void {
-  const configPath = process.env.EMUCAT_DEPLOY_CONFIG ?? '/etc/emucat/deploy.env';
+  const configPath = process.env.EMUCAT_DEPLOY_CONFIG ?? DEFAULT_CONFIG_PATH;
   const config = loadDeployerConfig(configPath);
   const token = () => readFileSync(config.tokenFile, 'utf8').trim();
   if (token().length < 32) throw new DeployerConfigError('The deployer token is too short');

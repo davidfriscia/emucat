@@ -73,7 +73,7 @@ export function createWorld(overrides: Partial<DeployerConfig> = {}): World {
     stateDir,
     operationsDir: join(stateDir, 'operations'),
     ctlPath: '/opt/emucat/tooling/bin/emucatctl',
-    configPath: '/etc/emucat/deploy.env',
+    configPath: '/opt/emucat/config/deploy.env',
     socketPath: socketPathForTests(),
     tokenFile: join(root, 'token'),
     appEnvFile: join(root, 'app.env'),

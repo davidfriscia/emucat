@@ -14,9 +14,10 @@ import { join, resolve } from 'node:path';
 import { parseEvents, type UpdateEvent } from '../src/operations.ts';
 
 /**
- * A disposable host for emucatctl: a Git "remote" with `main` and `develop`, a bare mirror as `install`
- * makes it, configuration files, a media directory with existing data, and the fakes' state directory.
- * Everything lives under one temporary directory, removed afterwards.
+ * A disposable host for emucatctl: a Git "remote" with `main` and `develop`, and the layout `install`
+ * makes under an EMUCAT_ROOT: a bare mirror, configuration files in config/, media with existing data in
+ * data/media, backups/, and the fakes' state directory (config/fake). Everything lives under one temporary
+ * directory, removed afterwards.
  */
 
 export const REPOSITORY = resolve(import.meta.dirname, '../../..');
@@ -27,6 +28,8 @@ export const TOKEN = 'integration-deployer-token-0123456789abcdef';
 export interface Host {
   dir: string;
   root: string;
+  /** EMUCAT_ROOT/config. */
+  configDir: string;
   config: string;
   fake: string;
   media: string;
@@ -56,15 +59,15 @@ function git(cwd: string, ...args: string[]): string {
 
 export function createHost(): Host {
   const dir = mkdtempSync(join(tmpdir(), 'emucat-host-'));
-  const etc = join(dir, 'etc');
-  const root = join(dir, 'opt');
-  const fake = join(etc, 'fake');
-  const media = join(dir, 'srv/media');
-  const backups = join(dir, 'backups');
+  const root = join(dir, 'opt/emucat');
+  const configDir = join(root, 'config');
+  const fake = join(configDir, 'fake');
+  const media = join(root, 'data/media');
+  const backups = join(root, 'backups');
   const socketDir = join(dir, 'run');
   const remote = join(dir, 'remote.git');
   const work = join(dir, 'work');
-  for (const path of [etc, fake, media, backups, socketDir, join(root, 'state/operations')]) {
+  for (const path of [configDir, fake, media, backups, socketDir, join(root, 'state/operations')]) {
     mkdirSync(path, { recursive: true });
   }
   // Data that must survive everything.
@@ -72,11 +75,11 @@ export function createHost(): Host {
   writeFileSync(join(backups, 'manual-dump-before-install.sql.gz'), 'older backup');
 
   writeFileSync(
-    join(etc, 'app.env'),
+    join(configDir, 'app.env'),
     `DB_HOST=host.docker.internal\nDB_PORT=3306\nDB_NAME=emucat-db\nDB_USER=emucat-usr\nDB_PASSWORD=${DB_PASSWORD}\n`,
     { mode: 0o640 },
   );
-  writeFileSync(join(etc, 'deployer.token'), `${TOKEN}\n`, { mode: 0o640 });
+  writeFileSync(join(configDir, 'deployer.token'), `${TOKEN}\n`, { mode: 0o640 });
 
   // The remote: a small tree with the files emucatctl reads from a release.
   git(dir, 'init', '--quiet', '--bare', remote);
@@ -112,10 +115,11 @@ export function createHost(): Host {
     join(root, 'repo.git'),
   );
 
-  const config = join(etc, 'deploy.env');
+  const config = join(configDir, 'deploy.env');
   const host: Host = {
     dir,
     root,
+    configDir,
     config,
     fake,
     media,
@@ -188,10 +192,6 @@ export function createHost(): Host {
         EMUCAT_GIT_URL: remote,
         EMUCAT_ADMIN_UPDATES_ENABLED: 'true',
         EMUCAT_ROOT: root,
-        EMUCAT_APP_ENV_FILE: join(etc, 'app.env'),
-        EMUCAT_DEPLOYER_TOKEN_FILE: join(etc, 'deployer.token'),
-        EMUCAT_MEDIA_DIR: media,
-        EMUCAT_BACKUP_DIR: backups,
         EMUCAT_SOCKET_DIR: socketDir,
         EMUCAT_SOCKET_GID: '1000',
         EMUCAT_DEPLOY_USER: 'nobody-here',
