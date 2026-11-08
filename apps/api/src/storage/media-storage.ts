@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { type ReadStream } from 'node:fs';
 import { mkdir, open, readdir, rename, rm, stat } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, resolve, sep, win32 } from 'node:path';
 
 export class InvalidStorageKeyError extends Error {
   override readonly name = 'InvalidStorageKeyError';
@@ -25,9 +25,28 @@ export interface MediaStorage {
   publish(stagedPath: string, key: string): Promise<void>;
 }
 
-/** Resolves a key to a path, refusing anything that could reach outside the storage root. */
+/**
+ * A Windows drive prefix: `C:`, which also covers `C:/x`, `C:\x` and the drive-relative `C:x`. Checked
+ * explicitly because `node:path` only knows the host's own rules, and on Linux `C:/x` is relative.
+ */
+const DRIVE_PREFIX = /^[A-Za-z]:/;
+
+/**
+ * Resolves a key to a path, refusing anything that could reach outside the storage root. A key is the
+ * same on every platform: a relative path of forward-slash separated segments. So it may not start with
+ * `/` (Unix absolute, and `//server` UNC) or a drive letter, nor contain a backslash (Windows separators,
+ * `\\server` UNC), NUL, or an empty, `.` or `..` segment.
+ */
 export function resolveStorageKey(root: string, key: string): string {
-  if (key.length === 0 || key.includes('\0') || key.includes('\\') || isAbsolute(key)) {
+  if (
+    key.length === 0 ||
+    key.includes('\0') ||
+    key.includes('\\') ||
+    key.startsWith('/') ||
+    DRIVE_PREFIX.test(key) ||
+    posix.isAbsolute(key) ||
+    win32.isAbsolute(key)
+  ) {
     throw new InvalidStorageKeyError('Storage key is not a relative path');
   }
   if (key.split('/').some((segment) => segment === '..' || segment === '.' || segment === '')) {

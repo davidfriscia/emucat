@@ -153,6 +153,20 @@ describe('storage keys', () => {
     expect(resolveStorageKey(root, 'media/a/full.jpg')).toBe(join(root, 'media', 'a', 'full.jpg'));
   });
 
+  // The formats the API writes (media files and staging); they must keep resolving on every platform.
+  it.each([
+    'media/full/0b9f1c1e-3c55-4f0a-9d1e-6a2b1f3c4d5e.jpg',
+    'media/thumbnails/0b9f1c1e-3c55-4f0a-9d1e-6a2b1f3c4d5e.jpg',
+    'media/originals/0b9f1c1e-3c55-4f0a-9d1e-6a2b1f3c4d5e.png',
+    'media/staging',
+    'C/Windows', // a directory named C, not a drive
+    'a..b/c.d',
+  ])('accepts %j', (key) => {
+    expect(resolveStorageKey(root, key)).toBe(join(root, ...key.split('/')));
+  });
+
+  // Every form that names something outside the root on some platform is refused on all of them: the
+  // check may not depend on what the host's node:path happens to consider absolute.
   it.each([
     '',
     '..',
@@ -160,12 +174,23 @@ describe('storage keys', () => {
     'a/../../secret',
     'a/./b',
     'a//b',
+    'a/',
+    '/',
     '/etc/passwd',
+    '//server/share/file',
     'C:/Windows/win.ini',
+    'c:/windows/win.ini',
     'C:\\Windows\\win.ini',
+    'C:',
+    'C:foo',
+    'C:foo/bar',
+    'Z:/',
+    '\\\\server\\share\\file',
+    '\\Windows\\win.ini',
     '..\\secret',
     'a\\b',
     'a\0b',
+    '\0',
     '.',
   ])('refuses %j', (key) => {
     expect(() => resolveStorageKey(root, key)).toThrow(InvalidStorageKeyError);
