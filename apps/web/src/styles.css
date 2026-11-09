@@ -236,10 +236,133 @@
   max-width: 48rem;
 }
 
-.gallery-grid {
+/* VM page: the name and the Launch action, then what is known about the VM, then its screenshots. */
+.vm-detail-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.vm-detail-heading {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+.vm-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vm-launch-button {
+  min-width: 11rem;
+}
+
+.vm-info-layout {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 10rem), 1fr));
+  grid-template-columns: minmax(0, 22rem) minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.vm-info-cover .vm-detail-media {
+  max-width: none;
+  margin-bottom: 0 !important;
+}
+
+.vm-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: 0.75rem 1.5rem;
+  margin: 0;
+}
+
+.vm-facts dt {
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+}
+
+.vm-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* On a phone, everything stacks, and the Launch action spans the width. */
+@media (max-width: 575.98px) {
+  .vm-detail-actions,
+  .vm-launch-button,
+  .vm-detail-actions > .btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 767.98px) {
+  .vm-info-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Screenshot cards, at the size the viewer chose. */
+.gallery-grid {
+  --gallery-card-min: 12rem;
+
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--gallery-card-min)), 1fr));
   gap: 0.75rem;
+}
+
+.gallery-grid[data-size='small'] {
+  --gallery-card-min: 8rem;
+}
+
+.gallery-grid[data-size='large'] {
+  --gallery-card-min: 20rem;
+}
+
+@media (max-width: 575.98px) {
+  .gallery-grid[data-size='small'] {
+    --gallery-card-min: 6rem;
+  }
+
+  .gallery-grid[data-size='medium'] {
+    --gallery-card-min: 9rem;
+  }
+}
+
+.gallery-card {
+  position: relative;
+  transition:
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.gallery-card:hover {
+  border-color: var(--bs-primary) !important;
+  box-shadow: 0 0.25rem 0.75rem rgb(var(--bs-primary-rgb) / 15%);
+}
+
+.gallery-card-main {
+  border-color: var(--bs-primary) !important;
+  box-shadow: 0 0 0 1px var(--bs-primary);
+}
+
+.gallery-card-badge {
+  position: absolute;
+  top: 0.4rem;
+  left: 0.4rem;
+}
+
+/* The size buttons hide their radios, so the focus ring goes on the button around one. */
+.btn-group label.btn:has(input:focus-visible) {
+  outline: 2px solid var(--bs-focus-ring-color, currentColor);
+  outline-offset: 1px;
+  z-index: 3;
 }
 
 .media-grid {

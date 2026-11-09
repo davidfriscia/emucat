@@ -30,7 +30,7 @@ async function openGallery() {
   mockApi({ [`GET ${PUBLIC_PATH}`]: detail });
   renderAt('/vms/qemu/Win98');
   await screen.findByRole('heading', { name: 'Windows 98 SE' });
-  return screen.getByRole('heading', { name: 'Screenshots' }).parentElement as HTMLElement;
+  return screen.getByRole('heading', { name: 'Screenshots' }).closest('section') as HTMLElement;
 }
 
 const thumbnailButton = (gallery: HTMLElement, name: RegExp) =>
@@ -205,8 +205,9 @@ describe('the public gallery', () => {
     });
     renderAt('/vms/qemu/Win98');
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
-    const gallery = screen.getByRole('heading', { name: 'Screenshots' })
-      .parentElement as HTMLElement;
+    const gallery = screen
+      .getByRole('heading', { name: 'Screenshots' })
+      .closest('section') as HTMLElement;
     expect(gallery.querySelectorAll('img')).toHaveLength(24);
 
     // Moving past what is shown, then closing, has a thumbnail to return to.

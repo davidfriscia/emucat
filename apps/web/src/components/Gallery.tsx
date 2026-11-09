@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObjec
 import { BrandMark } from './Brand';
 import { VmImage } from './Catalog';
 
+/** Open dialogs, innermost last. Only the innermost one answers the keyboard. */
+const openDialogs: object[] = [];
+
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -28,7 +31,11 @@ export function useModalDialog(
   }, []);
 
   useEffect(() => {
+    // A dialog opened from inside another one, such as a confirmation, owns the keyboard until it closes.
+    const token = {};
+    openDialogs.push(token);
     const onKey = (event: KeyboardEvent) => {
+      if (openDialogs.at(-1) !== token) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         onClose();
@@ -53,7 +60,10 @@ export function useModalDialog(
       }
     };
     document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      openDialogs.splice(openDialogs.indexOf(token), 1);
+    };
   }, [dialog, onClose]);
 }
 
@@ -67,6 +77,8 @@ export interface GalleryItem {
   fullSrc: string;
   widthPx: number;
   heightPx: number;
+  /** The VM's main cover, marked as such in the thumbnails. */
+  isMain?: boolean;
   /** Extra controls in the viewer's bar, for administrators. */
   viewerActions?: ReactNode;
 }
@@ -249,17 +261,88 @@ export function MainScreenshot({
   );
 }
 
+/** How big each screenshot card is in a thumbnail grid. A viewer's choice, never stored on the server. */
+export const GALLERY_CARD_SIZES = ['small', 'medium', 'large'] as const;
+export type GalleryCardSize = (typeof GALLERY_CARD_SIZES)[number];
+
+const CARD_SIZE_TEXT: Record<GalleryCardSize, string> = {
+  small: 'Small',
+  medium: 'Medium',
+  large: 'Large',
+};
+
+const CARD_SIZE_KEY = 'emucat.gallery.cardSize';
+
+function isCardSize(value: unknown): value is GalleryCardSize {
+  return GALLERY_CARD_SIZES.includes(value as GalleryCardSize);
+}
+
+/** The viewer's card size, remembered in this browser when it can be. Storage may be unavailable. */
+export function useGalleryCardSize(): [GalleryCardSize, (size: GalleryCardSize) => void] {
+  const [size, setSize] = useState<GalleryCardSize>(() => {
+    try {
+      const stored = localStorage.getItem(CARD_SIZE_KEY);
+      return isCardSize(stored) ? stored : 'medium';
+    } catch {
+      return 'medium';
+    }
+  });
+  const choose = useCallback((next: GalleryCardSize) => {
+    setSize(next);
+    try {
+      localStorage.setItem(CARD_SIZE_KEY, next);
+    } catch {
+      // Remembering it is a convenience; the choice still applies to this page.
+    }
+  }, []);
+  return [size, choose];
+}
+
+/** Small, medium or large cards, as one group of toggle buttons that the keyboard reaches as radios. */
+export function CardSizeControl({
+  value,
+  onChange,
+}: {
+  value: GalleryCardSize;
+  onChange: (size: GalleryCardSize) => void;
+}) {
+  return (
+    <div className="btn-group btn-group-sm" role="radiogroup" aria-label="Screenshot size">
+      {GALLERY_CARD_SIZES.map((size) => (
+        <label
+          key={size}
+          className={`btn btn-outline-primary${value === size ? ' active' : ''}`}
+          htmlFor={`card-size-${size}`}
+        >
+          <input
+            id={`card-size-${size}`}
+            type="radio"
+            className="visually-hidden"
+            name="gallery-card-size"
+            value={size}
+            checked={value === size}
+            onChange={() => onChange(size)}
+          />
+          {CARD_SIZE_TEXT[size]}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /** Thumbnails of what this viewer may see. Only thumbnails load here, and only as they scroll into view. */
 export function ThumbnailGrid({
   items,
   onOpen,
   registerThumbnail,
   openId,
+  size = 'medium',
 }: {
   items: readonly GalleryItem[];
   onOpen: (id: string, opener: HTMLElement) => void;
   registerThumbnail: (id: string, element: HTMLElement | null) => void;
   openId: string | null;
+  size?: GalleryCardSize;
 }) {
   const [shown, setShown] = useState(GALLERY_PAGE_SIZE);
   const openIndex = items.findIndex((item) => item.id === openId);
@@ -268,17 +351,22 @@ export function ThumbnailGrid({
   const remaining = items.length - visible.length;
   return (
     <>
-      <div className="gallery-grid">
+      <div className="gallery-grid" data-size={size}>
         {visible.map((item) => (
           <button
             key={item.id}
             ref={(element) => registerThumbnail(item.id, element)}
             type="button"
-            className="media-thumbnail-button rounded-2 overflow-hidden border"
-            aria-label={`View ${item.label} at full resolution`}
+            className={`media-thumbnail-button gallery-card rounded-2 overflow-hidden border${item.isMain ? ' gallery-card-main' : ''}`}
+            aria-label={`View ${item.label} at full resolution${item.isMain ? ', the main cover' : ''}`}
             onClick={(event) => onOpen(item.id, event.currentTarget)}
           >
             <VmImage src={item.thumbnailSrc} alt="" />
+            {item.isMain ? (
+              <span className="badge text-bg-primary gallery-card-badge" aria-hidden="true">
+                Main cover
+              </span>
+            ) : null}
           </button>
         ))}
       </div>

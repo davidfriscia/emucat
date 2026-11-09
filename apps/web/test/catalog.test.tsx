@@ -299,8 +299,9 @@ describe('VM detail', () => {
       `/api/v1/catalog/media/${MEDIA_ID}/full`,
     );
     expect(screen.getByText(/Line one/)).toBeTruthy();
-    const gallery = screen.getByRole('heading', { name: 'Screenshots' })
-      .parentElement as HTMLElement;
+    const gallery = screen
+      .getByRole('heading', { name: 'Screenshots' })
+      .closest('section') as HTMLElement;
     const sources = [...gallery.querySelectorAll('img')].map((image) => image.getAttribute('src'));
     expect(sources).toEqual([
       `/api/v1/catalog/media/${MEDIA_ID}/thumbnail`,

@@ -1,19 +1,25 @@
 import {
   adminVmRoute,
+  EMULATOR_LABELS,
   publicMediaPath,
+  publicVmRoute,
   vmPathParamsSchema,
   vmTitle,
   type PublicMedia,
+  type PublicVmDetail,
   type VmIdentity,
 } from '@emucat/contracts';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 import { ApiRequestError, fetchPublicVm } from '../api';
 import { useAuth } from '../auth';
 import { EmulatorBadge } from '../components/Catalog';
+import { VmLaunchDialog } from '../components/Execution';
 import {
+  CardSizeControl,
   MainScreenshot,
   ThumbnailGrid,
+  useGalleryCardSize,
   useImageViewer,
   type GalleryItem,
 } from '../components/Gallery';
@@ -38,52 +44,211 @@ function MissingVm() {
   );
 }
 
-function PublicGallery({
-  title,
-  gallery,
-  mainImage,
-}: {
-  title: string;
-  gallery: readonly PublicMedia[];
-  mainImage: PublicMedia | null;
-}) {
-  const items = useMemo<GalleryItem[]>(
-    () =>
-      gallery.map((image, index) => ({
-        id: image.id,
-        label:
-          image.id === mainImage?.id
-            ? `Screenshot of ${title}`
-            : `Screenshot ${index + 1} of ${title}`,
-        thumbnailSrc: publicMediaPath(image.id, 'thumbnail'),
-        fullSrc: publicMediaPath(image.id, 'full'),
-        widthPx: image.widthPx,
-        heightPx: image.heightPx,
-      })),
-    [gallery, mainImage, title],
-  );
-  const { open, registerThumbnail, viewer, openId } = useImageViewer(items);
-  const main = items.find((item) => item.id === mainImage?.id) ?? null;
+/**
+ * The page's main action. Launching is for administrators, so everyone else is told what it takes rather
+ * than shown a button that fails.
+ */
+function LaunchAction({ vm, title }: { vm: VmIdentity; title: string }) {
+  const { state: auth } = useAuth();
+  const [open, setOpen] = useState(false);
+
+  if (auth.status === 'loading') {
+    return (
+      <button type="button" className="btn btn-primary btn-lg vm-launch-button" disabled>
+        Launch VM
+      </button>
+    );
+  }
+  if (auth.status !== 'authenticated') {
+    return (
+      <Link
+        to={`/login?next=${encodeURIComponent(publicVmRoute(vm))}`}
+        className="btn btn-primary btn-lg vm-launch-button"
+      >
+        Sign in to launch
+      </Link>
+    );
+  }
+  if (auth.session.user.role !== 'admin') {
+    return (
+      <div className="vm-launch-button">
+        <button
+          type="button"
+          className="btn btn-primary btn-lg w-100"
+          disabled
+          aria-describedby="launch-help"
+        >
+          Launch VM
+        </button>
+        <div id="launch-help" className="form-text mt-1">
+          Only administrators can launch VMs.
+        </div>
+      </div>
+    );
+  }
   return (
     <>
-      <MainScreenshot item={main} onOpen={open} />
-      {items.length > 0 ? (
-        <section className="mt-4" aria-labelledby="screenshots-heading">
-          <h2 id="screenshots-heading" className="h5">
-            Screenshots
-          </h2>
-          <ThumbnailGrid
-            items={items}
-            onOpen={open}
-            registerThumbnail={registerThumbnail}
-            openId={openId}
-          />
-        </section>
-      ) : (
-        <p className="small text-body-secondary">There are no screenshots yet.</p>
-      )}
-      {viewer}
+      <button
+        type="button"
+        className="btn btn-primary btn-lg vm-launch-button"
+        aria-haspopup="dialog"
+        onClick={() => setOpen(true)}
+      >
+        Launch VM
+      </button>
+      {open ? <VmLaunchDialog vm={vm} title={title} onClose={() => setOpen(false)} /> : null}
     </>
+  );
+}
+
+/** What the catalog knows about the VM: nothing more is invented for the page. */
+function GeneralInformation({
+  vm,
+  main,
+  onOpen,
+}: {
+  vm: PublicVmDetail;
+  main: GalleryItem | null;
+  onOpen: (id: string, opener: HTMLElement) => void;
+}) {
+  const count = vm.gallery.length;
+  return (
+    <section className="card vm-info mb-4" aria-labelledby="vm-info-heading">
+      <div className="card-body">
+        <h2 id="vm-info-heading" className="h5 card-title">
+          General information
+        </h2>
+        <div className="vm-info-layout">
+          <div className="vm-info-cover">
+            <MainScreenshot item={main} onOpen={onOpen} />
+          </div>
+          <div className="vm-info-text">
+            <dl className="vm-facts">
+              <div>
+                <dt>Emulator</dt>
+                <dd>{EMULATOR_LABELS[vm.emulatorType]}</dd>
+              </div>
+              <div>
+                <dt>VM name</dt>
+                <dd className="vm-identity">{vm.vmName}</dd>
+              </div>
+              <div>
+                <dt>Screenshots</dt>
+                <dd>{count === 0 ? 'None yet' : count}</dd>
+              </div>
+            </dl>
+            <h3 className="h6 mt-3">Description</h3>
+            {vm.description ? (
+              <p className="vm-description mb-0">{vm.description}</p>
+            ) : (
+              <p className="small text-body-secondary mb-0">No description yet.</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ScreenshotGallery({
+  items,
+  onOpen,
+  registerThumbnail,
+  openId,
+}: {
+  items: readonly GalleryItem[];
+  onOpen: (id: string, opener: HTMLElement) => void;
+  registerThumbnail: (id: string, element: HTMLElement | null) => void;
+  openId: string | null;
+}) {
+  const [size, setSize] = useGalleryCardSize();
+  if (items.length === 0) {
+    return <p className="small text-body-secondary">There are no screenshots yet.</p>;
+  }
+  return (
+    <section aria-labelledby="screenshots-heading">
+      <div className="d-flex flex-wrap align-items-center gap-2 mb-2">
+        <h2 id="screenshots-heading" className="h5 mb-0">
+          Screenshots
+        </h2>
+        <span className="small text-body-secondary flex-grow-1">
+          {items.length === 1 ? '1 image' : `${items.length} images`}
+        </span>
+        <CardSizeControl value={size} onChange={setSize} />
+      </div>
+      <ThumbnailGrid
+        items={items}
+        onOpen={onOpen}
+        registerThumbnail={registerThumbnail}
+        openId={openId}
+        size={size}
+      />
+    </section>
+  );
+}
+
+function galleryItems(
+  title: string,
+  gallery: readonly PublicMedia[],
+  mainImage: PublicMedia | null,
+): GalleryItem[] {
+  return gallery.map((image, index) => ({
+    id: image.id,
+    label:
+      image.id === mainImage?.id ? `Screenshot of ${title}` : `Screenshot ${index + 1} of ${title}`,
+    thumbnailSrc: publicMediaPath(image.id, 'thumbnail'),
+    fullSrc: publicMediaPath(image.id, 'full'),
+    widthPx: image.widthPx,
+    heightPx: image.heightPx,
+    isMain: image.id === mainImage?.id,
+  }));
+}
+
+function VmDetailContent({ vm, isAdmin }: { vm: PublicVmDetail; isAdmin: boolean }) {
+  const title = vmTitle(vm);
+  const items = useMemo(
+    () => galleryItems(title, vm.gallery, vm.mainImage),
+    [title, vm.gallery, vm.mainImage],
+  );
+  // One viewer for the cover and the thumbnails, so that it moves through the whole gallery from either.
+  const { open, registerThumbnail, viewer, openId } = useImageViewer(items);
+  const main = items.find((item) => item.isMain) ?? null;
+  return (
+    <article>
+      <title>{`${title} · EmuCat`}</title>
+      <nav aria-label="Breadcrumb" className="small mb-3">
+        <Link to="/">
+          <span aria-hidden="true">← </span>Back to the catalog
+        </Link>
+      </nav>
+      <header className="vm-detail-header mb-4">
+        <div className="vm-detail-heading">
+          <div className="d-flex flex-wrap align-items-center gap-2 mb-1">
+            <h1 className="h2 mb-0">{title}</h1>
+            <EmulatorBadge emulatorType={vm.emulatorType} />
+          </div>
+          {title !== vm.vmName ? (
+            <p className="small text-body-secondary vm-identity mb-0">{vm.vmName}</p>
+          ) : null}
+        </div>
+        <div className="vm-detail-actions">
+          <LaunchAction vm={vm} title={title} />
+          {isAdmin ? (
+            <Link to={adminVmRoute(vm)} className="btn btn-outline-primary">
+              Manage this VM
+            </Link>
+          ) : null}
+        </div>
+      </header>
+      <GeneralInformation vm={vm} main={main} onOpen={open} />
+      <ScreenshotGallery
+        items={items}
+        onOpen={open}
+        registerThumbnail={registerThumbnail}
+        openId={openId}
+      />
+      {viewer}
+    </article>
   );
 }
 
@@ -107,31 +272,7 @@ function VmDetail({ identity }: { identity: VmIdentity }) {
     }
     return <ErrorState error={state.error} onRetry={reload} />;
   }
-
-  const vm = state.data;
-  const title = vmTitle(vm);
-  return (
-    <article>
-      <title>{`${title} · EmuCat`}</title>
-      <nav aria-label="Breadcrumb" className="small mb-3">
-        <Link to="/">Catalog</Link>
-      </nav>
-      <div className="d-flex flex-wrap align-items-center gap-2 mb-1">
-        <h1 className="h3 mb-0">{title}</h1>
-        <EmulatorBadge emulatorType={vm.emulatorType} />
-      </div>
-      <p className="small text-body-secondary vm-identity">{vm.vmName}</p>
-      {isAdmin ? (
-        <p>
-          <Link to={adminVmRoute(vm)} className="btn btn-sm btn-outline-primary">
-            Manage this VM
-          </Link>
-        </p>
-      ) : null}
-      {vm.description ? <p className="vm-description">{vm.description}</p> : null}
-      <PublicGallery title={title} gallery={vm.gallery} mainImage={vm.mainImage} />
-    </article>
-  );
+  return <VmDetailContent vm={state.data} isAdmin={isAdmin} />;
 }
 
 export function VmDetailPage() {
