@@ -45,6 +45,9 @@ ReadWritePaths=@ROOT@/state @ROOT@/releases @ROOT@/repo.git @ROOT@/backups
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+# Nothing here may create set-user-ID or set-group-ID files. Its seccomp filter also makes every openat2()
+# fail with ENOSYS, which some GNU tar builds treat as fatal, so emucatctl exports sources with Git, not
+# tar (see export_source there, and docs/deployment.md). Keep it: do not work around tar by removing it.
 RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

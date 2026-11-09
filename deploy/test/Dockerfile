@@ -5,6 +5,16 @@
 # The accounts exist as on a prepared server (david is UID/GID 1000, sharing the IDs of the image's
 # `node` account), there is no account with UID 10001, and nothing exists under /opt/emucat, so that the
 # installation test (run as root) starts from a fresh host. Everything else runs as `node`.
+FROM node:22.22.3-bookworm-slim AS sandbox
+# restrict-suid-sgid: the seccomp rules of systemd's RestrictSUIDSGID=yes, for sandbox.test.ts. Static, so
+# that the test image needs no compiler or library for it.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends gcc libc6-dev linux-libc-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY restrict-suid-sgid.c /build/
+RUN gcc -O2 -Wall -Wextra -Werror -static -o /build/restrict-suid-sgid /build/restrict-suid-sgid.c \
+    && /build/restrict-suid-sgid --check
+
 FROM node:22.22.3-bookworm-slim
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git ca-certificates openssh-client \
@@ -19,6 +29,7 @@ RUN groupadd --system docker \
     && test ! -e /opt/emucat \
     && ! getent passwd 10001
 COPY --chmod=0755 fakes/ /usr/local/bin/
+COPY --from=sandbox /build/restrict-suid-sgid /usr/local/bin/restrict-suid-sgid
 USER node
 RUN git config --global user.email test@example.invalid \
     && git config --global user.name "EmuCat deployment tests" \

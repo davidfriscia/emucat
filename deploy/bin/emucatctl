@@ -206,6 +206,29 @@ remove_db_option_file() {
 
 # --- Helpers -------------------------------------------------------------------------------------------
 
+# Writes the tree of commit $1 into the new directory $2 (removed first), with Git's own checkout code and
+# a throwaway index, so that the mirror's state is untouched. Not `git archive | tar -x`: GNU tar builds
+# hardened against CVE-2025-45582 open each directory with openat2(RESOLVE_BENEATH), and under the unit's
+# RestrictSUIDSGID=yes systemd's seccomp filter answers every openat2() with ENOSYS (it cannot read the
+# mode inside struct open_how, so it blocks the call outright). Builds that do not fall back to openat()
+# then fail on every file below the top level: "Cannot open: Function not implemented". Git uses open(),
+# openat() and mkdir(), which the filter allows unless a set-user-ID or set-group-ID bit is asked for, and
+# Git trees have no such bits. On failure nothing is left behind, and the next attempt starts afresh,
+# also after one that was killed: its partial tree, index and index.lock (which Git would otherwise refuse
+# to get past) are removed first. Callers hold the deployment lock, so no other export uses these paths.
+export_source() {
+  local commit=$1 dest=$2 index=$2.index
+  rm -rf -- "$dest" "$index" "$index.lock"
+  mkdir -p -- "$dest"
+  if GIT_INDEX_FILE=$index git_repo --work-tree="$dest" read-tree "$commit" &&
+    GIT_INDEX_FILE=$index git_repo --work-tree="$dest" checkout-index --all; then
+    rm -f -- "$index"
+    return 0
+  fi
+  rm -rf -- "$dest" "$index" "$index.lock"
+  return 1
+}
+
 git_repo() {
   local ssh_command=
   if [[ -n $EMUCAT_GIT_SSH_KEY ]]; then
@@ -647,10 +670,7 @@ cmd_update() {
   fi
 
   source=$BUILDS/$TARGET
-  rm -rf -- "$source"
-  mkdir -p -- "$source"
-  git_repo archive --format=tar "$TARGET" | tar -x -C "$source" ||
-    fail fetch_failed "Cannot export commit $TARGET"
+  export_source "$TARGET" "$source" || fail fetch_failed "Cannot export commit $TARGET"
 
   stage building "API and web images"
   started=$(now_iso)
