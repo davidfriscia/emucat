@@ -73,7 +73,7 @@ export function CatalogManagementPage() {
                         <span className="visually-hidden">State: </span>Running
                       </span>
                     ) : null}
-                    {vm.publicCover === 'main_private' || vm.publicCover === 'no_main_image' ? (
+                    {vm.publicCover === 'no_main_image' ? (
                       <span className="badge text-bg-warning">No public cover</span>
                     ) : null}
                   </>

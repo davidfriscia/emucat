@@ -18,15 +18,6 @@ use crate::emulators::EmulatorType;
 use crate::filesystem::parse_vm_relative_path;
 use crate::packaging::{hex, is_in_use, open_for_reading};
 
-/// Media are private until explicitly published.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MediaVisibility {
-    #[default]
-    Private,
-    Published,
-}
-
 /// File name endings treated as screenshots in an 86Box `screenshots` tree, ignoring case.
 pub const SCREENSHOT_EXTENSIONS: [&str; 5] = [".png", ".jpg", ".jpeg", ".bmp", ".ppm"];
 

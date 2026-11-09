@@ -2,7 +2,6 @@ import {
   adminCatalogQuerySchema,
   adminMediaVariantSchema,
   selectMainMediaRequestSchema,
-  updateMediaVisibilityRequestSchema,
   updateVmMetadataRequestSchema,
   updateVmVisibilityRequestSchema,
   vmPathParamsSchema,
@@ -32,7 +31,6 @@ import {
   listAdminMedia,
   listAdminVms,
   selectMainMedia,
-  setMediaVisibility,
   setVmVisibility,
   updateVmMetadata,
   vmExists,
@@ -180,17 +178,6 @@ export function registerAdminCatalogRoutes(
         async (request): Promise<AdminMediaListResponse> => {
           const vm = request.params as VmIdentity;
           await mapNotFound(clearMainMedia(pool, vm));
-          return mediaListOr404(pool, vm);
-        },
-      );
-
-      api.put(
-        '/vms/:emulatorType/:vmName/media/:mediaId/visibility',
-        { schema: { params: mediaParams, body: updateMediaVisibilityRequestSchema } },
-        async (request): Promise<AdminMediaListResponse> => {
-          const { mediaId, ...vm } = request.params as z.infer<typeof mediaParams>;
-          const { visibility } = request.body as z.infer<typeof updateMediaVisibilityRequestSchema>;
-          if (!(await setMediaVisibility(pool, vm, mediaId, visibility))) throw mediaNotFound();
           return mediaListOr404(pool, vm);
         },
       );

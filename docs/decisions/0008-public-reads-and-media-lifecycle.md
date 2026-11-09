@@ -1,6 +1,8 @@
 # 0008: Public reads, and the lifecycle of media files
 
 **Status:** Accepted. See also [0027](0027-catalog-detail-and-public-covers.md), on telling administrators what this means for a cover.
+Per-media visibility is superseded by [0036](0036-vm-level-publication.md): wherever this record says "published media", read "media of a
+public VM".
 
 ## Explicit shapes on every public response
 

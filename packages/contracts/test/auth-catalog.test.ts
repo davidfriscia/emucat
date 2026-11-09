@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   adminCatalogQuerySchema,
   adminMediaPath,
+  adminMediaSchema,
+  PUBLIC_COVER_STATUSES,
   isValidUsername,
   loginRequestSchema,
   newPasswordSchema,
@@ -157,5 +159,28 @@ describe('public media shape', () => {
     expect(
       publicMediaSchema.safeParse({ id, widthPx: 1, heightPx: 1, jpegKey: 'a.jpg' }).success,
     ).toBe(false);
+  });
+});
+
+describe('publication is decided by the VM alone', () => {
+  const media = {
+    id: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f60',
+    isMain: true,
+    originalFilename: 'a.png',
+    originalSizeBytes: 1,
+    widthPx: 1,
+    heightPx: 1,
+    capturedAt: null,
+    createdAt: '2026-01-31T15:30:00Z',
+    shownAsPublicMain: true,
+  };
+
+  it('gives an administrator no per-media visibility to read', () => {
+    expect(adminMediaSchema.safeParse(media).success).toBe(true);
+    expect(adminMediaSchema.safeParse({ ...media, visibility: 'published' }).success).toBe(false);
+  });
+
+  it('has no cover status for a private main image', () => {
+    expect(PUBLIC_COVER_STATUSES).toEqual(['shown', 'vm_private', 'no_main_image']);
   });
 });

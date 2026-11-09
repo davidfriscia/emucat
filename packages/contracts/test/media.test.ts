@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_MEDIA_VISIBILITY,
   isExcludedFromArchive,
   isSameMedia,
   isWatchedMediaPath,
@@ -9,7 +8,6 @@ import {
   selectMainMedia,
   vmMediaSchema,
   type EmulatorType,
-  type MediaVisibility,
 } from '../src/index.js';
 import { fixture } from './helpers.js';
 
@@ -19,12 +17,7 @@ const paths = fixture<{
 }>('archive-paths');
 
 const identity = { emulatorType: 'qemu', vmName: 'Win98' } as const;
-const item = (id: string, visibility: MediaVisibility, isMain: boolean) => ({
-  ...identity,
-  id,
-  visibility,
-  isMain,
-});
+const item = (id: string, isMain: boolean) => ({ ...identity, id, isMain });
 
 describe('archive and media paths', () => {
   it.each(paths.cases)('$emulator $path', ({ emulator, path, excluded, watched }) => {
@@ -46,9 +39,8 @@ describe('archive and media paths', () => {
 });
 
 describe('media visibility', () => {
-  it('defaults to private', () => {
-    expect(DEFAULT_MEDIA_VISIBILITY).toBe('private');
-    const parsed = vmMediaSchema.parse({
+  const parsed = () =>
+    vmMediaSchema.parse({
       ...identity,
       id: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f60',
       originalFilename: 'a.ppm',
@@ -61,66 +53,77 @@ describe('media visibility', () => {
       capturedAt: null,
       createdAt: '2026-01-31T15:30:00Z',
     });
-    expect(parsed.visibility).toBe('private');
-    expect(parsed.isMain).toBe(false);
+
+  it('has no visibility of its own, and is not the main item by default', () => {
+    expect(parsed()).not.toHaveProperty('visibility');
+    expect(parsed().isMain).toBe(false);
+  });
+
+  it('drops a legacy per-media visibility value instead of trusting it', () => {
+    for (const visibility of ['private', 'published']) {
+      const legacy = vmMediaSchema.parse({ ...parsed(), visibility });
+      expect(legacy).not.toHaveProperty('visibility');
+    }
+  });
+
+  it('is no longer exported as a separate setting', async () => {
+    const contracts: Record<string, unknown> = await import('../src/index.js');
+    for (const name of [
+      'MEDIA_VISIBILITIES',
+      'mediaVisibilitySchema',
+      'DEFAULT_MEDIA_VISIBILITY',
+      'updateMediaVisibilityRequestSchema',
+    ]) {
+      expect(contracts, name).not.toHaveProperty(name);
+    }
   });
 });
 
 describe('public catalog card image', () => {
-  it('shows a published main item', () => {
-    expect(resolvePublicCardImage(identity, [item('a', 'published', true)])).toEqual({
+  const publicVm = { ...identity, visibility: 'public' } as const;
+  const privateVm = { ...identity, visibility: 'private' } as const;
+
+  it("shows a public VM's main item", () => {
+    expect(resolvePublicCardImage(publicVm, [item('a', true), item('b', false)])).toEqual({
       kind: 'media',
       mediaId: 'a',
     });
   });
 
+  it("never shows a private VM's main item", () => {
+    expect(resolvePublicCardImage(privateVm, [item('a', true)])).toEqual({ kind: 'placeholder' });
+  });
+
   it('shows a placeholder when there is no media', () => {
-    expect(resolvePublicCardImage(identity, [])).toEqual({ kind: 'placeholder' });
+    expect(resolvePublicCardImage(publicVm, [])).toEqual({ kind: 'placeholder' });
   });
 
-  it('shows a placeholder when the main item is private', () => {
-    expect(resolvePublicCardImage(identity, [item('a', 'private', true)])).toEqual({
-      kind: 'placeholder',
-    });
-  });
-
-  it('does not promote another published item when the main item is privatized', () => {
-    const media = [item('a', 'private', true), item('b', 'published', false)];
-    expect(resolvePublicCardImage(identity, media)).toEqual({ kind: 'placeholder' });
-  });
-
-  it('does not promote another published item when the main item is deleted', () => {
-    expect(resolvePublicCardImage(identity, [item('b', 'published', false)])).toEqual({
+  it('does not promote another item when the main item is cleared or deleted', () => {
+    expect(resolvePublicCardImage(publicVm, [item('b', false), item('c', false)])).toEqual({
       kind: 'placeholder',
     });
   });
 
   it("ignores another VM's main media", () => {
-    const foreign = { ...item('x', 'published', true), vmName: 'Other' };
-    expect(resolvePublicCardImage(identity, [foreign])).toEqual({ kind: 'placeholder' });
+    const foreign = { ...item('x', true), vmName: 'Other' };
+    expect(resolvePublicCardImage(publicVm, [foreign])).toEqual({ kind: 'placeholder' });
   });
 });
 
 describe('main media selection', () => {
   it('keeps at most one main item', () => {
-    const selected = selectMainMedia(
-      identity,
-      [item('a', 'private', true), item('b', 'private', false)],
-      'b',
-    );
+    const selected = selectMainMedia(identity, [item('a', true), item('b', false)], 'b');
     expect(selected.filter((media) => media.isMain).map((media) => media.id)).toEqual(['b']);
   });
 
   it("refuses another VM's media", () => {
-    const foreign = { ...item('x', 'published', false), vmName: 'Other' };
-    expect(() => selectMainMedia(identity, [item('a', 'private', true), foreign], 'x')).toThrow(
-      /same VM/,
-    );
+    const foreign = { ...item('x', false), vmName: 'Other' };
+    expect(() => selectMainMedia(identity, [item('a', true), foreign], 'x')).toThrow(/same VM/);
   });
 
-  it('does not change visibility', () => {
-    const [selected] = selectMainMedia(identity, [item('a', 'private', false)], 'a');
-    expect(selected?.visibility).toBe('private');
+  it('changes nothing but the main flag', () => {
+    const [selected] = selectMainMedia(identity, [item('a', false)], 'a');
+    expect(selected).toEqual({ ...item('a', true) });
   });
 });
 

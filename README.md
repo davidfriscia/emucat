@@ -8,7 +8,7 @@ setup, local sign-in with persistent sessions, a public catalog, and an administ
 the server, stays connected over an authenticated WebSocket, and reports the VMs it finds. An administrator can register
 one, with **Copy** or **Transfer**: the agent builds a standalone ZIP with a manifest, uploads it directly to an SSH/SFTP
 repository, verifies its SHA-256 there, and publishes it immutably, after which the server records one private master.
-Screenshots synchronize by themselves from registered VMs to the server, and stay private until published: see [the media guide](docs/media.md).
+Screenshots synchronize by themselves from registered VMs to the server, and are public exactly while their VM is: see [the media guide](docs/media.md).
 An administrator can **restore** a master onto an agent: it downloads the ZIP directly from the repository, verifies its SHA-256 and manifest, extracts it safely, and
 publishes the VM under the emulator's base path, never over an existing directory, keeping verified ZIPs in a local cache. Selecting a VM in the catalog opens its page, with a screenshot gallery that
 shows each viewer what they may see. Launching and snapshots are **not** implemented yet. See [known limitations](#known-limitations).

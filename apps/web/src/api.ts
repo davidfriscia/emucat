@@ -59,7 +59,6 @@ import {
   type VmSessionListResponse,
   type VmVerification,
   type InfoResponse,
-  type MediaVisibility,
   type PairingRequestListResponse,
   type PairingRequestReview,
   type PublicCatalogResponse,
@@ -364,18 +363,6 @@ export function clearMainMedia(vm: VmIdentity): Promise<AdminMediaListResponse> 
   return requestJson(`${relative(adminVmApiPath(vm))}/main-media`, adminMediaListResponseSchema, {
     method: 'DELETE',
   });
-}
-
-export function updateMediaVisibility(
-  vm: VmIdentity,
-  mediaId: string,
-  visibility: MediaVisibility,
-): Promise<AdminMediaListResponse> {
-  return requestJson(
-    `${relative(adminVmApiPath(vm))}/media/${mediaId}/visibility`,
-    adminMediaListResponseSchema,
-    { method: 'PUT', body: { visibility } },
-  );
 }
 
 export function deleteMedia(vm: VmIdentity, mediaId: string): Promise<AdminMediaListResponse> {

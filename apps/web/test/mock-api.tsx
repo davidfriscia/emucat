@@ -137,7 +137,6 @@ export function adminVm(overrides: Partial<AdminVmDetail> = {}): AdminVmDetail {
 export function adminMedia(overrides: Partial<AdminMedia> = {}): AdminMedia {
   return {
     id: MEDIA_ID,
-    visibility: 'private',
     isMain: false,
     originalFilename: 'boot.png',
     originalSizeBytes: 2048,

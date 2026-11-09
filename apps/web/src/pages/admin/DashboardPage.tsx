@@ -41,7 +41,7 @@ export function DashboardPage() {
           <Stat
             label="Media"
             value={state.data.media.total}
-            detail={`${state.data.media.published} published, ${state.data.media.private} private`}
+            detail={`${state.data.media.public} public, ${state.data.media.private} private, by their VM`}
           />
         </div>
       ) : null}

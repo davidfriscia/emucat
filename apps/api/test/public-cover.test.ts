@@ -1,7 +1,8 @@
 /**
  * The public catalog's cover, across every combination that can decide it, with real rows and real files.
- * What this file exists to protect: a public VM does not make its media public, and when both are
- * published the image really is reachable with no session at all.
+ * What this file exists to protect: publication is decided by the VM alone (decision 0036). A public
+ * VM's screenshots are reachable with no session at all, a private VM's never are, and whatever a legacy
+ * per-media visibility value says changes neither.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -12,6 +13,7 @@ import {
   publicCatalogResponseSchema,
   publicVmDetailSchema,
 } from '@emucat/contracts';
+import type { RowDataPacket } from 'mysql2/promise';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   ADMIN_PASSWORD,
@@ -96,13 +98,6 @@ const adminVm = async (vmName: string) => {
   return adminVmDetailSchema.parse(response.json());
 };
 
-const setMedia = (vmName: string, id: string, visibility: string) =>
-  admin.request({
-    method: 'PUT',
-    url: `/admin/vms/qemu/${vmName}/media/${id}/visibility`,
-    payload: { visibility },
-  });
-
 beforeAll(async () => {
   context = await startBrowserApp();
   anonymous = new TestClient(context.app);
@@ -110,33 +105,35 @@ beforeAll(async () => {
 });
 
 describe('the visibility matrix', () => {
+  // The legacy per-media value is set to both of its old values, to prove that it decides nothing.
   it.each([
-    ['PrivPriv', 'private', 'private', true, null, false, 'vm_private'],
-    ['PrivPub', 'private', 'published', true, null, false, 'vm_private'],
-    ['PubPriv', 'public', 'private', true, null, true, 'main_private'],
-    ['PubPub', 'public', 'published', true, 'cover', true, 'shown'],
+    ['PrivPriv', 'private', 'private', null, 'vm_private'],
+    ['PrivPub', 'private', 'published', null, 'vm_private'],
+    ['PubPriv', 'public', 'private', 'cover', 'shown'],
+    ['PubPub', 'public', 'published', 'cover', 'shown'],
   ] as const)(
-    '%s: a %s VM with a %s main image',
-    async (vmName, vmVisibility, mediaVisibility, isMain, cover, listed, status) => {
+    '%s: a %s VM with a main image whose legacy value is %s',
+    async (vmName, vmVisibility, legacy, cover, status) => {
       await insertVm(context.pool, { vmName, visibility: vmVisibility });
-      const item = await addMedia(vmName, { visibility: mediaVisibility, isMain });
+      const item = await addMedia(vmName, { visibility: legacy, isMain: true });
 
       const card = await publicCard(vmName);
-      expect(card !== undefined).toBe(listed);
+      expect(card !== undefined).toBe(vmVisibility === 'public');
       if (card) expect(card.mainImage?.id ?? null).toBe(cover ? item.id : null);
 
       const reachable = cover !== null;
       expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(reachable ? 200 : 404);
       expect((await publicFile(item.id, 'full')).statusCode).toBe(reachable ? 200 : 404);
+      expect((await publicFile(item.id, 'original')).statusCode).toBeGreaterThanOrEqual(400);
 
       // The administration interface says why, whichever it is.
       expect((await adminVm(vmName)).publicCover).toBe(status);
     },
   );
 
-  it('a public VM with no main image shows a placeholder, and its published images stay in the gallery', async () => {
+  it('a public VM with no main image shows a placeholder, and its screenshots stay in the gallery', async () => {
     await insertVm(context.pool, { vmName: 'PubNoMain', visibility: 'public' });
-    const item = await addMedia('PubNoMain', { visibility: 'published' });
+    const item = await addMedia('PubNoMain', { visibility: 'private' });
     expect((await publicCard('PubNoMain'))?.mainImage).toBeNull();
     const detail = await publicDetail('PubNoMain');
     expect(detail?.mainImage).toBeNull();
@@ -145,11 +142,62 @@ describe('the visibility matrix', () => {
   });
 });
 
+describe('a VM with several screenshots', () => {
+  it('shows every screenshot of a public VM, whatever its legacy value, to anyone', async () => {
+    await insertVm(context.pool, { vmName: 'ManyPublic', visibility: 'public' });
+    const items = [
+      await addMedia('ManyPublic', { visibility: 'private', isMain: true }),
+      await addMedia('ManyPublic', { visibility: 'published' }),
+      await addMedia('ManyPublic', { visibility: 'private' }),
+    ];
+    const detail = await publicDetail('ManyPublic');
+    expect(detail?.mainImage?.id).toBe(items[0]?.id);
+    expect(detail?.gallery.map((image) => image.id).sort()).toEqual(
+      items.map((item) => item.id).sort(),
+    );
+    for (const item of items) {
+      for (const variant of ['thumbnail', 'full']) {
+        const response = await publicFile(item.id, variant);
+        expect(response.statusCode, `${item.id} ${variant}`).toBe(200);
+        expect(response.body).toContain(`${variant}:${item.id}`);
+      }
+    }
+  });
+
+  it('shows nothing of a private VM to anyone without a session', async () => {
+    await insertVm(context.pool, { vmName: 'ManyPrivate', visibility: 'private' });
+    const items = [
+      await addMedia('ManyPrivate', { visibility: 'published', isMain: true }),
+      await addMedia('ManyPrivate', { visibility: 'published' }),
+      await addMedia('ManyPrivate', { visibility: 'private' }),
+    ];
+    expect(await publicCard('ManyPrivate')).toBeUndefined();
+    expect(await publicDetail('ManyPrivate')).toBeNull();
+    const catalog = await anonymous.get('/catalog/vms?pageSize=100');
+    for (const item of items) {
+      expect(catalog.body).not.toContain(item.id);
+      for (const variant of ['thumbnail', 'full', 'original']) {
+        const response = await publicFile(item.id, variant);
+        expect(response.statusCode, `${item.id} ${variant}`).toBeGreaterThanOrEqual(400);
+        expect(response.body).not.toContain(`:${item.id}`);
+      }
+      // The administrators' file route needs a session, too.
+      const direct = await anonymous.get(`/admin/vms/qemu/ManyPrivate/media/${item.id}/thumbnail`);
+      expect(direct.statusCode).toBe(401);
+    }
+    // An administrator still sees and can fetch all of them.
+    const listed = await admin.get('/admin/vms/qemu/ManyPrivate/media');
+    expect(listed.json<{ media: { id: string }[] }>().media).toHaveLength(3);
+    const file = await admin.get(`/admin/vms/qemu/ManyPrivate/media/${items[2]?.id}/full`);
+    expect(file.statusCode).toBe(200);
+  });
+});
+
 describe('changing things', () => {
   it('follows the main image when it changes, with nothing promoted automatically', async () => {
     await insertVm(context.pool, { vmName: 'Changing', visibility: 'public' });
-    const first = await addMedia('Changing', { visibility: 'published', isMain: true });
-    const second = await addMedia('Changing', { visibility: 'published' });
+    const first = await addMedia('Changing', { isMain: true });
+    const second = await addMedia('Changing');
     expect((await publicCard('Changing'))?.mainImage?.id).toBe(first.id);
 
     const selected = await admin.request({
@@ -159,17 +207,12 @@ describe('changing things', () => {
     });
     expect(selected.statusCode, selected.body).toBe(200);
     expect((await publicCard('Changing'))?.mainImage?.id).toBe(second.id);
-
-    // Unpublishing the main image shows a placeholder, and never promotes the other published one.
-    await setMedia('Changing', second.id, 'private');
-    expect((await publicCard('Changing'))?.mainImage).toBeNull();
-    expect((await publicFile(second.id, 'thumbnail')).statusCode).toBe(404);
-    expect((await publicFile(first.id, 'thumbnail')).statusCode).toBe(200);
-    expect((await adminVm('Changing')).publicCover).toBe('main_private');
-
-    await setMedia('Changing', second.id, 'published');
-    expect((await publicCard('Changing'))?.mainImage?.id).toBe(second.id);
     expect((await adminVm('Changing')).publicCover).toBe('shown');
+
+    // Selecting a cover never changes who may see an image: both stay public.
+    for (const item of [first, second]) {
+      expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(200);
+    }
 
     const cleared = await admin.request({
       method: 'DELETE',
@@ -178,12 +221,28 @@ describe('changing things', () => {
     expect(cleared.statusCode, cleared.body).toBe(200);
     expect((await publicCard('Changing'))?.mainImage).toBeNull();
     expect((await adminVm('Changing')).publicCover).toBe('no_main_image');
+    // Clearing the cover hides nothing either.
+    expect((await publicDetail('Changing'))?.gallery).toHaveLength(2);
   });
 
-  it('takes everything away at once when a VM is unpublished', async () => {
+  it('offers no per-media visibility route any more', async () => {
+    await insertVm(context.pool, { vmName: 'NoMediaRoute', visibility: 'private' });
+    const item = await addMedia('NoMediaRoute', { isMain: true });
+    const response = await admin.request({
+      method: 'PUT',
+      url: `/admin/vms/qemu/NoMediaRoute/media/${item.id}/visibility`,
+      payload: { visibility: 'published' },
+    });
+    expect(response.statusCode).toBe(404);
+    expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(404);
+  });
+
+  it('takes everything away at once when a VM is made private', async () => {
     await insertVm(context.pool, { vmName: 'Unpublished', visibility: 'public' });
     const item = await addMedia('Unpublished', { visibility: 'published', isMain: true });
+    const other = await addMedia('Unpublished');
     expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(200);
+    expect((await publicFile(other.id, 'thumbnail')).statusCode).toBe(200);
     const response = await admin.request({
       method: 'PUT',
       url: '/admin/vms/qemu/Unpublished/visibility',
@@ -192,28 +251,40 @@ describe('changing things', () => {
     expect(response.statusCode, response.body).toBe(200);
     expect(await publicCard('Unpublished')).toBeUndefined();
     expect(await publicDetail('Unpublished')).toBeNull();
-    expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(404);
-    expect((await publicFile(item.id, 'full')).statusCode).toBe(404);
+    for (const id of [item.id, other.id]) {
+      expect((await publicFile(id, 'thumbnail')).statusCode).toBe(404);
+      expect((await publicFile(id, 'full')).statusCode).toBe(404);
+    }
   });
 
-  it('never publishes anything as a side effect of making a VM public', async () => {
-    await insertVm(context.pool, { vmName: 'NoSideEffect', visibility: 'private' });
-    const item = await addMedia('NoSideEffect', { visibility: 'private', isMain: true });
+  it('publishes every screenshot, cover included, when a VM is made public', async () => {
+    await insertVm(context.pool, { vmName: 'MadePublic', visibility: 'private' });
+    const item = await addMedia('MadePublic', { visibility: 'private', isMain: true });
+    const other = await addMedia('MadePublic', { visibility: 'private' });
+    expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(404);
     const response = await admin.request({
       method: 'PUT',
-      url: '/admin/vms/qemu/NoSideEffect/visibility',
+      url: '/admin/vms/qemu/MadePublic/visibility',
       payload: { visibility: 'public' },
     });
-    expect(adminVmDetailSchema.parse(response.json()).publicCover).toBe('main_private');
-    expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(404);
+    expect(adminVmDetailSchema.parse(response.json()).publicCover).toBe('shown');
+    expect((await publicCard('MadePublic'))?.mainImage?.id).toBe(item.id);
+    expect((await publicFile(item.id, 'thumbnail')).statusCode).toBe(200);
+    expect((await publicFile(other.id, 'full')).statusCode).toBe(200);
+    // The legacy column is left exactly as it was.
+    const [rows] = await context.pool.query<RowDataPacket[]>(
+      'SELECT visibility FROM vm_media WHERE id IN (?, ?)',
+      [item.id, other.id],
+    );
+    expect(rows.map((row) => row.visibility as string)).toEqual(['private', 'private']);
   });
 
   it('says on the administrator’s card when there is no public cover', async () => {
     await insertVm(context.pool, { vmName: 'CardCover', visibility: 'public' });
-    await addMedia('CardCover', { visibility: 'private', isMain: true });
+    await addMedia('CardCover');
     const response = await admin.get('/admin/vms?q=CardCover');
     const [card] = adminCatalogResponseSchema.parse(response.json()).items;
-    expect(card?.publicCover).toBe('main_private');
+    expect(card?.publicCover).toBe('no_main_image');
   });
 });
 
@@ -223,8 +294,10 @@ describe('retrieving images', () => {
 
   beforeAll(async () => {
     await insertVm(context.pool, { vmName: 'Files', visibility: 'public' });
-    item = await addMedia('Files', { visibility: 'published', isMain: true });
-    hidden = await addMedia('Files', { visibility: 'private' });
+    // `hidden` belongs to a private VM, whose legacy value says "published": it is still hidden.
+    await insertVm(context.pool, { vmName: 'FilesHidden', visibility: 'private' });
+    item = await addMedia('Files', { visibility: 'private', isMain: true });
+    hidden = await addMedia('FilesHidden', { visibility: 'published', isMain: true });
   });
 
   it('serves the thumbnail and the full derivative with no session at all', async () => {
@@ -298,7 +371,7 @@ describe('retrieving images', () => {
 
   it('keeps private media and its metadata out of every public response', async () => {
     const detail = await anonymous.get('/catalog/vms/qemu/Files');
-    const list = await anonymous.get('/catalog/vms?q=Files');
+    const list = await anonymous.get('/catalog/vms?pageSize=100');
     for (const body of [detail.body, list.body]) {
       expect(body).not.toContain(hidden.id);
       expect(body).not.toContain('SENTINEL');
@@ -312,7 +385,7 @@ describe('retrieving images', () => {
     await insertVm(context.pool, { vmName: 'Ordered', visibility: 'public' });
     const items: Item[] = [];
     for (let index = 0; index < 5; index += 1) {
-      items.push(await addMedia('Ordered', { visibility: 'published', isMain: index === 3 }));
+      items.push(await addMedia('Ordered', { isMain: index === 3 }));
     }
     const first = (await publicDetail('Ordered'))?.gallery.map((image) => image.id);
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -328,12 +401,11 @@ describe('retrieving images', () => {
     expect(publicVmDetailSchema.parse(lower.json()).vmName).toBe('Files');
   });
 
-  it('gives an administrator every screenshot, including private ones', async () => {
-    const response = await admin.get('/admin/vms/qemu/Files/media');
+  it('gives an administrator every screenshot, including those of a private VM', async () => {
+    const response = await admin.get('/admin/vms/qemu/FilesHidden/media');
     const ids = response.json<{ media: { id: string }[] }>().media.map((media) => media.id);
-    expect(ids).toContain(hidden.id);
-    expect(ids).toContain(item.id);
-    const file = await admin.get(`/admin/vms/qemu/Files/media/${hidden.id}/thumbnail`);
+    expect(ids).toEqual([hidden.id]);
+    const file = await admin.get(`/admin/vms/qemu/FilesHidden/media/${hidden.id}/thumbnail`);
     expect(file.statusCode).toBe(200);
     expect(file.headers['cache-control']).toBe('private, no-store');
   });

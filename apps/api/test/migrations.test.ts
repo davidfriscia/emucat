@@ -1,8 +1,8 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import type { Pool, RowDataPacket } from 'mysql2/promise';
+import { createHash, randomUUID } from 'node:crypto';
+import mysql, { type Pool, type RowDataPacket } from 'mysql2/promise';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { databaseAgentAuthenticator, hashToken } from '../src/auth/agent-auth.js';
 import { loadMigrations, migrate, migrationLockName, MigrationError } from '../src/db/migrate.js';
@@ -527,33 +527,36 @@ describe('schema rules', () => {
       await expect(addMedia('qemu', vm, { sha: uniqueSha() })).resolves.toBeDefined();
     });
 
-    it('shows a main item publicly only while it is published', async () => {
+    it("shows a public VM's main item publicly, whatever its legacy visibility", async () => {
       const vm = await newVm();
       const id = await addMedia('qemu', vm, { sha: uniqueSha(), isMain: true });
-      await expect(cardMedia(vm)).resolves.toEqual([]);
+      await expect(cardMedia(vm)).resolves.toEqual([id]);
       await pool.execute("UPDATE vm_media SET visibility = 'published' WHERE id = ?", [id]);
       await expect(cardMedia(vm)).resolves.toEqual([id]);
-      await pool.execute("UPDATE vm_media SET visibility = 'private' WHERE id = ?", [id]);
+      await pool.execute('UPDATE vm_media SET is_main = FALSE WHERE id = ?', [id]);
       await expect(cardMedia(vm)).resolves.toEqual([]);
     });
 
-    it('never falls back to other published media after deleting the main item', async () => {
+    it('never falls back to other media after deleting the main item', async () => {
       const vm = await newVm();
-      const main = await addMedia('qemu', vm, {
-        sha: uniqueSha(),
-        isMain: true,
-        visibility: 'published',
-      });
+      const main = await addMedia('qemu', vm, { sha: uniqueSha(), isMain: true });
       await addMedia('qemu', vm, { sha: uniqueSha(), visibility: 'published' });
       await expect(cardMedia(vm)).resolves.toEqual([main]);
       await pool.execute('DELETE FROM vm_media WHERE id = ?', [main]);
       await expect(cardMedia(vm)).resolves.toEqual([]);
     });
 
-    it('does not expose media of a private VM', async () => {
+    it('does not expose media of a private VM, whatever its legacy visibility', async () => {
       const vm = await newVm('private');
       await addMedia('qemu', vm, { sha: uniqueSha(), isMain: true, visibility: 'published' });
       await expect(cardMedia(vm)).resolves.toEqual([]);
+    });
+
+    it('still refuses an unknown legacy value, so the column stays meaningful history', async () => {
+      const vm = await newVm();
+      await expect(
+        addMedia('qemu', vm, { sha: uniqueSha(), visibility: 'public' }),
+      ).rejects.toThrow(/CONSTRAINT|check/i);
     });
 
     it('rejects media for an unregistered VM', async () => {
@@ -582,5 +585,97 @@ describe('schema rules', () => {
       await pool.execute("INSERT INTO agents (id, name) VALUES (?, 'unpaired')", [randomUUID()]);
       await expect(databaseAgentAuthenticator(pool)('')).resolves.toBeNull();
     });
+  });
+});
+
+describe('upgrading to VM-level publication (0008)', () => {
+  let scratch: TestDatabase;
+  let directory: string;
+  let upgradePool: Pool;
+
+  beforeAll(async () => {
+    scratch = await createTestDatabase();
+    directory = await mkdtemp(join(tmpdir(), 'emucat-migrations-'));
+    const all = await loadMigrations();
+    for (const migration of all.filter((item) => item.version < '0008')) {
+      await writeFile(join(directory, `${migration.version}.sql`), migration.sql);
+    }
+    await migrate(scratch.options, directory);
+    upgradePool = mysql.createPool(scratch.options);
+  });
+
+  afterAll(async () => {
+    await upgradePool?.end();
+    await scratch?.drop();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('keeps every legacy value, and lets the VM alone decide afterwards', async () => {
+    const insertVm = (name: string, visibility: string) =>
+      upgradePool.execute(
+        "INSERT INTO virtual_machines (emulator_type, vm_name, visibility) VALUES ('qemu', ?, ?)",
+        [name, visibility],
+      );
+    const insertMedia = async (vmName: string, visibility: string, isMain: boolean) => {
+      const id = randomUUID();
+      await upgradePool.execute(
+        `INSERT INTO vm_media (id, emulator_type, vm_name, visibility, is_main, original_filename,
+           original_sha256, original_size_bytes, jpeg_key, thumbnail_key, width_px, height_px)
+         VALUES (?, 'qemu', ?, ?, ?, 'a.ppm', ?, 1, 'j', 't', 1, 1)`,
+        [id, vmName, visibility, isMain, createHash('sha256').update(id).digest('hex')],
+      );
+      return id;
+    };
+    const card = async (vmName: string) => {
+      const [rows] = await upgradePool.query<RowDataPacket[]>(
+        'SELECT media_id FROM public_catalog_card_media WHERE vm_name = ?',
+        [vmName],
+      );
+      return rows.map((row) => row.media_id as string);
+    };
+
+    await insertVm('LegacyPublic', 'public');
+    await insertVm('LegacyPrivate', 'private');
+    const privateMainOfPublicVm = await insertMedia('LegacyPublic', 'private', true);
+    const publishedOfPublicVm = await insertMedia('LegacyPublic', 'published', false);
+    const publishedMainOfPrivateVm = await insertMedia('LegacyPrivate', 'published', true);
+
+    // Before: both had to agree.
+    await expect(card('LegacyPublic')).resolves.toEqual([]);
+    await expect(card('LegacyPrivate')).resolves.toEqual([]);
+
+    const result = await migrate(scratch.options);
+    expect(result.applied).toEqual(['0008_vm_level_publication']);
+
+    // After: the VM decides, for the cover and for everything else.
+    await expect(card('LegacyPublic')).resolves.toEqual([privateMainOfPublicVm]);
+    await expect(card('LegacyPrivate')).resolves.toEqual([]);
+
+    // Nothing was rewritten or lost.
+    const [rows] = await upgradePool.query<RowDataPacket[]>(
+      'SELECT id, visibility, is_main FROM vm_media ORDER BY id',
+    );
+    expect(Object.fromEntries(rows.map((row) => [row.id, [row.visibility, row.is_main]]))).toEqual({
+      [privateMainOfPublicVm]: ['private', 1],
+      [publishedOfPublicVm]: ['published', 0],
+      [publishedMainOfPrivateVm]: ['published', 1],
+    });
+    const [vms] = await upgradePool.query<RowDataPacket[]>(
+      'SELECT vm_name, visibility FROM virtual_machines ORDER BY vm_name',
+    );
+    expect(vms.map((row) => [row.vm_name, row.visibility])).toEqual([
+      ['LegacyPrivate', 'private'],
+      ['LegacyPublic', 'public'],
+    ]);
+
+    // The column says what it has become.
+    const [columns] = await upgradePool.query<RowDataPacket[]>(
+      `SELECT COLUMN_COMMENT AS comment FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'vm_media' AND COLUMN_NAME = 'visibility'`,
+    );
+    expect(columns[0]?.comment).toMatch(/Legacy, ignored/);
+
+    // And it runs once.
+    await expect(migrate(scratch.options)).resolves.toMatchObject({ applied: [] });
   });
 });
