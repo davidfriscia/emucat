@@ -282,7 +282,7 @@ Administrators only, with the session and CSRF token. No response holds a creden
 | Route                              | Audience      | Page                                                                           |
 | ---------------------------------- | ------------- | ------------------------------------------------------------------------------ |
 | `/`                                | Public        | Catalog                                                                        |
-| `/vms/:emulatorType/:vmName`       | Public        | VM detail                                                                      |
+| `/vms/:emulatorType/:vmName`       | Public        | VM detail: launch, general information, gallery                                |
 | `/login`, `/setup`                 | Public        | Sign in, first-run setup                                                       |
 | `/admin`                           | Administrator | Dashboard                                                                      |
 | `/admin/catalog`                   | Administrator | Catalog management                                                             |

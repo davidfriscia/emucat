@@ -661,3 +661,47 @@ export function VmExecutionSection({ vm }: { vm: VmIdentity }) {
     </section>
   );
 }
+
+/**
+ * The VM page's Launch action, for administrators: the same controls as on the management page, over the
+ * page, so that launching never means leaving it. Sessions are polled only while it is open.
+ */
+export function VmLaunchDialog({
+  vm,
+  title,
+  onClose,
+}: {
+  vm: VmIdentity;
+  title: string;
+  onClose: () => void;
+}) {
+  const dialog = useRef<HTMLDivElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useModalDialog(dialog, closeButton, onClose);
+  return (
+    <div className="modal-backdrop-custom">
+      <div
+        ref={dialog}
+        className="restore-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="launch-dialog-title"
+      >
+        <div className="d-flex align-items-center gap-2 mb-2 text-white">
+          <h2 id="launch-dialog-title" className="h5 mb-0 flex-grow-1">
+            Launch {title}
+          </h2>
+          <button
+            ref={closeButton}
+            type="button"
+            className="btn btn-sm btn-light"
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+        <VmExecutionSection vm={vm} />
+      </div>
+    </div>
+  );
+}

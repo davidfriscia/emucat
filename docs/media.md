@@ -158,6 +158,16 @@ A VM's page shows the main screenshot prominently, and thumbnails of every scree
 thumbnail opens the full JPEG in a viewer: the arrow keys move, Escape closes, Tab stays inside, and focus returns to the thumbnail of the image it ended on. Thumbnails load lazily and 24 at a time, and originals are never displayed, only offered to administrators as a download. See
 [decision 0027](decisions/0027-catalog-detail-and-public-covers.md).
 
+The public VM page (`/vms/:emulatorType/:vmName`) reads top to bottom: the name, emulator and **Launch VM** action; general
+information (the main screenshot, the emulator, the VM name, the number of screenshots and the description); then the screenshot
+gallery. Only what the public catalog already returns is shown; nothing is added to the API for the page. Launching is for
+administrators, and opens the same launcher as the management page in a dialog over the page. A visitor is offered to sign in,
+and a signed-in user who is not an administrator is told why the button is disabled.
+
+In the gallery the main cover is marked **Main cover**. Each viewer chooses small, medium or large cards; the choice is kept
+in that browser's local storage (`emucat.gallery.cardSize`), never on the server, and falls back to medium when storage is
+unavailable. Publication stays the VM's alone: the page offers no per-screenshot control.
+
 ## Decoding limits
 
 PNG and JPEG go through `sharp`, and PPM and BMP through two small decoders in the API. Both have limits on size, dimensions and pixels, checked before any pixel is decoded or any large buffer allocated, and a deadline, `MEDIA_PROCESSING_TIMEOUT_SECONDS`. Decoding yields regularly, so a large image does not hold up other
