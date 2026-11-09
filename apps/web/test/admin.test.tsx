@@ -29,7 +29,7 @@ const emptyAdminPage = {
 };
 const SUMMARY = {
   vms: { total: 3, public: 1, private: 2 },
-  media: { total: 5, published: 4, private: 1 },
+  media: { total: 5, public: 4, private: 1 },
 };
 
 describe('dashboard', () => {
@@ -37,7 +37,7 @@ describe('dashboard', () => {
     mockApi({ ...signedInAsAdmin, 'GET /admin/summary': SUMMARY });
     renderAt('/admin');
     expect(await screen.findByText('1 public, 2 private')).toBeTruthy();
-    expect(screen.getByText('4 published, 1 private')).toBeTruthy();
+    expect(screen.getByText('4 public, 1 private, by their VM')).toBeTruthy();
     expect(screen.getByRole('note').textContent).toMatch(/connected EmuCat agent/);
     expect(screen.getByRole('note').textContent).toMatch(/Agents page/);
   });
@@ -237,7 +237,7 @@ describe('VM editor', () => {
 describe('media management', () => {
   const MEDIA_PATH = `${VM_PATH}/media`;
   const twoItems = [
-    adminMedia({ visibility: 'published', isMain: true, shownAsPublicMain: true }),
+    adminMedia({ isMain: true, shownAsPublicMain: true }),
     adminMedia({ id: OTHER_MEDIA_ID, originalFilename: 'desktop.png' }),
   ];
   const cardFor = (name: string) =>
@@ -256,29 +256,44 @@ describe('media management', () => {
     renderAt(MEDIA_PATH);
     await screen.findByRole('heading', { name: 'boot.png' });
     const main = cardFor('boot.png');
-    expect(within(main).getByText('Published')).toBeTruthy();
     expect(within(main).getByText('Main image')).toBeTruthy();
     expect(within(main).getByText(/Shown as the main image/)).toBeTruthy();
     expect(main.querySelector('img')?.getAttribute('src')).toBe(
       `/api/v1/admin/vms/qemu/Win98/media/${MEDIA_ID}/thumbnail`,
     );
     const other = cardFor('desktop.png');
-    expect(within(other).getByText('Private')).toBeTruthy();
     expect(within(other).queryByText('Main image')).toBeNull();
   });
 
-  it('warns when the main image will not be shown', async () => {
+  it('offers no per-screenshot publication, only the cover and deletion', async () => {
+    const api = mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: twoItems } });
+    renderAt(MEDIA_PATH);
+    await screen.findByRole('heading', { name: 'desktop.png' });
+    for (const name of ['boot.png', 'desktop.png']) {
+      const card = within(cardFor(name));
+      expect(card.queryByRole('button', { name: 'Publish' })).toBeNull();
+      expect(card.queryByRole('button', { name: 'Make private' })).toBeNull();
+      expect(card.queryByText('Published')).toBeNull();
+      expect(card.queryByText('Private')).toBeNull();
+    }
+    expect(screen.getAllByRole('button', { name: /main image/ })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Delete' })).toHaveLength(2);
+    expect(screen.getByText(/all of them are public while this VM is public/)).toBeTruthy();
+    expect(api.calls.filter((call) => call.path.endsWith('/visibility'))).toEqual([]);
+  });
+
+  it('says when the main image is not shown because the VM is private', async () => {
     mockApi({
       ...signedInAsAdmin,
       [`GET ${MEDIA_PATH}`]: { media: [adminMedia({ isMain: true })] },
     });
     renderAt(MEDIA_PATH);
-    expect(await screen.findByText(/the public catalog shows a placeholder/)).toBeTruthy();
+    expect(await screen.findByText(/this VM is private: nobody outside sees it/)).toBeTruthy();
   });
 
   it('selects a main image', async () => {
     const after = [
-      adminMedia({ visibility: 'published' }),
+      adminMedia(),
       adminMedia({ id: OTHER_MEDIA_ID, originalFilename: 'desktop.png', isMain: true }),
     ];
     const api = mockApi({
@@ -304,7 +319,7 @@ describe('media management', () => {
       ...signedInAsAdmin,
       [`GET ${MEDIA_PATH}`]: { media: twoItems },
       [`DELETE ${VM_PATH}/main-media`]: {
-        media: [adminMedia({ visibility: 'published' }), twoItems[1]],
+        media: [adminMedia(), twoItems[1]],
       },
     });
     renderAt(MEDIA_PATH);
@@ -312,34 +327,6 @@ describe('media management', () => {
     fireEvent.click(within(cardFor('boot.png')).getByRole('button', { name: 'Clear main image' }));
     await waitFor(() => expect(screen.queryByText('Main image')).toBeNull());
     expect(api.callsTo('DELETE', `${VM_PATH}/main-media`)).toHaveLength(1);
-  });
-
-  it('publishes and privatizes', async () => {
-    const api = mockApi({
-      ...signedInAsAdmin,
-      [`GET ${MEDIA_PATH}`]: { media: twoItems },
-      [`PUT ${VM_PATH}/media/${OTHER_MEDIA_ID}/visibility`]: {
-        media: [
-          twoItems[0],
-          adminMedia({
-            id: OTHER_MEDIA_ID,
-            originalFilename: 'desktop.png',
-            visibility: 'published',
-          }),
-        ],
-      },
-    });
-    renderAt(MEDIA_PATH);
-    await screen.findByRole('heading', { name: 'desktop.png' });
-    fireEvent.click(within(cardFor('desktop.png')).getByRole('button', { name: 'Publish' }));
-    await waitFor(() =>
-      expect(
-        within(cardFor('desktop.png')).getByRole('button', { name: 'Make private' }),
-      ).toBeTruthy(),
-    );
-    expect(api.callsTo('PUT', `${VM_PATH}/media/${OTHER_MEDIA_ID}/visibility`)[0]?.body).toEqual({
-      visibility: 'published',
-    });
   });
 
   it('asks for confirmation before deleting, and can back out', async () => {

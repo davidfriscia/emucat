@@ -67,7 +67,6 @@ const ROUTES: [method: 'GET' | 'PATCH' | 'PUT' | 'DELETE', url: string, payload?
   ['GET', '/admin/vms/qemu/Target/media'],
   ['PUT', '/admin/vms/qemu/Target/main-media', { mediaId: UNKNOWN_ID }],
   ['DELETE', '/admin/vms/qemu/Target/main-media'],
-  ['PUT', `/admin/vms/qemu/Target/media/${UNKNOWN_ID}/visibility`, { visibility: 'published' }],
   ['DELETE', `/admin/vms/qemu/Target/media/${UNKNOWN_ID}`],
   ['GET', `/admin/vms/qemu/Target/media/${UNKNOWN_ID}/full`],
 ];
@@ -206,7 +205,20 @@ describe('administrative listing', () => {
   it('summarizes the catalog', async () => {
     const summary = adminSummaryResponseSchema.parse((await admin.get('/admin/summary')).json());
     expect(summary.vms.total).toBe(summary.vms.public + summary.vms.private);
-    expect(summary.media.total).toBe(summary.media.published + summary.media.private);
+    expect(summary.media.total).toBe(summary.media.public + summary.media.private);
+  });
+
+  it('counts media as public or private by their VM, not by a legacy per-media value', async () => {
+    const before = adminSummaryResponseSchema.parse((await admin.get('/admin/summary')).json());
+    const publicVm = await newVm({ visibility: 'public' });
+    const privateVm = await newVm({ visibility: 'private' });
+    await insertMedia(context, publicVm, { legacyVisibility: 'private' });
+    await insertMedia(context, publicVm, { legacyVisibility: 'published' });
+    await insertMedia(context, privateVm, { legacyVisibility: 'published' });
+    const after = adminSummaryResponseSchema.parse((await admin.get('/admin/summary')).json());
+    expect(after.media.total - before.media.total).toBe(3);
+    expect(after.media.public - before.media.public).toBe(2);
+    expect(after.media.private - before.media.private).toBe(1);
   });
 });
 
@@ -351,8 +363,8 @@ describe('main media', () => {
 
   beforeEach(async () => {
     vm = await newVm({ visibility: 'public' });
-    first = await insertMedia(context, vm, { visibility: 'published' });
-    second = await insertMedia(context, vm, { visibility: 'published' });
+    first = await insertMedia(context, vm);
+    second = await insertMedia(context, vm);
   });
 
   const mainIds = async () =>
@@ -395,7 +407,7 @@ describe('main media', () => {
   it('refuses another VM’s media, and changes nothing', async () => {
     await put(`${vm.path}/main-media`, { mediaId: first.id });
     const other = await newVm();
-    const foreign = await insertMedia(context, other, { visibility: 'published' });
+    const foreign = await insertMedia(context, other);
     const response = await put(`${vm.path}/main-media`, { mediaId: foreign.id });
     expect(response.statusCode).toBe(404);
     expect(errorResponseSchema.parse(response.json()).error.code).toBe('media_not_found');
@@ -418,9 +430,7 @@ describe('main media', () => {
   });
 
   it('keeps one main image under concurrent selections', async () => {
-    const candidates = await Promise.all(
-      Array.from({ length: 6 }, () => insertMedia(context, vm, { visibility: 'published' })),
-    );
+    const candidates = await Promise.all(Array.from({ length: 6 }, () => insertMedia(context, vm)));
     const responses = await Promise.all(
       candidates.flatMap((candidate) => [
         put(`${vm.path}/main-media`, { mediaId: candidate.id }),
@@ -465,11 +475,11 @@ describe('main media', () => {
 });
 
 describe('public image visibility rules', () => {
-  // [VM visibility, media visibility, main selected, shown publicly?]
+  // [VM visibility, legacy media value, main selected, shown publicly?]. The legacy value never matters.
   const MATRIX = [
     ['public', 'published', true, true],
     ['public', 'published', false, false],
-    ['public', 'private', true, false],
+    ['public', 'private', true, true],
     ['public', 'private', false, false],
     ['private', 'published', true, false],
     ['private', 'published', false, false],
@@ -478,10 +488,10 @@ describe('public image visibility rules', () => {
   ] as const;
 
   it.each(MATRIX)(
-    'VM %s, media %s, main %s: shown = %s',
-    async (vmVisibility, mediaVisibility, isMain, shown) => {
+    'VM %s, legacy %s, main %s: shown = %s',
+    async (vmVisibility, legacyVisibility, isMain, shown) => {
       const vm = await newVm({ visibility: vmVisibility });
-      const item = await insertMedia(context, vm, { visibility: mediaVisibility, isMain });
+      const item = await insertMedia(context, vm, { legacyVisibility, isMain });
 
       const card = await publicCard(vm.vmName);
       expect(card?.mainImage?.id ?? null).toBe(shown ? item.id : null);
@@ -491,47 +501,50 @@ describe('public image visibility rules', () => {
     },
   );
 
-  it('reacts to privatizing the main image, and to publishing it again', async () => {
+  it('follows the VM: making it private hides the cover, making it public shows it again', async () => {
     const vm = await newVm({ visibility: 'public' });
-    const main = await insertMedia(context, vm, { visibility: 'published', isMain: true });
-    const other = await insertMedia(context, vm, { visibility: 'published' });
-    const url = `${vm.path}/media/${main.id}/visibility`;
+    const main = await insertMedia(context, vm, { isMain: true });
+    const other = await insertMedia(context, vm);
 
-    await put(url, { visibility: 'private' });
-    expect((await publicCard(vm.vmName))?.mainImage).toBeNull();
+    await put(`${vm.path}/visibility`, { visibility: 'private' });
+    expect(await publicCard(vm.vmName)).toBeUndefined();
     const state = await mediaState(vm.path);
+    // The cover selection survives, untouched, while the VM is private.
     expect(state.find((item) => item.id === main.id)?.isMain).toBe(true);
     expect(state.find((item) => item.id === other.id)?.isMain).toBe(false);
+    expect(state.every((item) => !item.shownAsPublicMain)).toBe(true);
 
-    await put(url, { visibility: 'published' });
+    await put(`${vm.path}/visibility`, { visibility: 'public' });
     expect((await publicCard(vm.vmName))?.mainImage?.id).toBe(main.id);
   });
 
-  it('allows selecting private media, which stays hidden until published', async () => {
-    const vm = await newVm({ visibility: 'public' });
-    const item = await insertMedia(context, vm, { visibility: 'private' });
+  it('selects a cover of a private VM without publishing anything', async () => {
+    const vm = await newVm({ visibility: 'private' });
+    const item = await insertMedia(context, vm);
     expect((await put(`${vm.path}/main-media`, { mediaId: item.id })).statusCode).toBe(200);
-    expect((await publicCard(vm.vmName))?.mainImage).toBeNull();
+    expect(await publicCard(vm.vmName)).toBeUndefined();
+    expect(adminVmDetailSchema.parse((await admin.get(vm.path)).json()).publicCover).toBe(
+      'vm_private',
+    );
   });
 });
 
-describe('media visibility', () => {
-  it('cannot reach media through another VM', async () => {
-    const owner = await newVm();
-    const other = await newVm();
-    const item = await insertMedia(context, owner, { visibility: 'private' });
-    const response = await put(`${other.path}/media/${item.id}/visibility`, {
-      visibility: 'published',
-    });
-    expect(response.statusCode).toBe(404);
-    expect((await mediaState(owner.path))[0]?.visibility).toBe('private');
+describe('media administration', () => {
+  it('has no per-media visibility route, for any value', async () => {
+    const vm = await newVm({ visibility: 'private' });
+    const item = await insertMedia(context, vm);
+    for (const visibility of ['published', 'private', 'public']) {
+      const response = await put(`${vm.path}/media/${item.id}/visibility`, { visibility });
+      expect(response.statusCode, visibility).toBe(404);
+    }
+    expect(await publicCard(vm.vmName)).toBeUndefined();
   });
 
-  it('rejects unknown values', async () => {
+  it('reports no per-media visibility', async () => {
     const vm = await newVm();
-    const item = await insertMedia(context, vm);
-    const url = `${vm.path}/media/${item.id}/visibility`;
-    expect((await put(url, { visibility: 'public' })).statusCode).toBe(400);
+    await insertMedia(context, vm, { legacyVisibility: 'published' });
+    const response = await admin.get(`${vm.path}/media`);
+    expect(response.body).not.toMatch(/visibility|published/);
   });
 
   it('lists every field an administrator needs, but no storage keys or hashes', async () => {
@@ -550,7 +563,7 @@ describe('media visibility', () => {
 
   it('serves private media to the administrator, without caching', async () => {
     const vm = await newVm();
-    const item = await insertMedia(context, vm, { visibility: 'private' });
+    const item = await insertMedia(context, vm);
     const response = await admin.get(`${vm.path}/media/${item.id}/thumbnail`);
     expect(response.statusCode).toBe(200);
     expect(response.headers['content-type']).toBe('image/jpeg');
@@ -584,8 +597,8 @@ describe('deleting media', () => {
 
   it('shows the placeholder after the main image goes, and promotes nothing', async () => {
     const vm = await newVm({ visibility: 'public' });
-    const main = await insertMedia(context, vm, { visibility: 'published', isMain: true });
-    const other = await insertMedia(context, vm, { visibility: 'published' });
+    const main = await insertMedia(context, vm, { isMain: true });
+    const other = await insertMedia(context, vm);
     await remove(vm.path, main.id);
     expect((await publicCard(vm.vmName))?.mainImage).toBeNull();
     const state = await mediaState(vm.path);

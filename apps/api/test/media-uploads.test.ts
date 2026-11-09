@@ -172,7 +172,6 @@ describe('authentication and authorization', () => {
     const [item] = await mediaOf(vm);
     expect(item).toMatchObject({
       id: body.mediaId,
-      visibility: 'private',
       isMain: false,
       originalFilename: 'screenshots/nested/one.png',
       originalSizeBytes: bytes.length,
@@ -472,13 +471,20 @@ describe('deduplication', () => {
     const first = mediaUploadResponseSchema.parse((await upload(one, bytes)).json());
     const second = mediaUploadResponseSchema.parse((await upload(two, bytes)).json());
     expect(first.mediaId).not.toBe(second.mediaId);
-    // Publishing one does not publish the other.
+    // Each follows its own VM: making one VM public does not publish the other's copy.
     await admin.request({
       method: 'PUT',
-      url: `${one.admin}/media/${first.mediaId}/visibility`,
-      payload: { visibility: 'published' },
+      url: `${one.admin}/visibility`,
+      payload: { visibility: 'public' },
     });
-    expect((await mediaOf(two))[0]?.visibility).toBe('private');
+    const fetch = (mediaId: string) =>
+      context.app.inject({
+        method: 'GET',
+        url: `/api/v1/catalog/media/${mediaId}/thumbnail`,
+        headers: { host: HOST },
+      });
+    expect((await fetch(first.mediaId)).statusCode).toBe(200);
+    expect((await fetch(second.mediaId)).statusCode).toBe(404);
   });
 
   it('handles simultaneous identical uploads with one row and no leftovers', async () => {
@@ -1032,7 +1038,7 @@ describe('image processing', () => {
 });
 
 describe('visibility', () => {
-  async function published(vmVisibility: 'private' | 'public', mediaVisibility: string) {
+  async function published(vmVisibility: 'private' | 'public') {
     const vm = await newVm();
     const { mediaId } = mediaUploadResponseSchema.parse(
       (await upload(vm, await PNG_RED(80, 60))).json(),
@@ -1041,11 +1047,6 @@ describe('visibility', () => {
       method: 'PUT',
       url: `${vm.admin}/main-media`,
       payload: { mediaId },
-    });
-    await admin.request({
-      method: 'PUT',
-      url: `${vm.admin}/media/${mediaId}/visibility`,
-      payload: { visibility: mediaVisibility },
     });
     await admin.request({
       method: 'PUT',
@@ -1058,25 +1059,24 @@ describe('visibility', () => {
   const anonymous = (url: string) =>
     context.app.inject({ method: 'GET', url: `/api/v1${url}`, headers: { host: HOST } });
 
-  it('is private by default, for the VM and for the media, and selects no main image', async () => {
+  it('is private by default, through its VM, and selects no main image', async () => {
     const vm = await newVm();
     const { mediaId } = mediaUploadResponseSchema.parse(
       (await upload(vm, await PNG_RED(81, 61))).json(),
     );
     const [item] = await mediaOf(vm);
-    expect(item).toMatchObject({ visibility: 'private', isMain: false, shownAsPublicMain: false });
+    expect(item).toMatchObject({ isMain: false, shownAsPublicMain: false });
+    expect(item).not.toHaveProperty('visibility');
     expect((await anonymous(`/catalog/media/${mediaId}/thumbnail`)).statusCode).toBe(404);
   });
 
   it.each([
-    ['private', 'private', 404],
-    ['public', 'private', 404],
-    ['private', 'published', 404],
-    ['public', 'published', 200],
+    ['private', 404],
+    ['public', 200],
   ] as const)(
-    'with a %s VM and %s media, the public gets %i',
-    async (vmState, mediaState, code) => {
-      const { vm, mediaId } = await published(vmState, mediaState);
+    'with a %s VM, the public gets %i for an uploaded screenshot',
+    async (vmState, code) => {
+      const { vm, mediaId } = await published(vmState);
       for (const variant of ['thumbnail', 'full']) {
         const response = await anonymous(`/catalog/media/${mediaId}/${variant}`);
         expect(response.statusCode, variant).toBe(code);
@@ -1087,22 +1087,20 @@ describe('visibility', () => {
         expect(detail.statusCode).toBe(404);
       } else {
         const parsed = publicVmDetailSchema.parse(detail.json());
-        expect(parsed.mainImage?.id ?? null).toBe(mediaState === 'published' ? mediaId : null);
-        expect(parsed.gallery.map((item) => item.id)).toEqual(
-          mediaState === 'published' ? [mediaId] : [],
-        );
+        expect(parsed.mainImage?.id).toBe(mediaId);
+        expect(parsed.gallery.map((item) => item.id)).toEqual([mediaId]);
       }
     },
   );
 
   it('never serves an original to the public, however visible the item is', async () => {
-    const { mediaId } = await published('public', 'published');
+    const { mediaId } = await published('public');
     const response = await anonymous(`/catalog/media/${mediaId}/original`);
     expect(response.statusCode).toBe(400);
   });
 
   it('refuses every media route without a session', async () => {
-    const { vm, mediaId } = await published('public', 'published');
+    const { vm, mediaId } = await published('public');
     for (const url of [
       `${vm.admin}/media`,
       `${vm.admin}/media-sync`,
@@ -1114,44 +1112,42 @@ describe('visibility', () => {
     }
   });
 
-  it('requires the CSRF token to publish or to select', async () => {
-    const { vm, mediaId } = await published('private', 'private');
-    const noToken = await admin.request({
+  it('requires the CSRF token to publish a VM or to select its cover', async () => {
+    const { vm, mediaId } = await published('private');
+    const publish = await admin.request({
       method: 'PUT',
-      url: `${vm.admin}/media/${mediaId}/visibility`,
-      payload: { visibility: 'published' },
+      url: `${vm.admin}/visibility`,
+      payload: { visibility: 'public' },
       csrf: false,
     });
-    expect(noToken.statusCode).toBe(403);
+    expect(publish.statusCode).toBe(403);
+    const select = await admin.request({
+      method: 'PUT',
+      url: `${vm.admin}/main-media`,
+      payload: { mediaId },
+      csrf: false,
+    });
+    expect(select.statusCode).toBe(403);
+    expect((await anonymous(`/catalog/media/${mediaId}/thumbnail`)).statusCode).toBe(404);
   });
 
-  it('shows the placeholder when the main image is unpublished, and promotes nothing', async () => {
-    const { vm, mediaId } = await published('public', 'published');
+  it('shows a new upload of a public VM at once, without changing the cover', async () => {
+    const { vm, mediaId } = await published('public');
     const another = mediaUploadResponseSchema.parse(
       (await upload(vm, await PNG_RED(82, 62))).json(),
     );
-    await admin.request({
-      method: 'PUT',
-      url: `${vm.admin}/media/${another.mediaId}/visibility`,
-      payload: { visibility: 'published' },
-    });
-    await admin.request({
-      method: 'PUT',
-      url: `${vm.admin}/media/${mediaId}/visibility`,
-      payload: { visibility: 'private' },
-    });
+    expect((await anonymous(`/catalog/media/${another.mediaId}/full`)).statusCode).toBe(200);
     const listed = publicCatalogResponseSchema.parse(
       (await anonymous(`/catalog/vms?q=${encodeURIComponent(vm.vmName)}`)).json(),
     );
-    expect(listed.items[0]?.mainImage).toBeNull();
-    // It stays selected, so publishing it again is all it takes.
+    expect(listed.items[0]?.mainImage?.id).toBe(mediaId);
     const media = await mediaOf(vm);
     expect(media.find((item) => item.id === mediaId)?.isMain).toBe(true);
     expect(media.find((item) => item.id === another.mediaId)?.isMain).toBe(false);
   });
 
   it('shows the placeholder with no main image, or after clearing it', async () => {
-    const { vm } = await published('public', 'published');
+    const { vm } = await published('public');
     await admin.request({ method: 'DELETE', url: `${vm.admin}/main-media` });
     const listed = publicCatalogResponseSchema.parse(
       (await anonymous(`/catalog/vms?q=${encodeURIComponent(vm.vmName)}`)).json(),

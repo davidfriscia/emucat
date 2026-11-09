@@ -9,7 +9,7 @@ use emucat_agent::emulators::{
     EmulatorType, VmIdentity, VmName, VmRootEntry, is_valid_vm_root, validate_vm_name,
 };
 use emucat_agent::filesystem::{parse_vm_relative_path, vm_directory};
-use emucat_agent::media::{MediaVisibility, is_watched_media_path};
+use emucat_agent::media::is_watched_media_path;
 use emucat_agent::protocol::{Decoded, Envelope, Message, PROTOCOL_VERSION, decode};
 use emucat_agent::state::{AgentVmState, ContentStatus};
 use serde::Deserialize;
@@ -240,15 +240,6 @@ fn archive_paths_match_the_shared_fixtures() {
             case.path
         );
     }
-}
-
-#[test]
-fn media_is_private_by_default() {
-    assert_eq!(MediaVisibility::default(), MediaVisibility::Private);
-    assert_eq!(
-        serde_json::to_value(MediaVisibility::Published).unwrap(),
-        Value::from("published")
-    );
 }
 
 #[test]

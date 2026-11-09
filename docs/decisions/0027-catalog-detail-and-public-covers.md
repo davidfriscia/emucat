@@ -1,6 +1,8 @@
 # 0027: Why a public VM can have no cover, and saying so
 
-**Status:** Accepted. Adds to [0008](0008-public-reads-and-media-lifecycle.md), whose rules are unchanged.
+**Status:** Accepted, and partly superseded by [0036](0036-vm-level-publication.md): media no longer have a visibility of their own, so
+the `main_private` status and the "Publish the main screenshot" action are gone. The detail pages and the gallery are unchanged. Adds to
+[0008](0008-public-reads-and-media-lifecycle.md).
 
 ## What the reported defect was
 

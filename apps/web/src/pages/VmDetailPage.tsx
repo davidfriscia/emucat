@@ -80,7 +80,7 @@ function PublicGallery({
           />
         </section>
       ) : (
-        <p className="small text-body-secondary">No screenshots have been published yet.</p>
+        <p className="small text-body-secondary">There are no screenshots yet.</p>
       )}
       {viewer}
     </>

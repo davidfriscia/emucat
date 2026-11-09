@@ -186,12 +186,12 @@ describe('the public gallery', () => {
     expect(dialog.querySelector('img')?.getAttribute('src')).toContain(MEDIA_ID);
   });
 
-  it('shows a clear placeholder when nothing has been published', async () => {
+  it('shows a clear placeholder when the VM has no screenshots', async () => {
     mockApi({ [`GET ${PUBLIC_PATH}`]: { ...detail, mainImage: null, gallery: [] } });
     renderAt('/vms/qemu/Win98');
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
     expect(screen.getByRole('img', { name: 'No image' })).toBeTruthy();
-    expect(screen.getByText('No screenshots have been published yet.')).toBeTruthy();
+    expect(screen.getByText('There are no screenshots yet.')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Screenshots' })).toBeNull();
   });
 
@@ -297,38 +297,58 @@ describe('navigation', () => {
 describe('the cover notice on the administrator’s page', () => {
   const media = [adminMedia({ isMain: true })];
 
-  it('explains a private main screenshot, and publishes it only when asked', async () => {
-    const published = [
-      adminMedia({ isMain: true, visibility: 'published', shownAsPublicMain: true }),
-    ];
-    let vm = adminVm({
-      visibility: 'public',
-      mainMediaId: MEDIA_ID,
-      mediaCount: 1,
-      publicCover: 'main_private',
+  it('shows a public VM’s main screenshot as the cover, with nothing to publish separately', async () => {
+    const api = mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm({
+        visibility: 'public',
+        mainMediaId: MEDIA_ID,
+        mediaCount: 1,
+        publicCover: 'shown',
+      }),
+      [`GET ${VM_PATH}/media`]: { media: [adminMedia({ isMain: true, shownAsPublicMain: true })] },
     });
+    renderAt(VM_PATH);
+    await screen.findByRole('heading', { name: 'Windows 98 SE' });
+    expect(
+      await screen.findByText('The main screenshot is the public catalog’s cover.'),
+    ).toBeTruthy();
+    expect(screen.getByText(/all of its screenshots in the public catalog/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Publish the main screenshot' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Publish' })).toBeNull();
+    expect(
+      api.calls.filter((call) => call.path.includes('/media/') && call.method === 'PUT'),
+    ).toEqual([]);
+  });
+
+  it('publishes every screenshot by making the VM public, and refreshes them', async () => {
+    let vm = adminVm({ mainMediaId: MEDIA_ID, mediaCount: 1, publicCover: 'vm_private' });
+    let mediaList = [adminMedia({ isMain: true })];
     const api = mockApi({
       ...signedInAsAdmin,
       [`GET ${VM_PATH}`]: () => vm,
-      [`GET ${VM_PATH}/media`]: { media },
-      [`PUT ${VM_PATH}/media/${MEDIA_ID}/visibility`]: () => {
-        vm = { ...vm, publicCover: 'shown' };
-        return { media: published };
+      [`GET ${VM_PATH}/media`]: () => ({ media: mediaList }),
+      [`PUT ${VM_PATH}/visibility`]: () => {
+        vm = { ...vm, visibility: 'public', publicCover: 'shown' };
+        mediaList = [adminMedia({ isMain: true, shownAsPublicMain: true })];
+        return vm;
       },
     });
     renderAt(VM_PATH);
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
-    const notice = await screen.findByText(/its main screenshot is private/);
-    expect(notice).toBeTruthy();
-    // Nothing happened by itself.
-    expect(api.callsTo('PUT', `${VM_PATH}/media/${MEDIA_ID}/visibility`)).toHaveLength(0);
+    expect(
+      await screen.findByText(/Making it public publishes all of its screenshots/),
+    ).toBeTruthy();
+    expect(await screen.findByText(/this VM is private: nobody outside sees it/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Publish the main screenshot' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Make public' }));
     await screen.findByText('The main screenshot is the public catalog’s cover.');
-    const calls = api.callsTo('PUT', `${VM_PATH}/media/${MEDIA_ID}/visibility`);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.body).toEqual({ visibility: 'published' });
-    expect(screen.queryByRole('button', { name: 'Publish the main screenshot' })).toBeNull();
+    expect(await screen.findByText('Shown as the main image in the public catalog.')).toBeTruthy();
+    const [call] = api.callsTo('PUT', `${VM_PATH}/visibility`);
+    expect(call?.body).toEqual({ visibility: 'public' });
+    expect(
+      api.calls.filter((call) => call.path.includes('/media/') && call.method === 'PUT'),
+    ).toEqual([]);
   });
 
   it('explains a public VM with no main screenshot', async () => {
@@ -364,8 +384,8 @@ describe('the cover notice on the administrator’s page', () => {
             displayName: 'Windows 98 SE',
             summary: null,
             visibility: 'public',
-            mainMediaId: MEDIA_ID,
-            publicCover: 'main_private',
+            mainMediaId: null,
+            publicCover: 'no_main_image',
             mediaCount: 1,
             activeSessions: 0,
             updatedAt: '2026-01-01T00:00:00.000Z',
@@ -378,16 +398,12 @@ describe('the cover notice on the administrator’s page', () => {
     const link = await screen.findByRole('link', { name: 'Windows 98 SE' });
     expect(link.getAttribute('href')).toBe(VM_PATH);
     expect(screen.getByText('No public cover')).toBeTruthy();
-    // An administrator's card may show private media, through the administrators' route.
-    expect(link.closest('article')?.querySelector('img')?.getAttribute('src')).toBe(
-      `/api/v1${VM_PATH}/media/${MEDIA_ID}/thumbnail`,
-    );
   });
 });
 
 describe('the administrator’s gallery', () => {
   const media = [
-    adminMedia({ isMain: true, visibility: 'published' }),
+    adminMedia({ isMain: true }),
     adminMedia({ id: OTHER_MEDIA_ID, originalFilename: 'desk.png' }),
   ];
 
@@ -398,7 +414,6 @@ describe('the administrator’s gallery', () => {
       [`GET ${VM_PATH}/media`]: { media },
       [`PUT ${VM_PATH}/main-media`]: { media },
       [`DELETE ${VM_PATH}/main-media`]: { media },
-      [`PUT ${VM_PATH}/media/${OTHER_MEDIA_ID}/visibility`]: { media },
     });
     renderAt(VM_PATH);
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
@@ -412,10 +427,7 @@ describe('the administrator’s gallery', () => {
     await waitFor(() => expect(api.callsTo('DELETE', `${VM_PATH}/main-media`)).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Set as main image' }));
     await waitFor(() => expect(api.callsTo('PUT', `${VM_PATH}/main-media`)).toHaveLength(1));
-    fireEvent.click(screen.getByRole('button', { name: 'Publish' }));
-    await waitFor(() =>
-      expect(api.callsTo('PUT', `${VM_PATH}/media/${OTHER_MEDIA_ID}/visibility`)).toHaveLength(1),
-    );
+    expect(screen.queryByRole('button', { name: 'Publish' })).toBeNull();
   });
 
   it('uses the same viewer, with derivatives, and the original only as a download', async () => {

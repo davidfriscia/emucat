@@ -40,3 +40,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0033](0033-remote-execution-modes.md)           | Remote modes exist in the contract, and are refused                           |
 | [0034](0034-deployment-and-admin-updates.md)     | Images built on the server, updated on demand by a separate service           |
 | [0035](0035-self-contained-opt-emucat.md)        | Everything a server keeps lives under /opt/emucat                             |
+| [0036](0036-vm-level-publication.md)             | Publication is decided by the VM alone                                        |

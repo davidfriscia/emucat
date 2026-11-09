@@ -119,9 +119,9 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
       </nav>
       <h1 className="h3 mb-3">Media</h1>
       <p className="small text-body-secondary">
-        Screenshots arrive from the agent that holds this VM, and stay private until you publish
-        them here. Publishing an image is separate from publishing the VM. The public catalog shows
-        the main image only while this VM is public and the image is published. Otherwise it shows a
+        Screenshots arrive from the agent that holds this VM. They have no visibility of their own:
+        all of them are public while this VM is public, and none of them while it is private. The
+        main image is only the public catalog’s cover. With none selected, the catalog shows a
         placeholder: another image is never chosen automatically. Images are independent of VM
         versions.
       </p>

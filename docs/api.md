@@ -64,7 +64,7 @@ matched against display name, VM name and description) and `emulatorType`. They 
 
 ## Public catalog
 
-No authentication. Only public VMs and published media ever appear here, and responses never contain
+No authentication. Only public VMs and their screenshots ever appear here, and responses never contain
 filenames, hashes, storage keys, attribution, agent state or repository details. Responses may be stored but
 must be revalidated (`Cache-Control: no-cache`), so making something private takes effect immediately.
 
@@ -74,7 +74,7 @@ must be revalidated (`Cache-Control: no-cache`), so making something private tak
 | `GET /catalog/vms/:emulatorType/:vmName`      | Adds `description` and `gallery`; `summary` goes                       |
 | `GET /catalog/media/:mediaId/thumbnail\|full` | The JPEG                                                               |
 
-`mainImage` is `{ id, widthPx, heightPx }`, or `null` meaning "show the placeholder". `gallery` lists every published image, with the main one first, then by when it was captured, in a stable order. `/original` does not exist here, for anyone. `displayName` may be
+`mainImage` is `{ id, widthPx, heightPx }`, or `null` meaning "show the placeholder". `gallery` lists every image of the VM, with the main one first, then by when it was captured, in a stable order. `/original` does not exist here, for anyone. `displayName` may be
 `null`, in which case the title is the VM name (`vmTitle` in the contracts). `summary` is the first 240
 characters of the description.
 
@@ -84,7 +84,7 @@ Requires a session with the `admin` role. Responses are `Cache-Control: no-store
 
 | Method and path                                                       | Purpose                                              |
 | --------------------------------------------------------------------- | ---------------------------------------------------- |
-| `GET /admin/summary`                                                  | Counts of VMs and media by visibility                |
+| `GET /admin/summary`                                                  | Counts of VMs, and of media by their VM's visibility |
 | `GET /admin/vms`                                                      | Every VM. Also filters by `visibility`               |
 | `GET /admin/vms/:emulatorType/:vmName`                                | One VM                                               |
 | `PATCH /admin/vms/:emulatorType/:vmName`                              | `{ displayName?, description? }`, or `null` to clear |
@@ -92,10 +92,9 @@ Requires a session with the `admin` role. Responses are `Cache-Control: no-store
 | `GET /admin/vms/:emulatorType/:vmName/media`                          | Every media item of the VM                           |
 | `PUT /admin/vms/:emulatorType/:vmName/main-media`                     | `{ mediaId }`: selects the main image                |
 | `DELETE /admin/vms/:emulatorType/:vmName/main-media`                  | Clears the selection                                 |
-| `PUT /admin/vms/:emulatorType/:vmName/media/:mediaId/visibility`      | `{ visibility: "private" \| "published" }`           |
 | `DELETE /admin/vms/:emulatorType/:vmName/media/:mediaId`              | Deletes the item and its files                       |
 | `GET /admin/vms/:emulatorType/:vmName/media/:mediaId`                 | One item in full, with its hash, type and agent      |
-| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/thumbnail\|full` | The JPEG, published or not                           |
+| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/thumbnail\|full` | The JPEG, whether the VM is public or not            |
 | `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/original`        | The uploaded file, as a download                     |
 | `GET /admin/vms/:emulatorType/:vmName/media-sync`                     | What each agent holding the VM last reported         |
 

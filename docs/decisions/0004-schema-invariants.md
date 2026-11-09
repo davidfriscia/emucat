@@ -33,9 +33,10 @@ Instead `vm_media` has `is_main`, with a generated `main_marker` and a unique in
 
 Changing the selection takes two updates in a transaction: clear the old flag, then set the new one.
 
-Public reads go through the view `public_catalog_card_media`, which requires a public VM, the main flag
-and published visibility, so privatizing or deleting cannot expose anything and no other item is
-promoted.
+Public reads go through the view `public_catalog_card_media`, which requires a public VM and the main
+flag, so privatizing or deleting cannot expose anything and no other item is promoted. Media once had a
+published visibility of their own, which the view also required; since
+[decision 0036](0036-vm-level-publication.md) the VM alone decides.
 
 ## Foreign key deletion behavior
 

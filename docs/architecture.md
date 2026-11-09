@@ -40,7 +40,7 @@ WebSocket endpoint.
 | `src/routes/system.ts`              | `health`, `ready`, `info`                                       |
 | `src/routes/browser.ts`             | Wires up the routes the web app uses                            |
 | `src/routes/auth.ts`                | Setup, sign-in, sign-out, account and sessions                  |
-| `src/routes/public-catalog.ts`      | Public listing, detail and published images                     |
+| `src/routes/public-catalog.ts`      | Public listing, detail and public VMs' images                   |
 | `src/routes/admin-catalog.ts`       | Administration of existing VMs and media                        |
 | `src/auth/`                         | Passwords, sessions, setup, guards, agent tokens, rate limiting |
 | `src/catalog/repository.ts`         | All catalog SQL                                                 |
@@ -113,9 +113,10 @@ builds and tests on Linux so that portability stays honest.
   registration. There is no other way in, and nothing is registered automatically.
 - **Don't trust a cached copy.** A local VM can change while its agent is offline, so a verification
   only counts if it happened after the latest connection.
-- **Private by default.** VMs and media are private until explicitly made public, and the public
-  catalog reads through a view that only ever exposes a published main image. See
-  [decision 0008](decisions/0008-public-reads-and-media-lifecycle.md).
+- **Private by default.** VMs are private until explicitly made public, and their media are public
+  exactly while they are. The public catalog reads through a view that only ever exposes a public VM's
+  main image. See [decision 0008](decisions/0008-public-reads-and-media-lifecycle.md) and
+  [decision 0036](decisions/0036-vm-level-publication.md).
 - **The database enforces invariants.** Identity, version shape, one master and one main image are
   constraints, not just application code. See [decision 0004](decisions/0004-schema-invariants.md).
 - **Fail closed.** Without a live credential that a person approved, the agent endpoint opens no socket. See

@@ -1,7 +1,7 @@
 # Screenshots and media
 
-Screenshots go from a VM's directory to the EmuCat server by themselves, whether or not the VM is running, and stay private until
-an administrator publishes them. The reasoning is in decisions [0016](decisions/0016-screenshot-watcher.md),
+Screenshots go from a VM's directory to the EmuCat server by themselves, whether or not the VM is running, and are public exactly
+while their VM is. The reasoning is in decisions [0016](decisions/0016-screenshot-watcher.md),
 [0017](decisions/0017-durable-media-queue.md), [0018](decisions/0018-agent-media-upload.md),
 [0019](decisions/0019-media-processing-and-storage.md) and [0020](decisions/0020-transfer-media-preservation.md).
 
@@ -93,7 +93,7 @@ dimensions, at quality 92 with no chroma subsampling. **The thumbnail** has its 
 and is never enlarged. Transparency is flattened onto white, and neither JPEG carries the original's metadata.
 
 **Deduplication** is per VM, by `(emulator_type, vm_name, original_sha256)`, enforced by a unique index. The same bytes again return
-the existing item. The same bytes in another VM are a separate item, with separate files and separate visibility.
+the existing item. The same bytes in another VM are a separate item, with separate files, public or private with that VM.
 
 ## Storage
 
@@ -109,7 +109,7 @@ media/
 
 File names come from a new UUID for each item, never from anything an agent sent. Storage keys in the database are relative to
 `STORAGE_PATH`, so the directory can move. Screenshot bytes are never stored in MariaDB. **Do not expose this directory through a web
-server:** it holds private files beside published ones, and only the API knows which is which.
+server:** it holds private VMs' files beside public ones, and only the API knows which is which.
 
 Files are published before their row exists, using an atomic rename within the same filesystem, so that a row never refers to a
 missing file and a partly written file is never at a final path.
@@ -130,26 +130,31 @@ be removed yet. Back up `STORAGE_PATH` together with the database.
 
 ## Visibility
 
-Media are private by default. Nothing is published automatically, and nothing is selected as the main image automatically.
+Publication is decided by the VM alone, as [decision 0036](decisions/0036-vm-level-publication.md) explains. A screenshot has no
+visibility of its own. VMs are private by default, and nothing is selected as the main image automatically.
 
-| VM      | Media     | Public catalog                                   |
-| ------- | --------- | ------------------------------------------------ |
-| Private | Either    | The VM does not exist, as far as anyone can tell |
-| Public  | Private   | Not shown. A main image shows as the placeholder |
-| Public  | Published | Shown                                            |
+| VM      | Public catalog                                                                    |
+| ------- | --------------------------------------------------------------------------------- |
+| Private | The VM and its screenshots do not exist, as far as anyone without a session knows |
+| Public  | The VM and every one of its screenshots are shown                                 |
 
-The public can fetch the thumbnail and the full JPEG of an image that passes that test, and never an original. Administrators can
-fetch all three, through routes that check the session on each request, and originals are served as downloads.
+The public can fetch the thumbnail and the full JPEG of a public VM's screenshots, and never an original. Administrators can
+fetch all three, for any VM, through routes that check the session on each request, and originals are served as downloads.
 
-**A public VM does not make its screenshots public.** A VM can be public with a main image selected and still show a placeholder, because that image is private. The VM's page says so, and offers one explicit action to publish it. See [decision 0027](decisions/0027-catalog-detail-and-public-covers.md).
+Making a VM public publishes all of its screenshots at once, and making it private takes them all away at once. To keep one
+screenshot of a public VM out of the catalog, delete it.
 
 **The main image** is `vm_media.is_main`, with at most one per VM as [decision 0004](decisions/0004-schema-invariants.md) describes.
-New screenshots never change it. Unpublishing the main image keeps the selection and shows the placeholder, and nothing is promoted in
-its place.
+It decides only the cover, never who may see an image. New screenshots never change it. Clearing it shows the placeholder, and
+nothing is promoted in its place.
+
+**Legacy values.** `vm_media.visibility` once held a per-screenshot `private` or `published`. It is kept, unchanged, and ignored
+since migration 0008. Before upgrading, the query in [decision 0036](decisions/0036-vm-level-publication.md) lists the screenshots of
+public VMs that were hidden and become public.
 
 ## The gallery
 
-A VM's page shows the main screenshot prominently, and thumbnails of every screenshot the viewer may see. The public sees what is published, and administrators see everything, with the controls to set or clear the main image and to publish or unpublish. Selecting a
+A VM's page shows the main screenshot prominently, and thumbnails of every screenshot the viewer may see. The public sees every screenshot of a public VM, and administrators see everything, with the controls to set or clear the main image and to delete. Selecting a
 thumbnail opens the full JPEG in a viewer: the arrow keys move, Escape closes, Tab stays inside, and focus returns to the thumbnail of the image it ended on. Thumbnails load lazily and 24 at a time, and originals are never displayed, only offered to administrators as a download. See
 [decision 0027](decisions/0027-catalog-detail-and-public-covers.md).
 

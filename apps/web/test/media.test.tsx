@@ -85,17 +85,18 @@ describe('the screenshot gallery', () => {
     renderAt(MEDIA_PATH);
     const heading = await screen.findByRole('heading', { name: 'screenshots/nested/boot.png' });
     const card = heading.closest('article') as HTMLElement;
-    expect(within(card).getByText('Private')).toBeTruthy();
+    expect(within(card).queryByText('Private')).toBeNull();
+    expect(within(card).queryByText('Published')).toBeNull();
     expect(within(card).getByText(/640 × 480/)).toBeTruthy();
     expect(within(card).getByText(/Uploaded/)).toBeTruthy();
     const main = screen.getByRole('heading', { name: 'desktop.png' }).closest('article');
     expect(within(main as HTMLElement).getByText('Main image')).toBeTruthy();
   });
 
-  it('explains that publishing an image is not publishing the VM', async () => {
+  it('explains that screenshots follow the VM’s visibility', async () => {
     mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: items } });
     renderAt(MEDIA_PATH);
-    expect(await screen.findByText(/Publishing an image is separate from publishing the VM/));
+    expect(await screen.findByText(/They have no visibility of their own/)).toBeTruthy();
   });
 
   it('never reveals a storage location, because it is never given one', async () => {

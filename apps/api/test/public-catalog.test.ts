@@ -53,47 +53,49 @@ beforeAll(async () => {
     visibility: 'private',
   });
 
-  // Every combination of VM visibility, media visibility and the main flag.
-  await insertVm(pool, { vmName: 'PublicMainPublished', visibility: 'public' });
-  await insertVm(pool, { vmName: 'PublicMainPrivate', visibility: 'public' });
+  // Every combination of VM visibility and the main flag, with both legacy per-media values, which
+  // decide nothing (decision 0036).
+  await insertVm(pool, { vmName: 'PublicWithMain', visibility: 'public' });
+  await insertVm(pool, { vmName: 'PublicLegacyPrivateMain', visibility: 'public' });
   await insertVm(pool, { vmName: 'PublicNoMain', visibility: 'public' });
-  await insertVm(pool, { vmName: 'PrivateMainPublished', visibility: 'private' });
+  await insertVm(pool, { vmName: 'PrivateWithMain', visibility: 'private' });
 
   const secret = { filename: SECRET_FILENAME };
   media.shown = await insertMedia(
     context,
-    { vmName: 'PublicMainPublished' },
-    { visibility: 'published', isMain: true, ...secret },
+    { vmName: 'PublicWithMain' },
+    { legacyVisibility: 'published', isMain: true, ...secret },
   );
   media.galleryOnly = await insertMedia(
     context,
-    { vmName: 'PublicMainPublished' },
-    { visibility: 'published', ...secret },
+    { vmName: 'PublicWithMain' },
+    { legacyVisibility: 'published', ...secret },
   );
-  media.unpublishedSibling = await insertMedia(
+  media.legacyPrivateSibling = await insertMedia(
     context,
-    { vmName: 'PublicMainPublished' },
-    { visibility: 'private', ...secret },
+    { vmName: 'PublicWithMain' },
+    { legacyVisibility: 'private', ...secret },
   );
-  media.privateMain = await insertMedia(
+  media.legacyPrivateMain = await insertMedia(
     context,
-    { vmName: 'PublicMainPrivate' },
-    { visibility: 'private', isMain: true, ...secret },
+    { vmName: 'PublicLegacyPrivateMain' },
+    { legacyVisibility: 'private', isMain: true, ...secret },
   );
   media.notPromoted = await insertMedia(
     context,
-    { vmName: 'PublicMainPrivate' },
-    { visibility: 'published', ...secret },
+    { vmName: 'PublicLegacyPrivateMain' },
+    { legacyVisibility: 'published', ...secret },
   );
-  media.noMain = await insertMedia(
-    context,
-    { vmName: 'PublicNoMain' },
-    { visibility: 'published', ...secret },
-  );
+  media.noMain = await insertMedia(context, { vmName: 'PublicNoMain' }, { ...secret });
   media.ofPrivateVm = await insertMedia(
     context,
-    { vmName: 'PrivateMainPublished' },
-    { visibility: 'published', isMain: true, ...secret },
+    { vmName: 'PrivateWithMain' },
+    { legacyVisibility: 'published', isMain: true, ...secret },
+  );
+  media.ofPrivateVmSibling = await insertMedia(
+    context,
+    { vmName: 'PrivateWithMain' },
+    { legacyVisibility: 'published', ...secret },
   );
 });
 
@@ -111,8 +113,8 @@ describe('public listing', () => {
   it('shows only public VMs', async () => {
     const names = (await list()).items.map((item) => item.vmName);
     expect(names).not.toContain('SecretVM');
-    expect(names).not.toContain('PrivateMainPublished');
-    expect(names).toContain('PublicMainPublished');
+    expect(names).not.toContain('PrivateWithMain');
+    expect(names).toContain('PublicWithMain');
   });
 
   it('keeps the same name under two emulators as two VMs', async () => {
@@ -123,8 +125,8 @@ describe('public listing', () => {
   it('leaks nothing about private data in any response', async () => {
     const responses = await Promise.all([
       client.get('/catalog/vms?pageSize=100'),
-      client.get('/catalog/vms/qemu/PublicMainPublished'),
-      client.get('/catalog/vms/qemu/PublicMainPrivate'),
+      client.get('/catalog/vms/qemu/PublicWithMain'),
+      client.get('/catalog/vms/qemu/PublicLegacyPrivateMain'),
     ]);
     for (const response of responses) {
       expect(response.statusCode).toBe(200);
@@ -132,7 +134,7 @@ describe('public listing', () => {
       expect(response.body).not.toMatch(
         /jpeg_key|jpegKey|thumbnail_key|thumbnailKey|sha256|filename|repository|agent|secret_ref|visibility|\bmedia\/[0-9a-f-]+\//i,
       );
-      for (const fixture of [media.unpublishedSibling, media.privateMain, media.ofPrivateVm]) {
+      for (const fixture of [media.ofPrivateVm, media.ofPrivateVmSibling]) {
         expect(response.body).not.toContain(fixture?.id);
       }
     }
@@ -295,29 +297,42 @@ describe('card image rules', () => {
   const imageOf = async (vmName: string) =>
     (await list(`?q=${vmName}`)).items.find((item) => item.vmName === vmName)?.mainImage;
 
-  it('shows a published main image of a public VM', async () => {
-    expect(await imageOf('PublicMainPublished')).toEqual({
+  it('shows the main image of a public VM', async () => {
+    expect(await imageOf('PublicWithMain')).toEqual({
       id: media.shown?.id,
       widthPx: 640,
       heightPx: 480,
     });
-    expect((await detail('qemu/PublicMainPublished')).mainImage?.id).toBe(media.shown?.id);
+    expect((await detail('qemu/PublicWithMain')).mainImage?.id).toBe(media.shown?.id);
   });
 
-  it('shows the placeholder when the main image is private, and promotes nothing', async () => {
-    expect(await imageOf('PublicMainPrivate')).toBeNull();
-    expect((await detail('qemu/PublicMainPrivate')).mainImage).toBeNull();
+  it('shows the main image of a public VM even when its legacy value says private', async () => {
+    expect((await imageOf('PublicLegacyPrivateMain'))?.id).toBe(media.legacyPrivateMain?.id);
+    expect((await detail('qemu/PublicLegacyPrivateMain')).mainImage?.id).toBe(
+      media.legacyPrivateMain?.id,
+    );
   });
 
-  it('shows the placeholder when nothing is selected, even with published media', async () => {
+  it('shows the placeholder when nothing is selected, and promotes nothing', async () => {
     expect(await imageOf('PublicNoMain')).toBeNull();
     expect((await detail('qemu/PublicNoMain')).mainImage).toBeNull();
+    expect((await detail('qemu/PublicNoMain')).gallery.map((item) => item.id)).toEqual([
+      media.noMain?.id,
+    ]);
   });
 
-  it('lists only published media in the gallery', async () => {
-    const gallery = (await detail('qemu/PublicMainPublished')).gallery.map((item) => item.id);
-    expect(gallery).toEqual([media.shown?.id, media.galleryOnly?.id]);
-    expect(gallery).not.toContain(media.unpublishedSibling?.id);
+  it('lists every screenshot of a public VM in the gallery, the main image first', async () => {
+    const gallery = (await detail('qemu/PublicWithMain')).gallery.map((item) => item.id);
+    expect(gallery[0]).toBe(media.shown?.id);
+    expect([...gallery].sort()).toEqual(
+      [media.shown?.id, media.galleryOnly?.id, media.legacyPrivateSibling?.id].sort(),
+    );
+  });
+
+  it('does not show a private VM, or any of its screenshots', async () => {
+    const response = await client.get('/catalog/vms/qemu/PrivateWithMain');
+    expect(response.statusCode).toBe(404);
+    expect(response.body).not.toContain(media.ofPrivateVm?.id);
   });
 });
 
@@ -325,7 +340,7 @@ describe('public media files', () => {
   const fetchFile = (id: string | undefined, variant: 'thumbnail' | 'full' = 'thumbnail') =>
     context.app.inject({ url: publicMediaPath(id as string, variant) });
 
-  it('serves a published image of a public VM', async () => {
+  it('serves the main image of a public VM', async () => {
     const thumbnail = await fetchFile(media.shown?.id);
     expect(thumbnail.statusCode).toBe(200);
     expect(thumbnail.headers['content-type']).toBe('image/jpeg');
@@ -335,15 +350,26 @@ describe('public media files', () => {
     expect((await fetchFile(media.shown?.id, 'full')).body).toBe(`full:${media.shown?.id}`);
   });
 
-  it('serves published non-main images too', async () => {
-    expect((await fetchFile(media.galleryOnly?.id)).statusCode).toBe(200);
+  it('serves every other screenshot of a public VM, whatever its legacy value', async () => {
+    for (const fixture of [
+      media.galleryOnly,
+      media.legacyPrivateSibling,
+      media.legacyPrivateMain,
+      media.notPromoted,
+      media.noMain,
+    ]) {
+      for (const variant of ['thumbnail', 'full'] as const) {
+        expect((await fetchFile(fixture?.id, variant)).statusCode, variant).toBe(200);
+      }
+    }
   });
 
-  it('refuses unpublished media, media of private VMs, and unknown ids identically', async () => {
+  it('refuses media of private VMs and unknown ids identically', async () => {
     const responses = await Promise.all([
-      fetchFile(media.unpublishedSibling?.id),
-      fetchFile(media.privateMain?.id),
       fetchFile(media.ofPrivateVm?.id),
+      fetchFile(media.ofPrivateVm?.id, 'full'),
+      fetchFile(media.ofPrivateVmSibling?.id),
+      fetchFile(media.ofPrivateVmSibling?.id, 'full'),
       fetchFile('018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f60'),
     ]);
     for (const response of responses) {
@@ -352,37 +378,26 @@ describe('public media files', () => {
     }
   });
 
-  it('stops serving as soon as the media or the VM is made private', async () => {
+  it('stops serving as soon as the VM is made private, and ignores the legacy value', async () => {
     await insertVm(context.pool, { vmName: 'Flip', visibility: 'public' });
-    const item = await insertMedia(
-      context,
-      { vmName: 'Flip' },
-      { visibility: 'published', isMain: true },
-    );
+    const item = await insertMedia(context, { vmName: 'Flip' }, { isMain: true });
     expect((await fetchFile(item.id)).statusCode).toBe(200);
-    await context.pool.execute('UPDATE vm_media SET visibility = ? WHERE id = ?', [
-      'private',
+    // Changing the legacy column directly changes nothing, in either direction.
+    await context.pool.execute("UPDATE vm_media SET visibility = 'published' WHERE id = ?", [
       item.id,
     ]);
-    expect((await fetchFile(item.id)).statusCode).toBe(404);
-    await context.pool.execute('UPDATE vm_media SET visibility = ? WHERE id = ?', [
-      'published',
-      item.id,
-    ]);
+    expect((await fetchFile(item.id)).statusCode).toBe(200);
     await context.pool.execute(
       "UPDATE virtual_machines SET visibility = 'private' WHERE vm_name = 'Flip'",
     );
     expect((await fetchFile(item.id)).statusCode).toBe(404);
+    expect((await fetchFile(item.id, 'full')).statusCode).toBe(404);
     expect((await list('?q=Flip')).items).toEqual([]);
   });
 
   it('answers 404 when the file is missing from storage', async () => {
     await insertVm(context.pool, { vmName: 'NoFile', visibility: 'public' });
-    const item = await insertMedia(
-      context,
-      { vmName: 'NoFile' },
-      { visibility: 'published', writeFiles: false },
-    );
+    const item = await insertMedia(context, { vmName: 'NoFile' }, { writeFiles: false });
     expect((await fetchFile(item.id)).statusCode).toBe(404);
   });
 
@@ -399,7 +414,7 @@ describe('public media files', () => {
     const item = await insertMedia(
       context,
       { vmName },
-      { visibility: 'published', writeFiles: false, thumbnailKey: key, jpegKey: 'never.jpg' },
+      { writeFiles: false, thumbnailKey: key, jpegKey: 'never.jpg' },
     );
     const response = await fetchFile(item.id);
     expect(response.statusCode).toBe(404);

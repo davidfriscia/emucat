@@ -303,7 +303,7 @@ describe('restore, public cover and VM details, end to end', () => {
   const mediaOf = async (emulator: string, vmName: string) => {
     const response = await admin.get(`/admin/vms/${emulator}/${encodeURIComponent(vmName)}/media`);
     return response.json<{
-      media: { id: string; originalFilename: string; visibility: string }[];
+      media: { id: string; originalFilename: string; isMain: boolean }[];
     }>().media;
   };
 
@@ -552,8 +552,8 @@ describe('restore, public cover and VM details, end to end', () => {
     const VM = 'Cover VM';
     const COVER_RGB = [18, 52, 86];
     let main: string;
-    let otherPublished: string;
-    let hidden: string;
+    let other: string;
+    let third: string;
     let anonymous: BrowserContext;
     let page: Page;
 
@@ -561,7 +561,7 @@ describe('restore, public cover and VM details, end to end', () => {
       const root = await box86Vm(VM);
       await writeFile(join(root, 'screenshots', 'a-main.png'), await png(1280, 720, '#123456'));
       await writeFile(join(root, 'screenshots', 'b-other.png'), await png(640, 480, '#654321'));
-      await writeFile(join(root, 'screenshots', 'c-private.png'), await png(800, 600, '#aa0000'));
+      await writeFile(join(root, 'screenshots', 'c-third.png'), await png(800, 600, '#aa0000'));
       await register(VM, '86box', 'copy');
       const media = await waitFor(
         async () => {
@@ -574,8 +574,8 @@ describe('restore, public cover and VM details, end to end', () => {
       const byName = (fragment: string) =>
         media.find((item) => item.originalFilename.includes(fragment))?.id as string;
       main = byName('a-main');
-      otherPublished = byName('b-other');
-      hidden = byName('c-private');
+      other = byName('b-other');
+      third = byName('c-third');
       anonymous = await browser.newContext();
       page = await anonymous.newPage();
     }, LONG);
@@ -587,7 +587,7 @@ describe('restore, public cover and VM details, end to end', () => {
     const path = `/admin/vms/86box/${encodeURIComponent(VM)}`;
 
     it(
-      'keeps a placeholder while the main screenshot is private, as the user saw',
+      'shows nothing to the public while the VM is private, even with a main screenshot',
       async () => {
         const selected = await admin.request({
           method: 'PUT',
@@ -595,44 +595,34 @@ describe('restore, public cover and VM details, end to end', () => {
           payload: { mediaId: main },
         });
         expect(selected.statusCode, selected.body).toBe(200);
-        const published = await admin.request({
-          method: 'PUT',
-          url: `${path}/visibility`,
-          payload: { visibility: 'public' },
-        });
-        expect(published.statusCode, published.body).toBe(200);
 
-        await page.goto(webUrl('/'));
-        const card = page.getByRole('article').filter({ hasText: VM });
-        await card.waitFor();
-        expect(await card.locator('img').count()).toBe(0);
-        expect(await card.getByRole('img', { name: 'No image' }).count()).toBe(1);
-        const answer = await anonymous.request.get(
-          webUrl(`/api/v1/catalog/media/${main}/thumbnail`),
-        );
-        expect(answer.status()).toBe(404);
+        const catalog = await anonymous.request.get(webUrl('/api/v1/catalog/vms?pageSize=100'));
+        expect(catalog.status()).toBe(200);
+        expect(await catalog.text()).not.toContain(VM);
+        for (const id of [main, other, third]) {
+          const answer = await anonymous.request.get(
+            webUrl(`/api/v1/catalog/media/${id}/thumbnail`),
+          );
+          expect(answer.status()).toBe(404);
+        }
       },
       LONG,
     );
 
     it(
-      'explains why to the administrator, who publishes it explicitly',
+      'publishes the VM and all of its screenshots in one step, from the administrator’s page',
       async () => {
         const adminContext = await browser.newContext();
         const adminPage = await adminContext.newPage();
         await signIn(adminPage);
         await adminPage.goto(webUrl(path));
-        await adminPage.getByText('its main screenshot is private').waitFor();
-        await shot(adminPage, '1-admin-no-public-cover');
-        await adminPage.getByRole('button', { name: 'Publish the main screenshot' }).click();
+        await adminPage.getByText('Making it public publishes all of its screenshots.').waitFor();
+        await shot(adminPage, '1-admin-private-vm');
+        expect(await adminPage.getByRole('button', { name: 'Publish' }).count()).toBe(0);
+        await adminPage.getByRole('button', { name: 'Make public' }).click();
         await adminPage.getByText('The main screenshot is the public catalog’s cover.').waitFor();
         await adminContext.close();
-        expect((await mediaOf('86box', VM)).find((item) => item.id === main)?.visibility).toBe(
-          'published',
-        );
-        expect((await mediaOf('86box', VM)).find((item) => item.id === hidden)?.visibility).toBe(
-          'private',
-        );
+        expect((await mediaOf('86box', VM)).find((item) => item.id === main)?.isMain).toBe(true);
       },
       LONG,
     );
@@ -679,8 +669,8 @@ describe('restore, public cover and VM details, end to end', () => {
       LONG,
     );
 
-    it('never lets the public fetch an original or a private image', async () => {
-      for (const id of [main, hidden]) {
+    it('never lets the public fetch an original, while every screenshot is public', async () => {
+      for (const id of [main, other, third]) {
         const original = await anonymous.request.get(
           webUrl(`/api/v1/catalog/media/${id}/original`),
         );
@@ -688,16 +678,13 @@ describe('restore, public cover and VM details, end to end', () => {
       }
       const admins = await anonymous.request.get(webUrl(`/api/v1${path}/media/${main}/original`));
       expect(admins.status()).toBe(401);
-      const privateFull = await anonymous.request.get(
-        webUrl(`/api/v1/catalog/media/${hidden}/full`),
-      );
-      expect(privateFull.status()).toBe(404);
+      const full = await anonymous.request.get(webUrl(`/api/v1/catalog/media/${third}/full`));
+      expect(full.status()).toBe(200);
     });
 
     it(
       'opens the detail page from the card, and back and forward work',
       async () => {
-        await setVisibility(otherPublished, 'published');
         await page.goto(webUrl('/'));
         await page.getByRole('link', { name: VM }).click();
         await page.waitForURL(`**/vms/86box/${encodeURIComponent(VM)}`);
@@ -713,15 +700,6 @@ describe('restore, public cover and VM details, end to end', () => {
       LONG,
     );
 
-    async function setVisibility(mediaId: string, visibility: string): Promise<void> {
-      const response = await admin.request({
-        method: 'PUT',
-        url: `${path}/media/${mediaId}/visibility`,
-        payload: { visibility },
-      });
-      expect(response.statusCode, response.body).toBe(200);
-    }
-
     it(
       'reaches the detail page by keyboard',
       async () => {
@@ -736,7 +714,7 @@ describe('restore, public cover and VM details, end to end', () => {
     );
 
     it(
-      'shows only published screenshots, and no private detail, to the public',
+      'shows every screenshot of the public VM, and no private detail, to the public',
       async () => {
         await page.goto(webUrl(`/vms/86box/${encodeURIComponent(VM)}`));
         await page.getByRole('heading', { name: 'Screenshots' }).waitFor();
@@ -748,11 +726,10 @@ describe('restore, public cover and VM details, end to end', () => {
         await shot(page, '3-public-detail');
         expect(joined).toContain(`${main}/full`);
         expect(joined).toContain(`${main}/thumbnail`);
-        expect(joined).toContain(`${otherPublished}/thumbnail`);
-        expect(joined).not.toContain(hidden);
+        expect(joined).toContain(`${other}/thumbnail`);
+        expect(joined).toContain(`${third}/thumbnail`);
         const text = await page.locator('main').innerText();
         expect(text).not.toMatch(/repository|sha-256|restore|agent|\.png/i);
-        expect(await page.content()).not.toContain(hidden);
         expect(await page.getByRole('button', { name: 'Restore…' }).count()).toBe(0);
       },
       LONG,
@@ -847,11 +824,11 @@ describe('restore, public cover and VM details, end to end', () => {
         await adminPage.getByRole('link', { name: VM }).click();
         await adminPage.waitForURL(`**${path}`);
         await adminPage.getByRole('heading', { name: 'Screenshots', exact: true }).waitFor();
-        await adminPage.getByRole('button', { name: /c-private/ }).waitFor();
+        await adminPage.getByRole('button', { name: /c-third/ }).waitFor();
         await shot(adminPage, '6-admin-detail');
         expect(await adminPage.getByRole('button', { name: 'Clear main image' }).count()).toBe(1);
         expect(await adminPage.getByRole('button', { name: 'Set as main image' }).count()).toBe(2);
-        await adminPage.getByRole('button', { name: /c-private/ }).click();
+        await adminPage.getByRole('button', { name: /c-third/ }).click();
         const dialog = adminPage.getByRole('dialog');
         await dialog.waitFor();
         await decodedImage(adminPage, '[role="dialog"] img');
@@ -864,13 +841,19 @@ describe('restore, public cover and VM details, end to end', () => {
     );
 
     it(
-      'takes a cover away at once when the main screenshot or the VM is unpublished',
+      'takes a cover away at once when the main screenshot is cleared or the VM made private',
       async () => {
-        await setVisibility(main, 'private');
+        const cleared = await admin.request({ method: 'DELETE', url: `${path}/main-media` });
+        expect(cleared.statusCode).toBe(200);
         await page.goto(webUrl('/'));
         await page.getByRole('article').filter({ hasText: VM }).waitFor();
         expect(await page.locator('article img').count()).toBe(0);
-        await setVisibility(main, 'published');
+        const reselected = await admin.request({
+          method: 'PUT',
+          url: `${path}/main-media`,
+          payload: { mediaId: main },
+        });
+        expect(reselected.statusCode).toBe(200);
 
         const hiddenVm = await admin.request({
           method: 'PUT',

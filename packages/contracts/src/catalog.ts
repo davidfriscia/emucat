@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { API_PREFIX } from './api.js';
 import { emulatorTypeSchema, type EmulatorType } from './emulator.js';
-import { mediaVisibilitySchema } from './media.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema, type VmIdentity } from './vm-name.js';
 
@@ -58,11 +57,6 @@ export type UpdateVmMetadataRequest = z.infer<typeof updateVmMetadataRequestSche
 
 export const updateVmVisibilityRequestSchema = z.strictObject({ visibility: vmVisibilitySchema });
 export type UpdateVmVisibilityRequest = z.infer<typeof updateVmVisibilityRequestSchema>;
-
-export const updateMediaVisibilityRequestSchema = z.strictObject({
-  visibility: mediaVisibilitySchema,
-});
-export type UpdateMediaVisibilityRequest = z.infer<typeof updateMediaVisibilityRequestSchema>;
 
 export const selectMainMediaRequestSchema = z.strictObject({ mediaId: z.uuid() });
 export type SelectMainMediaRequest = z.infer<typeof selectMainMediaRequestSchema>;
@@ -141,21 +135,16 @@ export const publicVmDetailSchema = z.strictObject({
   displayName: z.string().nullable(),
   description: z.string().nullable(),
   mainImage: publicMediaSchema.nullable(),
-  /** Every published image of this VM, including the main image. */
+  /** Every image of this VM, including the main image. A public VM's images are all public. */
   gallery: z.array(publicMediaSchema),
 });
 export type PublicVmDetail = z.infer<typeof publicVmDetailSchema>;
 
 /**
- * What the public catalog shows as this VM's cover, and why. A public VM does not make its media public,
- * so `main_private` is a state an administrator has to be told about, and that only they can change.
+ * What the public catalog shows as this VM's cover, and why. Publication is decided by the VM alone, so
+ * a public VM with a main image always shows it.
  */
-export const PUBLIC_COVER_STATUSES = [
-  'shown',
-  'vm_private',
-  'no_main_image',
-  'main_private',
-] as const;
+export const PUBLIC_COVER_STATUSES = ['shown', 'vm_private', 'no_main_image'] as const;
 export const publicCoverStatusSchema = z.enum(PUBLIC_COVER_STATUSES);
 export type PublicCoverStatus = z.infer<typeof publicCoverStatusSchema>;
 
@@ -196,9 +185,9 @@ export const adminVmDetailSchema = z.strictObject({
 });
 export type AdminVmDetail = z.infer<typeof adminVmDetailSchema>;
 
+/** A media item has no visibility of its own. It is public exactly while its VM is. */
 export const adminMediaSchema = z.strictObject({
   id: z.uuid(),
-  visibility: mediaVisibilitySchema,
   isMain: z.boolean(),
   originalFilename: z.string(),
   originalSizeBytes: z.number().int().nonnegative(),
@@ -231,9 +220,10 @@ export const adminSummaryResponseSchema = z.strictObject({
     public: z.number().int().nonnegative(),
     private: z.number().int().nonnegative(),
   }),
+  /** Media count as public or private by the visibility of their VM. */
   media: z.strictObject({
     total: z.number().int().nonnegative(),
-    published: z.number().int().nonnegative(),
+    public: z.number().int().nonnegative(),
     private: z.number().int().nonnegative(),
   }),
 });

@@ -1,20 +1,17 @@
 import { z } from 'zod';
+import type { VmVisibility } from './catalog.js';
 import { emulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { sameVmIdentity, vmNameSchema, type VmIdentity } from './vm-name.js';
 
-export const MEDIA_VISIBILITIES = ['private', 'published'] as const;
-export const mediaVisibilitySchema = z.enum(MEDIA_VISIBILITIES);
-export type MediaVisibility = z.infer<typeof mediaVisibilitySchema>;
-
-/** Media are private until explicitly published. */
-export const DEFAULT_MEDIA_VISIBILITY: MediaVisibility = 'private';
-
+/**
+ * A media item has no visibility of its own: it is public exactly while its VM is public. See
+ * decision 0036. The `vm_media.visibility` column that once said otherwise is kept, and ignored.
+ */
 export const vmMediaSchema = z.object({
   id: z.uuid(),
   emulatorType: emulatorTypeSchema,
   vmName: vmNameSchema,
-  visibility: mediaVisibilitySchema.default(DEFAULT_MEDIA_VISIBILITY),
   isMain: z.boolean().default(false),
   originalFilename: z.string().min(1).max(255),
   originalSha256: sha256HexSchema,
@@ -31,23 +28,22 @@ export type VmMedia = z.infer<typeof vmMediaSchema>;
 export type CatalogCardImage = { kind: 'media'; mediaId: string } | { kind: 'placeholder' };
 
 /**
- * Chooses the image for a public catalog card: the VM's main media if it is published, otherwise a
- * placeholder. It never falls back to another item, so unpublishing or deleting the main media can
- * only ever result in the placeholder.
+ * Chooses the image for a public catalog card: the VM's main media while the VM is public, otherwise a
+ * placeholder. It never falls back to another item, so clearing or deleting the main media can only
+ * ever result in the placeholder.
  */
 export function resolvePublicCardImage(
-  identity: VmIdentity,
-  media: readonly Pick<VmMedia, 'id' | 'emulatorType' | 'vmName' | 'visibility' | 'isMain'>[],
+  vm: VmIdentity & { visibility: VmVisibility },
+  media: readonly Pick<VmMedia, 'id' | 'emulatorType' | 'vmName' | 'isMain'>[],
 ): CatalogCardImage {
-  const main = media.find((item) => item.isMain && sameVmIdentity(item, identity));
-  return main?.visibility === 'published'
-    ? { kind: 'media', mediaId: main.id }
-    : { kind: 'placeholder' };
+  if (vm.visibility !== 'public') return { kind: 'placeholder' };
+  const main = media.find((item) => item.isMain && sameVmIdentity(item, vm));
+  return main ? { kind: 'media', mediaId: main.id } : { kind: 'placeholder' };
 }
 
 /**
  * Whether two uploads are the same media item. Deduplication is per VM: the same image uploaded
- * for two different VMs is two items, each with its own visibility.
+ * for two different VMs is two items, each public or private with its own VM.
  */
 export function isSameMedia(
   a: Pick<VmMedia, 'emulatorType' | 'vmName' | 'originalSha256'>,

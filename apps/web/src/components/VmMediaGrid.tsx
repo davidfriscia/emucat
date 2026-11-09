@@ -5,18 +5,17 @@ import {
   type VmIdentity,
 } from '@emucat/contracts';
 import { useMemo, useState } from 'react';
-import { clearMainMedia, deleteMedia, selectMainMedia, updateMediaVisibility } from '../api';
+import { clearMainMedia, deleteMedia, selectMainMedia } from '../api';
 import { formatBytes } from './Agents';
 import { VmImage } from './Catalog';
 import { MainScreenshot, useImageViewer, type GalleryItem } from './Gallery';
 import { FormError } from './States';
 
+/** What being the main image means right now. Who may see a screenshot is the VM's visibility alone. */
 function publicEffect(item: AdminMedia): string | null {
   if (item.shownAsPublicMain) return 'Shown as the main image in the public catalog.';
   if (!item.isMain) return null;
-  return item.visibility === 'private'
-    ? 'Selected as main, but private: the public catalog shows a placeholder until it is published.'
-    : 'Selected as main, but this VM is private: nobody outside sees it until the VM is public.';
+  return 'Selected as main, but this VM is private: nobody outside sees it until the VM is public.';
 }
 
 function formatUploaded(timestamp: string): string {
@@ -53,14 +52,11 @@ function MediaCard({
       </button>
       <div className="card-body d-flex flex-column">
         <h2 className="h6 card-title media-filename">{item.originalFilename}</h2>
-        <div className="d-flex flex-wrap gap-1 mb-2">
-          {item.visibility === 'published' ? (
-            <span className="badge text-bg-success">Published</span>
-          ) : (
-            <span className="badge text-bg-dark border">Private</span>
-          )}
-          {item.isMain ? <span className="badge text-bg-primary">Main image</span> : null}
-        </div>
+        {item.isMain ? (
+          <div className="d-flex flex-wrap gap-1 mb-2">
+            <span className="badge text-bg-primary">Main image</span>
+          </div>
+        ) : null}
         <p className="small text-body-secondary mb-2">
           {item.widthPx} × {item.heightPx}, {formatBytes(item.originalSizeBytes)}
           <br />
@@ -87,22 +83,6 @@ function MediaCard({
               Set as main image
             </button>
           )}
-          <button
-            type="button"
-            className="btn btn-sm btn-outline-primary"
-            disabled={busy}
-            onClick={() =>
-              onAct(() =>
-                updateMediaVisibility(
-                  vm,
-                  item.id,
-                  item.visibility === 'published' ? 'private' : 'published',
-                ),
-              )
-            }
-          >
-            {item.visibility === 'published' ? 'Make private' : 'Publish'}
-          </button>
           {confirmingDelete ? (
             <>
               <button
@@ -138,9 +118,10 @@ function MediaCard({
 }
 
 /**
- * Every screenshot of a VM, with what an administrator can do to each. It is used by the VM's page and its
- * media page, and both get the same viewer as the public gallery. Originals appear only as an explicit
- * download: what is displayed is always a derivative.
+ * Every screenshot of a VM, with what an administrator can do to each: choose the main image, or delete it.
+ * There is no per-screenshot publication: screenshots are public exactly while their VM is. It is used by
+ * the VM's page and its media page, and both get the same viewer as the public gallery. Originals appear
+ * only as an explicit download: what is displayed is always a derivative.
  */
 export function VmMediaGrid({
   vm,

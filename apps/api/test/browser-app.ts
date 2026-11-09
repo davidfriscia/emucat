@@ -202,7 +202,11 @@ export async function insertMedia(
   context: Pick<BrowserTestContext, 'pool' | 'storageRoot'>,
   vm: { emulatorType?: string; vmName: string },
   options: {
-    visibility?: 'private' | 'published';
+    /**
+     * The legacy `vm_media.visibility` value, which decides nothing since decision 0036. Tests set it
+     * to prove exactly that.
+     */
+    legacyVisibility?: 'private' | 'published';
     isMain?: boolean;
     filename?: string;
     writeFiles?: boolean;
@@ -222,7 +226,7 @@ export async function insertMedia(
       id,
       emulatorType,
       vm.vmName,
-      options.visibility ?? 'private',
+      options.legacyVisibility ?? 'private',
       options.isMain ?? false,
       options.filename ?? 'screenshot.png',
       createHash('sha256').update(id).digest('hex'),

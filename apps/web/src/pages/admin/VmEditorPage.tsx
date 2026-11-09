@@ -14,7 +14,6 @@ import {
   ApiRequestError,
   fetchAdminVm,
   fetchVmMedia,
-  updateMediaVisibility,
   updateVmMetadata,
   updateVmVisibility,
 } from '../../api';
@@ -130,8 +129,8 @@ function VisibilityControl({
       <FormError error={error} />
       <p className="small">
         {vm.visibility === 'public'
-          ? 'Anyone can see this VM in the public catalog.'
-          : 'Only signed-in administrators can see this VM.'}
+          ? 'Anyone can see this VM and all of its screenshots in the public catalog.'
+          : 'Only signed-in administrators can see this VM and its screenshots. Making it public publishes all of its screenshots.'}
       </p>
       <button
         type="button"
@@ -146,18 +145,10 @@ function VisibilityControl({
 }
 
 /**
- * Why the public catalog does or does not show a cover, with the one action that changes it when that is
- * the administrator's to take. Publishing is never done for them: a public VM does not make its media public.
+ * Why the public catalog does or does not show a cover. Publication is the VM's alone, so the only things
+ * that decide it are the VM's visibility and whether a main screenshot is selected.
  */
-export function PublicCoverNotice({
-  vm,
-  onPublished,
-}: {
-  vm: AdminVmDetail;
-  onPublished: (media: AdminMediaListResponse) => void;
-}) {
-  const [error, setError] = useState<unknown>(null);
-  const [submitting, setSubmitting] = useState(false);
+export function PublicCoverNotice({ vm }: { vm: AdminVmDetail }) {
   if (vm.visibility !== 'public') {
     return vm.mainMediaId ? null : (
       <p className="small text-body-secondary mt-2 mb-0">No main screenshot is selected yet.</p>
@@ -166,41 +157,10 @@ export function PublicCoverNotice({
   if (vm.publicCover === 'shown') {
     return <p className="small mt-2 mb-0">The main screenshot is the public catalog’s cover.</p>;
   }
-  if (vm.publicCover === 'no_main_image') {
-    return (
-      <div className="alert alert-warning small mt-2 mb-0" role="status">
-        <strong>No public cover.</strong> This VM is public, but no main screenshot is selected, so
-        the public catalog shows a placeholder. Choose one below.
-      </div>
-    );
-  }
-  const publish = async () => {
-    if (!vm.mainMediaId) return;
-    setError(null);
-    setSubmitting(true);
-    try {
-      onPublished(await updateMediaVisibility(vm, vm.mainMediaId, 'published'));
-    } catch (failure) {
-      setError(failure);
-    } finally {
-      setSubmitting(false);
-    }
-  };
   return (
     <div className="alert alert-warning small mt-2 mb-0" role="status">
-      <strong>No public cover.</strong> This VM is public, but its main screenshot is private, so
-      the public catalog shows a placeholder. A public VM does not publish its screenshots.
-      <FormError error={error} />
-      <div className="mt-2">
-        <button
-          type="button"
-          className="btn btn-sm btn-primary"
-          disabled={submitting}
-          onClick={() => void publish()}
-        >
-          {submitting ? 'Publishing…' : 'Publish the main screenshot'}
-        </button>
-      </div>
+      <strong>No public cover.</strong> This VM is public, but no main screenshot is selected, so
+      the public catalog shows a placeholder. Choose one below.
     </div>
   );
 }
@@ -222,6 +182,11 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
   const mediaChanged = (next: AdminMediaListResponse) => {
     media.setData(next);
     void fetchAdminVm({ emulatorType, vmName }).then(setData, () => undefined);
+  };
+  // And a change to the VM's visibility changes what the public sees of every screenshot.
+  const visibilityChanged = (next: AdminVmDetail) => {
+    setData(next);
+    void fetchVmMedia({ emulatorType, vmName }).then(media.setData, () => undefined);
   };
 
   if (state.status === 'loading') return <LoadingState label="Loading the virtual machine" />;
@@ -266,8 +231,8 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
           <section className="card">
             <div className="card-body">
               <h2 className="h6 card-title">Visibility</h2>
-              <VisibilityControl vm={vm} onChanged={setData} />
-              <PublicCoverNotice vm={vm} onPublished={mediaChanged} />
+              <VisibilityControl vm={vm} onChanged={visibilityChanged} />
+              <PublicCoverNotice vm={vm} />
               {vm.visibility === 'public' ? (
                 <p className="small mt-2 mb-0">
                   <Link to={publicVmRoute(vm)}>View the public page</Link>

@@ -9,7 +9,6 @@ import {
   type AdminVmDetail,
   type EmulatorType,
   type MediaVariant,
-  type MediaVisibility,
   type Pagination,
   type PublicCatalogQuery,
   type PublicCoverStatus,
@@ -28,7 +27,8 @@ import { withTransaction } from '../db/pool.js';
  * field by field, so a column added to a table later cannot reach a response by accident.
  *
  * Public queries read card images only through `public_catalog_card_media`, and media files only
- * after checking that both the VM is public and the media is published.
+ * after checking that their VM is public. Publication is decided by the VM alone (decision 0036):
+ * `vm_media.visibility` is a legacy column that no query here reads or writes.
  */
 
 export class CatalogNotFoundError extends Error {
@@ -146,11 +146,14 @@ export async function getPublicVm(pool: Pool, vm: VmIdentity): Promise<PublicVmD
   );
   const row = rows[0];
   if (!row) return null;
+  // The VM is checked again here, so that the gallery can never outlive a VM made private meanwhile.
   const [gallery] = await pool.execute<RowDataPacket[]>(
-    `SELECT id, width_px, height_px
-     FROM vm_media
-     WHERE emulator_type = ? AND vm_name = ? AND visibility = 'published'
-     ORDER BY is_main DESC, COALESCE(captured_at, created_at), id`,
+    `SELECT media.id, media.width_px, media.height_px
+     FROM vm_media AS media
+     JOIN virtual_machines AS vm
+       ON vm.emulator_type = media.emulator_type AND vm.vm_name = media.vm_name
+     WHERE vm.visibility = 'public' AND media.emulator_type = ? AND media.vm_name = ?
+     ORDER BY media.is_main DESC, COALESCE(media.captured_at, media.created_at), media.id`,
     [vm.emulatorType, vm.vmName],
   );
   return {
@@ -171,7 +174,11 @@ function storageKeyColumn(variant: MediaVariant): 'jpeg_key' | 'thumbnail_key' {
   return variant === 'full' ? 'jpeg_key' : 'thumbnail_key';
 }
 
-/** The storage key of a file the public may see, or `null` for anything else. */
+/**
+ * The storage key of a JPEG derivative the public may see, or `null` for anything else. Only the
+ * thumbnail and the full JPEG of a public VM's media qualify: never an original, and never anything
+ * that is not media.
+ */
 export async function publicMediaKey(
   pool: Pool,
   mediaId: string,
@@ -183,7 +190,7 @@ export async function publicMediaKey(
      FROM vm_media AS media
      JOIN virtual_machines AS vm
        ON vm.emulator_type = media.emulator_type AND vm.vm_name = media.vm_name
-     WHERE media.id = ? AND media.visibility = 'published' AND vm.visibility = 'public'`,
+     WHERE media.id = ? AND vm.visibility = 'public'`,
     [mediaId],
   );
   return (rows[0]?.storage_key as string | undefined) ?? null;
@@ -267,7 +274,7 @@ export async function agentsHoldingVm(
 
 const ADMIN_VM_COLUMNS = `
   vm.emulator_type, vm.vm_name, vm.display_name, vm.visibility, vm.created_at, vm.updated_at,
-  main.id AS main_media_id, main.visibility AS main_media_visibility,
+  main.id AS main_media_id,
   (SELECT COUNT(*) FROM vm_media AS media
     WHERE media.emulator_type = vm.emulator_type AND media.vm_name = vm.vm_name) AS media_count`;
 
@@ -283,7 +290,6 @@ interface AdminVmRow extends RowDataPacket {
   description: string | null;
   visibility: VmVisibility;
   main_media_id: string | null;
-  main_media_visibility: MediaVisibility | null;
   media_count: number;
   version_count: number;
   /** Only in the list, which shows a running badge. */
@@ -295,8 +301,7 @@ interface AdminVmRow extends RowDataPacket {
 /** The same rule as the `public_catalog_card_media` view, stated as a reason. */
 function publicCover(row: AdminVmRow): PublicCoverStatus {
   if (row.visibility !== 'public') return 'vm_private';
-  if (!row.main_media_id) return 'no_main_image';
-  return row.main_media_visibility === 'published' ? 'shown' : 'main_private';
+  return row.main_media_id ? 'shown' : 'no_main_image';
 }
 
 export async function listAdminVms(
@@ -403,7 +408,6 @@ export async function setVmVisibility(
 
 interface AdminMediaRow extends RowDataPacket {
   id: string;
-  visibility: MediaVisibility;
   is_main: number;
   original_filename: string;
   original_size_bytes: number;
@@ -424,7 +428,7 @@ export async function vmExists(executor: Pool | PoolConnection, vm: VmIdentity):
 
 export async function listAdminMedia(pool: Pool, vm: VmIdentity): Promise<AdminMedia[]> {
   const [rows] = await pool.execute<AdminMediaRow[]>(
-    `SELECT media.id, media.visibility, media.is_main, media.original_filename,
+    `SELECT media.id, media.is_main, media.original_filename,
             media.original_size_bytes, media.width_px, media.height_px, media.captured_at,
             media.created_at, card.media_id IS NOT NULL AS shown_as_public_main
      FROM vm_media AS media
@@ -435,7 +439,6 @@ export async function listAdminMedia(pool: Pool, vm: VmIdentity): Promise<AdminM
   );
   return rows.map((row) => ({
     id: row.id,
-    visibility: row.visibility,
     isMain: Boolean(row.is_main),
     originalFilename: row.original_filename,
     originalSizeBytes: Number(row.original_size_bytes),
@@ -445,19 +448,6 @@ export async function listAdminMedia(pool: Pool, vm: VmIdentity): Promise<AdminM
     createdAt: row.created_at.toISOString(),
     shownAsPublicMain: Boolean(row.shown_as_public_main),
   }));
-}
-
-export async function setMediaVisibility(
-  pool: Pool,
-  vm: VmIdentity,
-  mediaId: string,
-  visibility: MediaVisibility,
-): Promise<boolean> {
-  const [result] = await pool.execute<ResultSetHeader>(
-    'UPDATE vm_media SET visibility = ? WHERE id = ? AND emulator_type = ? AND vm_name = ?',
-    [visibility, mediaId, vm.emulatorType, vm.vmName],
-  );
-  return result.affectedRows > 0;
 }
 
 /**
@@ -475,8 +465,8 @@ async function lockVm(connection: PoolConnection, vm: VmIdentity): Promise<void>
 /**
  * Selects a main image. Scoping the media lookup to this VM is what makes a cross-VM selection
  * impossible. The old flag is cleared first because the unique index allows only one main per VM.
- * Selecting private media is allowed: the public catalog keeps showing the placeholder until it is
- * published.
+ * Selecting the main image changes only which image is the cover, never who may see it: that is
+ * the VM's visibility alone.
  */
 export async function selectMainMedia(pool: Pool, vm: VmIdentity, mediaId: string): Promise<void> {
   await withTransaction(pool, async (connection) => {
@@ -551,15 +541,17 @@ export async function adminSummary(pool: Pool): Promise<AdminSummaryResponse> {
      FROM virtual_machines`,
   );
   const [media] = await pool.query<RowDataPacket[]>(
-    `SELECT COUNT(*) AS total, COALESCE(SUM(visibility = 'published'), 0) AS published_count
-     FROM vm_media`,
+    `SELECT COUNT(*) AS total, COALESCE(SUM(vm.visibility = 'public'), 0) AS public_count
+     FROM vm_media AS media
+     JOIN virtual_machines AS vm
+       ON vm.emulator_type = media.emulator_type AND vm.vm_name = media.vm_name`,
   );
   const vmTotal = Number(vms[0]?.total);
   const vmPublic = Number(vms[0]?.public_count);
   const mediaTotal = Number(media[0]?.total);
-  const mediaPublished = Number(media[0]?.published_count);
+  const mediaPublic = Number(media[0]?.public_count);
   return {
     vms: { total: vmTotal, public: vmPublic, private: vmTotal - vmPublic },
-    media: { total: mediaTotal, published: mediaPublished, private: mediaTotal - mediaPublished },
+    media: { total: mediaTotal, public: mediaPublic, private: mediaTotal - mediaPublic },
   };
 }

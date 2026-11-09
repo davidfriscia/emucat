@@ -460,7 +460,6 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
     const media = await mediaOf('86box', 'Stopped VM');
     const item = media.find((entry) => entry.originalFilename === 'screenshots/first.png');
     expect(item).toMatchObject({
-      visibility: 'private',
       isMain: false,
       widthPx: 1280,
       heightPx: 720,
@@ -563,14 +562,15 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
     }
   });
 
-  it('selects a main image and publishes only when told, with visibility enforced', async () => {
+  it('selects a main image, and publishes only by making the VM public', async () => {
     const vm = adminPath('86box', 'Stopped VM');
     const media = await mediaOf('86box', 'Stopped VM');
     const chosen = media.find((item) => item.originalFilename === 'screenshots/first.png');
     const id = chosen?.id as string;
     const thumbnailUrl = `/catalog/media/${id}/thumbnail`;
+    const other = media.find((item) => item.id !== id)?.id as string;
 
-    expect(media.every((item) => !item.isMain && item.visibility === 'private')).toBe(true);
+    expect(media.every((item) => !item.isMain && !item.shownAsPublicMain)).toBe(true);
     expect((await api(thumbnailUrl)).status).toBe(404);
 
     const selected = await admin.request({
@@ -583,36 +583,29 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
 
     await admin.request({
       method: 'PUT',
-      url: `${vm}/media/${id}/visibility`,
-      payload: { visibility: 'published' },
-    });
-    expect((await api(thumbnailUrl)).status, 'the VM is still private').toBe(404);
-
-    await admin.request({
-      method: 'PUT',
       url: `${vm}/visibility`,
       payload: { visibility: 'public' },
     });
     const shown = await api(thumbnailUrl);
     expect(shown.status).toBe(200);
     expect(shown.headers.get('content-type')).toBe('image/jpeg');
+    expect((await api(`/catalog/media/${other}/full`)).status, 'the whole VM is public').toBe(200);
     const catalog = publicCatalogResponseSchema.parse(await (await api('/catalog/vms')).json());
     expect(catalog.items.find((item) => item.vmName === 'Stopped VM')?.mainImage?.id).toBe(id);
 
-    // Everything else about this VM stays private, including the original of what is public.
-    const other = media.find((item) => item.id !== id)?.id as string;
-    expect((await api(`/catalog/media/${other}/full`)).status).toBe(404);
+    // Originals stay administrators' only, however public the VM is.
     expect((await api(`/catalog/media/${id}/original`)).status).toBe(400);
     expect((await api(`${vm}/media/${id}/original`)).status).toBe(401);
 
     await admin.request({
       method: 'PUT',
-      url: `${vm}/media/${id}/visibility`,
+      url: `${vm}/visibility`,
       payload: { visibility: 'private' },
     });
     expect((await api(thumbnailUrl)).status, 'unpublished at once').toBe(404);
+    expect((await api(`/catalog/media/${other}/full`)).status).toBe(404);
     const after = publicCatalogResponseSchema.parse(await (await api('/catalog/vms')).json());
-    expect(after.items.find((item) => item.vmName === 'Stopped VM')?.mainImage).toBeNull();
+    expect(after.items.find((item) => item.vmName === 'Stopped VM')).toBeUndefined();
   });
 
   it('reports its progress to the administrator', async () => {
