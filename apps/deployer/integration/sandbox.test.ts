@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -7,7 +7,10 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -198,6 +201,100 @@ function exportFixture(base?: string) {
   };
 }
 
+/**
+ * A bare repository to export from with emucatctl's export_source, as the deployment account would:
+ * umask 027, the mirror at repo.git, nothing else in the environment that names Git.
+ */
+function gitFixture() {
+  const dir = scratch();
+  const work = join(dir, 'work');
+  mkdirSync(work);
+  const env = { ...process.env, HOME: dir };
+  const git = (args: string[], input?: Buffer | string) =>
+    execFileSync('git', args, { cwd: dir, env, input, encoding: 'utf8' }).trim();
+  git(['init', '--quiet', '--bare', 'repo.git']);
+  git(['init', '--quiet', work]);
+  const mirror = join(dir, 'repo.git');
+  const raw = (sha: string) => Buffer.from(sha, 'hex');
+  return {
+    dir,
+    write(path: string, content: string, mode = 0o644) {
+      mkdirSync(join(work, path, '..'), { recursive: true });
+      writeFileSync(join(work, path), content);
+      chmodSync(join(work, path), mode);
+    },
+    link(path: string, target: string) {
+      symlinkSync(target, join(work, path));
+    },
+    commit() {
+      git(['-C', work, 'add', '-A']);
+      git([
+        '-C',
+        work,
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@example.invalid',
+        'commit',
+        '-qm',
+        'x',
+      ]);
+      git(['-C', work, 'push', '--quiet', mirror, 'HEAD:refs/heads/develop']);
+      return git(['-C', work, 'rev-parse', 'HEAD']);
+    },
+    blob(content: string) {
+      return git(['-C', mirror, 'hash-object', '-w', '--stdin'], content);
+    },
+    /** A tree object written as given, without Git's checks, as a hostile repository could hold. */
+    tree(entries: [string, string, string][]) {
+      const bytes = Buffer.concat(
+        entries.flatMap(([mode, name, sha]) => [Buffer.from(`${mode} ${name}\0`), raw(sha)]),
+      );
+      return git(
+        ['-C', mirror, 'hash-object', '-t', 'tree', '-w', '--literally', '--stdin'],
+        bytes,
+      );
+    },
+    commitTree(tree: string) {
+      return git([
+        '-C',
+        mirror,
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@example.invalid',
+        'commit-tree',
+        tree,
+        '-m',
+        'x',
+      ]);
+    },
+    /** Every file of the mirror with its size, mode and modification time. */
+    snapshot() {
+      return execFileSync('find', [mirror, '-printf', '%P %s %m %T@\n'], { encoding: 'utf8' })
+        .split('\n')
+        .sort()
+        .join('\n');
+    },
+    exportAs(commit: string, name: string, extra: Record<string, string> = {}) {
+      const script = join(dir, 'export.sh');
+      writeFileSync(
+        script,
+        [
+          'set -uo pipefail',
+          'umask 027',
+          `REPO=${mirror} EMUCAT_GIT_SSH_KEY= KNOWN_HOSTS=`,
+          ctlFunction('git_repo'),
+          ctlFunction('export_source'),
+          `export_source ${commit} ${join(dir, name)}; echo "status=$?"`,
+          '',
+        ].join('\n'),
+      );
+      return spawnSync('bash', [script], { env: { ...env, ...extra }, encoding: 'utf8' }).stdout;
+    },
+  };
+}
+
 describe('the deployment service unit', () => {
   it('keeps its systemd hardening, RestrictSUIDSGID=yes included', () => {
     assert.equal(unitValue('RestrictSUIDSGID'), 'yes');
@@ -318,6 +415,118 @@ exec ${realGit} "$@"
     assert.equal(retried.done, 'succeeded', retried.error);
     assert.equal(h.current()?.commit, next);
     assert.equal(h.running(), next);
+  });
+
+  it('starts over after an earlier attempt for the same commit was killed during the export', () => {
+    const h = host();
+    const target = head(h);
+    // What a killed attempt leaves: a partial tree, its index and Git's index.lock.
+    mkdirSync(join(builds(h), target, 'deploy'), { recursive: true });
+    writeFileSync(join(builds(h), target, 'deploy/compose.yaml'), 'partial');
+    writeFileSync(join(builds(h), target, 'stale-file'), 'stale');
+    writeFileSync(join(builds(h), `${target}.index`), 'not an index');
+    writeFileSync(join(builds(h), `${target}.index.lock`), '');
+    const { result, done, error } = update(h);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(done, 'succeeded', error);
+    assert.equal(
+      readFileSync(join(h.root, `releases/${target}/compose.yaml`), 'utf8'),
+      readFileSync(join(REPOSITORY, 'deploy/compose.yaml'), 'utf8'),
+      'the release comes from the new export, not the partial one',
+    );
+    assert.deepEqual(readdirSync(builds(h)), []);
+    assert.ok(
+      !existsSync(join(h.root, 'repo.git/index')),
+      "the mirror's own index is never written",
+    );
+  });
+
+  it('leaves the export of a running update alone when another update is refused', async () => {
+    const h = host();
+    const target = head(h);
+    const inUse = join(builds(h), target);
+    mkdirSync(inUse, { recursive: true });
+    writeFileSync(join(inUse, 'being-built'), 'in use');
+    writeFileSync(join(builds(h), `${target}.index`), 'in use');
+    const holder = spawn('flock', [join(h.root, 'state/deploy.lock'), 'sleep', '5']);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    try {
+      const { result, error } = update(h);
+      assert.equal(result.status, 75);
+      assert.equal(error, 'update_in_progress');
+    } finally {
+      holder.kill();
+    }
+    assert.equal(readFileSync(join(inUse, 'being-built'), 'utf8'), 'in use');
+    assert.equal(readFileSync(join(builds(h), `${target}.index`), 'utf8'), 'in use');
+  });
+
+  it('writes names, modes and symbolic links as committed, with a throwaway index', (t) => {
+    const fixture = gitFixture();
+    const special = 'dir with space/ünï $(touch PWNED) ;*?/file \\ "q" \'s\'.txt';
+    fixture.write(special, 'special\n');
+    fixture.write('-rf', 'dash\n');
+    fixture.write('new\nline', 'newline\n');
+    fixture.write('deep/a/b/c/run.sh', '#!/bin/sh\n', 0o755);
+    fixture.link('rel-link', '../deep/a/b/c/run.sh');
+    fixture.link('abs-link', '/etc/passwd');
+    fixture.link('dangling', 'nowhere');
+    const commit = fixture.commit();
+    const mirror = fixture.snapshot();
+    // A GIT_INDEX_FILE in the caller's environment is not the one used.
+    const output = fixture.exportAs(commit, 'out', {
+      GIT_INDEX_FILE: join(fixture.dir, 'caller-index'),
+    });
+    assert.match(output, /^status=0$/m, output);
+    const out = join(fixture.dir, 'out');
+    assert.equal(readFileSync(join(out, special), 'utf8'), 'special\n');
+    assert.equal(readFileSync(join(out, '-rf'), 'utf8'), 'dash\n');
+    assert.equal(readFileSync(join(out, 'new\nline'), 'utf8'), 'newline\n');
+    assert.equal(statSync(join(out, 'deep/a/b/c/run.sh')).mode & 0o7777, 0o750);
+    assert.equal(statSync(join(out, special)).mode & 0o7777, 0o640);
+    for (const dir of ['', 'deep', 'deep/a/b/c', 'dir with space']) {
+      assert.equal(statSync(join(out, dir)).mode & 0o7777, 0o750, dir || '.');
+    }
+    assert.equal(readlinkSync(join(out, 'rel-link')), '../deep/a/b/c/run.sh');
+    assert.equal(readlinkSync(join(out, 'abs-link')), '/etc/passwd');
+    assert.equal(readlinkSync(join(out, 'dangling')), 'nowhere');
+    assert.ok(!existsSync(join(fixture.dir, 'PWNED')) && !existsSync(join(out, 'PWNED')));
+    assert.ok(!existsSync(join(fixture.dir, 'caller-index')));
+    assert.ok(!existsSync(join(fixture.dir, 'out.index')));
+    assert.equal(fixture.snapshot(), mirror, 'the mirror is unchanged');
+    t.diagnostic('special names, modes, symbolic links and the mirror checked');
+  });
+
+  it('never writes outside the build directory, whatever the tree holds', () => {
+    const fixture = gitFixture();
+    const outside = join(fixture.dir, 'outside');
+    mkdirSync(outside);
+    const blob = fixture.blob('evil');
+    const inner = fixture.tree([['100644', 'evil', blob]]);
+    const cases: Record<string, [string, string, string][]> = {
+      'a .. entry': [['40000', '..', inner]],
+      'a .git entry': [['40000', '.git', inner]],
+      'a .GIT entry': [['40000', '.GIT', inner]],
+      'a name with ../': [['100644', 'a/../../evil', blob]],
+      'a .gitmodules link': [['120000', '.gitmodules', fixture.blob(outside)]],
+    };
+    for (const [name, entries] of Object.entries(cases)) {
+      const output = fixture.exportAs(fixture.commitTree(fixture.tree(entries)), 'out');
+      assert.match(output, /^status=1$/m, `${name} is refused`);
+      assert.ok(!existsSync(join(fixture.dir, 'out')), `${name}: nothing is left`);
+    }
+    // A link named x to outside the build directory, then a directory named x: x/evil must not go
+    // through the link.
+    for (const target of [outside, '../outside']) {
+      const tree = fixture.tree([
+        ['120000', 'x', fixture.blob(target)],
+        ['40000', 'x', inner],
+      ]);
+      const output = fixture.exportAs(fixture.commitTree(tree), 'out');
+      assert.match(output, /^status=[01]$/m, output);
+      rmSync(join(fixture.dir, 'out'), { recursive: true, force: true });
+    }
+    assert.deepEqual(readdirSync(outside), [], 'nothing was written outside');
   });
 });
 

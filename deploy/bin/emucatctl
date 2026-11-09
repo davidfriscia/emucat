@@ -213,17 +213,19 @@ remove_db_option_file() {
 # mode inside struct open_how, so it blocks the call outright). Builds that do not fall back to openat()
 # then fail on every file below the top level: "Cannot open: Function not implemented". Git uses open(),
 # openat() and mkdir(), which the filter allows unless a set-user-ID or set-group-ID bit is asked for, and
-# Git trees have no such bits. On failure nothing is left behind, and the next attempt starts afresh.
+# Git trees have no such bits. On failure nothing is left behind, and the next attempt starts afresh,
+# also after one that was killed: its partial tree, index and index.lock (which Git would otherwise refuse
+# to get past) are removed first. Callers hold the deployment lock, so no other export uses these paths.
 export_source() {
   local commit=$1 dest=$2 index=$2.index
-  rm -rf -- "$dest" "$index"
+  rm -rf -- "$dest" "$index" "$index.lock"
   mkdir -p -- "$dest"
   if GIT_INDEX_FILE=$index git_repo --work-tree="$dest" read-tree "$commit" &&
     GIT_INDEX_FILE=$index git_repo --work-tree="$dest" checkout-index --all; then
     rm -f -- "$index"
     return 0
   fi
-  rm -rf -- "$dest" "$index"
+  rm -rf -- "$dest" "$index" "$index.lock"
   return 1
 }
 

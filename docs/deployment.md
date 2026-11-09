@@ -578,17 +578,18 @@ it is again a first deployment on an empty database, builds new images and appli
 The failure message's "Restore before retrying" does not apply: there was no backup to restore and
 nothing to undo. Nothing on the host needs a permission change.
 
-**If an update failed at "fetching source" with** `Cannot export commit` and, in its log,
-`tar: ./subdir/...: Cannot open: Function not implemented` (the deployment of `198adf9` on MARS): the
-installed `emucatctl` extracts with GNU tar, and this host's tar cannot do that under the unit's
+**If an update failed at "fetching source" with** `Cannot export commit` and, in its log, `tar:
+./subdir/...: Cannot open: Function not implemented` (the deployment of `198adf9` on MARS): the installed
+`emucatctl` extracts with GNU tar, and this host's tar cannot do that under the unit's
 `RestrictSUIDSGID=yes` (section 9). Nothing was built, backed up, migrated or restarted, and the previous
-release is still running. The failed attempt left at most a partial copy in `state/builds/`, which the
-next attempt removes. Updates from Settings run the _installed_ tooling, so deploying a fixed `develop`
-does not fix this by itself. Copy a newer `origin/develop` the same way as above and run
-`sudo deploy/bin/emucatctl install` again. It replaces `emucatctl`, rewrites the unit (with
-`RestrictSUIDSGID=yes` still in it) and restarts the service. Then run `update` again, from Settings or
-with `sudo /opt/emucat/tooling/bin/emucatctl update`. Configuration, mirror, releases, backups, media and
-the database are left as they are.
+release is still running. The failed attempt left at most a partial copy in `state/builds/<commit>`. Only
+an update of that same commit removes it, so once `develop` has moved on, remove it by hand while no
+update runs: `sudo rm -rf -- /opt/emucat/state/builds/<commit>`. Updates from Settings run the
+_installed_ tooling, so deploying a fixed `develop` does not fix this by itself. Copy a newer
+`origin/develop` the same way as above and run `sudo deploy/bin/emucatctl install` again. It replaces
+`emucatctl`, rewrites the unit (with `RestrictSUIDSGID=yes` still in it) and restarts the service. Then
+run `update` again, from Settings or with `sudo /opt/emucat/tooling/bin/emucatctl update`. Configuration,
+mirror, releases, backups, media and the database are left as they are.
 
 ## 17. MOON
 
