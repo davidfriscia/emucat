@@ -130,6 +130,10 @@ pub enum Message {
     ServerVmVerify(VmVerifyRequest),
     #[serde(rename = "server.vm_verify_ack")]
     ServerVmVerifyAck(VmVerifyAck),
+    #[serde(rename = "server.workspace_discard")]
+    ServerWorkspaceDiscard(WorkspaceDiscard),
+    #[serde(rename = "agent.workspace_discard_result")]
+    AgentWorkspaceDiscardResult(WorkspaceDiscardResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -195,13 +199,18 @@ pub enum DiscoveryErrorCode {
 pub enum RegistrationMode {
     Copy,
     Transfer,
+    /// A further immutable version of a registered VM. Never removes anything. See decision 0037.
+    Snapshot,
 }
 
 /// Which VM, in which repository, under which identities. It holds no path and no address: the agent
 /// resolves a VM against its own base paths and a repository against its own configuration, and it
 /// recomputes the archive key rather than believing it. Unknown fields are refused.
+///
+/// A snapshot names its parent, and only a snapshot does; only a snapshot can read a working copy. A
+/// request that says otherwise fails to decode, and is answered as invalid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", try_from = "RawRegistrationRequest")]
 pub struct RegistrationRequest {
     pub operation_id: Uuid,
     pub emulator_type: EmulatorType,
@@ -210,6 +219,54 @@ pub struct RegistrationRequest {
     pub repository_id: Uuid,
     pub version_id: Uuid,
     pub archive_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_version_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawRegistrationRequest {
+    operation_id: Uuid,
+    emulator_type: EmulatorType,
+    vm_name: VmName,
+    mode: RegistrationMode,
+    repository_id: Uuid,
+    version_id: Uuid,
+    archive_key: String,
+    #[serde(default)]
+    parent_version_id: Option<Uuid>,
+    #[serde(default)]
+    workspace_id: Option<Uuid>,
+}
+
+impl TryFrom<RawRegistrationRequest> for RegistrationRequest {
+    type Error = &'static str;
+
+    fn try_from(raw: RawRegistrationRequest) -> Result<Self, Self::Error> {
+        let snapshot = raw.mode == RegistrationMode::Snapshot;
+        if snapshot != raw.parent_version_id.is_some() {
+            return Err("a snapshot names its parent, and nothing else does");
+        }
+        if raw.workspace_id.is_some() && !snapshot {
+            return Err("only a snapshot reads a working copy");
+        }
+        if raw.parent_version_id == Some(raw.version_id) {
+            return Err("a version cannot be its own parent");
+        }
+        Ok(Self {
+            operation_id: raw.operation_id,
+            emulator_type: raw.emulator_type,
+            vm_name: raw.vm_name,
+            mode: raw.mode,
+            repository_id: raw.repository_id,
+            version_id: raw.version_id,
+            archive_key: raw.archive_key,
+            parent_version_id: raw.parent_version_id,
+            workspace_id: raw.workspace_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +332,9 @@ pub struct RegistrationSyncEntry {
 #[serde(rename_all = "camelCase")]
 pub struct RegistrationSync {
     pub operations: Vec<RegistrationSyncEntry>,
+    /// This agent can create snapshots. An older server ignores it.
+    #[serde(default)]
+    pub snapshots: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +479,10 @@ pub struct RestoreRequest {
     pub manifest_sha256: Option<String>,
     /// For checking disk space before downloading. Never treated as a limit.
     pub expected_uncompressed_bytes: Option<u64>,
+    /// Restore into this Remote Snapshot working copy, under the agent's own workspaces directory,
+    /// rather than under the emulator's base path. See decision 0038.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +565,10 @@ pub struct RestoreSync {
     pub operations: Vec<RestoreSyncEntry>,
     pub capabilities: RestoreCapabilities,
     pub local_copies: Vec<LocalCopyReport>,
+    /// The Remote Snapshot working copies this agent holds. Saying so is also what tells a server that
+    /// this agent keeps them.
+    #[serde(default)]
+    pub workspaces: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -646,10 +714,13 @@ fn is_known_type(message_type: &str) -> bool {
             | "server.vm_execution_ack"
             | "server.vm_verify"
             | "server.vm_verify_ack"
+            | "server.workspace_discard"
+            | "agent.workspace_discard_result"
     )
 }
 
-/// Where a VM runs from. Only `local` is implemented: the others are refused, never treated as `local`.
+/// Where a VM runs from. `local` runs the persistent copy, `remote_snapshot` a working copy (decision
+/// 0038). `remote_volatile` is refused, never treated as another mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
@@ -669,6 +740,9 @@ pub struct VmLaunchRequest {
     pub mode: ExecutionMode,
     /// The version the local copy is believed to come from, for the record. Never used to find files.
     pub version_id: Option<Uuid>,
+    /// For `remote_snapshot` only: which working copy to run. The agent finds its directory itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
 }
 
 /// Asks a session's emulator to stop. `force` ends the process at once, and the server only sends it after
@@ -680,6 +754,25 @@ pub struct VmStopRequest {
     pub emulator_type: EmulatorType,
     pub vm_name: VmName,
     pub force: bool,
+}
+
+/// Removes a Remote Snapshot working copy. It names the copy and its VM, never a path: the agent finds
+/// the directory under its own workspaces directory, and refuses while anything uses the VM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceDiscard {
+    pub workspace_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDiscardResult {
+    pub workspace_id: Uuid,
+    pub removed: bool,
+    pub code: Option<String>,
+    pub message: Option<String>,
 }
 
 /// The server has recorded a session's end. The agent can forget it.

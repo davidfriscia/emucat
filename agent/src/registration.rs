@@ -35,7 +35,7 @@ use crate::protocol::{
     RegistrationFailure, RegistrationMode, RegistrationPhase, RegistrationProgress,
     RegistrationRequest, RegistrationResult, RegistrationRetryCleanup, RegistrationStage,
     RegistrationSync, RegistrationSyncEntry, RepositoryConfigSummary, RepositoryHealthRequest,
-    RepositoryHealthResult,
+    RepositoryHealthResult, WorkspaceDiscard, WorkspaceDiscardResult,
 };
 use crate::removal::{
     RemovalRefusal, RemovalRequest, blocking_media, hash_excluded_files, quarantine_path,
@@ -259,6 +259,7 @@ impl AgentOperations {
         execution.set_busy_probe(disk_work);
 
         inner.recover_interrupted();
+        crate::workspaces::recover(&inner.config.state_dir);
         Ok(Arc::new(Self {
             inner,
             restores,
@@ -286,6 +287,7 @@ impl AgentOperations {
         };
         let mut messages = vec![Message::AgentRegistrationSync(RegistrationSync {
             operations,
+            snapshots: true,
         })];
         messages.push(self.restores.sync_message());
         messages.push(
@@ -350,8 +352,80 @@ impl AgentOperations {
             message @ (Message::ServerVmLaunch(_)
             | Message::ServerVmStop(_)
             | Message::ServerVmExecutionAck(_)) => self.execution.handle(message),
+            Message::ServerWorkspaceDiscard(discard) => self.discard_workspace(discard),
             _ => {}
         }
+    }
+
+    /// Removes a working copy the server asked about, unless anything runs or works on its VM here. The
+    /// check is per VM, as every other one is, so a session of the persistent copy also keeps it. The
+    /// answer is sent once; the next `agent.restore_sync` lists what is still held, which recovers a lost
+    /// request or answer.
+    fn discard_workspace(&self, discard: WorkspaceDiscard) {
+        let vm = VmIdentity {
+            emulator_type: discard.emulator_type,
+            vm_name: discard.vm_name.clone(),
+        };
+        let refusal = self
+            .execution
+            .activity(&vm)
+            .map(|reason| ("vm_running", reason))
+            .or_else(|| {
+                self.inner
+                    .working_on(&vm)
+                    .or_else(|| self.restores.working_on(&vm))
+                    .map(|reason| ("operation_in_progress", reason))
+            });
+        let workspace_id = discard.workspace_id;
+        if let Some((code, reason)) = refusal {
+            tracing::warn!(%workspace_id, code, "Refused to discard a working copy");
+            self.inner.send(Message::AgentWorkspaceDiscardResult(
+                WorkspaceDiscardResult {
+                    workspace_id,
+                    removed: false,
+                    code: Some(code.to_owned()),
+                    message: Some(bounded(&format!("{reason}. The working copy was kept"))),
+                },
+            ));
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let state_dir = inner.config.state_dir.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::workspaces::discard(
+                    &state_dir,
+                    workspace_id,
+                    discard.emulator_type,
+                    &discard.vm_name,
+                )
+            })
+            .await;
+            let result = match outcome {
+                Ok(Ok(())) => {
+                    tracing::info!(%workspace_id, "Working copy discarded");
+                    WorkspaceDiscardResult {
+                        workspace_id,
+                        removed: true,
+                        code: None,
+                        message: None,
+                    }
+                }
+                Ok(Err(error)) => WorkspaceDiscardResult {
+                    workspace_id,
+                    removed: false,
+                    code: Some(error.code.to_owned()),
+                    message: Some(bounded(&error.message)),
+                },
+                Err(_) => WorkspaceDiscardResult {
+                    workspace_id,
+                    removed: false,
+                    code: Some("internal_error".to_owned()),
+                    message: None,
+                },
+            };
+            inner.send(Message::AgentWorkspaceDiscardResult(result));
+        });
     }
 
     /// A verification that failed validation is answered as a failed one, so that it does not hang.
@@ -759,6 +833,15 @@ impl Inner {
                     format!("{} is not configured on this agent", request.emulator_type),
                 )
             })?;
+        let base_path = match request.workspace_id {
+            Some(workspace_id) => self.snapshot_workspace_base(&request, workspace_id)?,
+            None => {
+                if request.mode == RegistrationMode::Snapshot {
+                    self.check_snapshot_parent(&request)?;
+                }
+                base_path
+            }
+        };
         let repository = self.config.repositories.open(request.repository_id)?;
 
         let root = {
@@ -966,6 +1049,64 @@ impl Inner {
         tracing::info!(%operation_id, size = built.size_bytes, sha256 = %built.sha256, "Archive published");
         self.send(Message::AgentRegistrationResult(result));
         Ok(())
+    }
+
+    /// A snapshot of a working copy reads it where this agent put it, and only if it is still the copy of
+    /// the version named as the parent.
+    fn snapshot_workspace_base(
+        &self,
+        request: &RegistrationRequest,
+        workspace_id: Uuid,
+    ) -> Result<PathBuf, JobFailure> {
+        let state_dir = &self.config.state_dir;
+        if crate::workspaces::existing_vm_root(
+            state_dir,
+            workspace_id,
+            request.emulator_type,
+            &request.vm_name,
+        )
+        .is_none()
+        {
+            return Err(failure(
+                "workspace_unavailable",
+                "This working copy is not on this agent",
+            ));
+        }
+        let record = crate::workspaces::read_record(state_dir, workspace_id)
+            .ok_or_else(|| failure("workspace_unavailable", "This working copy has no record"))?;
+        if Some(record.source_version_id) != request.parent_version_id {
+            return Err(failure(
+                "snapshot_parent_mismatch",
+                "The working copy is not a copy of the version named as the parent",
+            ));
+        }
+        Ok(crate::workspaces::workspace_base(state_dir, workspace_id))
+    }
+
+    /// The parent the server names must be the version this agent recorded the local copy as coming from.
+    /// A copy this agent has no record of, from before it kept one, is taken on the server's word, which
+    /// checked its own record; a record that says otherwise is never overruled.
+    fn check_snapshot_parent(&self, request: &RegistrationRequest) -> Result<(), JobFailure> {
+        let recorded = crate::state::read_local_state(
+            &self.config.state_dir,
+            request.emulator_type,
+            &request.vm_name,
+        )
+        .and_then(|state| state.local_source_version_id);
+        match recorded {
+            Some(VersionId(source)) if Some(source) != request.parent_version_id => Err(failure(
+                "snapshot_parent_mismatch",
+                "This agent recorded its local copy as coming from another version",
+            )),
+            Some(_) => Ok(()),
+            None => {
+                tracing::warn!(
+                    operation_id = %request.operation_id,
+                    "No local record of where this copy came from; relying on the server's"
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn upload_and_verify(
@@ -1258,7 +1399,34 @@ impl Inner {
 
     fn keep_local(&self, journal: &Journal) -> RegistrationCleanup {
         let request = &journal.request;
-        if request.mode == RegistrationMode::Copy
+        // A working copy is now a copy of the new snapshot. The persistent copy is not this one's business.
+        if let Some(workspace_id) = request.workspace_id {
+            if let Err(error) = crate::workspaces::record_source(
+                &self.config.state_dir,
+                workspace_id,
+                request.version_id,
+                journal
+                    .result
+                    .as_ref()
+                    .map(|result| result.manifest_sha256.as_str()),
+            ) {
+                tracing::warn!(%error, %workspace_id, "Cannot record the working copy's new source");
+            }
+            return RegistrationCleanup {
+                operation_id: request.operation_id,
+                version_id: request.version_id,
+                local_copy: LocalCopyStatus::Preserved,
+                code: None,
+                message: None,
+            };
+        }
+        // A snapshot means the same as a copy for the directory it read: it is a verified copy of the
+        // version just published.
+        let keeps = matches!(
+            request.mode,
+            RegistrationMode::Copy | RegistrationMode::Snapshot
+        );
+        if keeps
             && let Err(error) = record_local_source(
                 &self.config.state_dir,
                 self.config.agent_id,
@@ -1274,11 +1442,9 @@ impl Inner {
             // Registration succeeded. Local bookkeeping can be rebuilt by a later verification.
             tracing::warn!(%error, "Cannot record the local source version");
         }
-        // The kept copy is now a copy of this master, so its manifest lets a verification run without
+        // The kept copy is now a copy of this version, so its manifest lets a verification run without
         // downloading anything. Only the manifest that was archived is kept.
-        if request.mode == RegistrationMode::Copy
-            && let Some(result) = &journal.result
-        {
+        if keeps && let Some(result) = &journal.result {
             let manifest = fs::read(self.manifest_path(request.operation_id))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())

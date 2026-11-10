@@ -347,6 +347,8 @@ fn request(name: &str, mode: RegistrationMode) -> RegistrationRequest {
         archive_key: RepositoryKey::for_version(&identity, VersionId(version_id))
             .as_str()
             .to_owned(),
+        parent_version_id: None,
+        workspace_id: None,
     }
 }
 
@@ -586,6 +588,8 @@ async fn a_transfer_with_screenshots_is_blocked_before_anything_is_uploaded() {
         )
         .as_str()
         .to_owned(),
+        parent_version_id: None,
+        workspace_id: None,
     };
     start(&operations, &transfer);
     let (code, message) = failure_of(&operations).await;
@@ -1521,6 +1525,8 @@ async fn an_unsupported_file_among_the_screenshots_blocks_removal() {
         archive_key: RepositoryKey::for_version(&identity, VersionId(version_id))
             .as_str()
             .to_owned(),
+        parent_version_id: None,
+        workspace_id: None,
     };
     start(&operations, &transfer);
     result_of(&operations).await;
@@ -1733,4 +1739,303 @@ async fn a_kept_copy_keeps_the_archived_manifest_for_later_verification() {
         hex(&Sha256::digest(fs::read(&kept).unwrap())),
         result.manifest_sha256
     );
+}
+
+// Snapshots: a further immutable version of a registered VM. See decision 0037.
+
+fn snapshot(name: &str, parent: Uuid, workspace: Option<Uuid>) -> RegistrationRequest {
+    RegistrationRequest {
+        parent_version_id: Some(parent),
+        workspace_id: workspace,
+        ..request(name, RegistrationMode::Snapshot)
+    }
+}
+
+fn record_source(world: &World, name: &str, version: Uuid) {
+    fs::create_dir_all(&world.state).unwrap();
+    emucat_agent::state::record_local_source(
+        &world.state,
+        Uuid::from_u128(1),
+        EmulatorType::Qemu,
+        &VmName::new(name).unwrap(),
+        version,
+        None,
+    )
+    .unwrap();
+}
+
+fn local_source(world: &World, name: &str) -> Option<Uuid> {
+    read_local_state(
+        &world.state,
+        EmulatorType::Qemu,
+        &VmName::new(name).unwrap(),
+    )
+    .and_then(|state| state.local_source_version_id)
+    .map(|version| version.0)
+}
+
+fn archived_paths(world: &World, key: &str) -> Vec<String> {
+    let local = TempDir::new().unwrap();
+    let path = local.path().join("archive.zip");
+    fs::write(&path, world.repository.object(key).unwrap()).unwrap();
+    read_manifest(&path)
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect()
+}
+
+/// A working copy as a restore into it leaves one: its record, and the VM under its own directory.
+fn working_copy(world: &World, name: &str, source: Uuid) -> (Uuid, PathBuf) {
+    let workspace = Uuid::new_v4();
+    emucat_agent::workspaces::write_record(
+        &world.state,
+        &emucat_agent::workspaces::WorkspaceRecord {
+            workspace_id: workspace,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: VmName::new(name).unwrap(),
+            source_version_id: source,
+            manifest_sha256: None,
+        },
+    )
+    .unwrap();
+    let root = emucat_agent::workspaces::workspace_base(&world.state, workspace).join(name);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("run.bat"), b"@echo never run\n").unwrap();
+    fs::write(
+        root.join("changed-in-session.txt"),
+        b"a change made while it ran",
+    )
+    .unwrap();
+    (workspace, root)
+}
+
+#[tokio::test]
+async fn a_snapshot_publishes_a_new_version_and_the_local_copy_becomes_it() {
+    let world = World::new();
+    let root = world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    let before = fs::read(root.join("disk.qcow2")).unwrap();
+    let operations = world.start();
+    let request = snapshot("Win98", master, None);
+    start(&operations, &request);
+
+    let result = result_of(&operations).await;
+    assert_eq!(result.version_id, request.version_id);
+    assert_eq!(world.repository.keys(), vec![request.archive_key.clone()]);
+    // Until the commit, the local copy is still the master's.
+    assert_eq!(local_source(&world, "Win98"), Some(master));
+
+    // A server saying "remove" cannot make a snapshot delete anything.
+    operations.handle(committed(&request, true));
+    let cleanup = cleanup_of(&operations).await;
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::Preserved);
+    assert_eq!(fs::read(root.join("disk.qcow2")).unwrap(), before);
+    assert_eq!(local_source(&world, "Win98"), Some(request.version_id));
+    operations.handle(closed(&request));
+    assert!(operations.open_operations().is_empty());
+}
+
+#[tokio::test]
+async fn a_snapshot_never_overwrites_an_existing_archive() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    let request = snapshot("Win98", master, None);
+    world
+        .repository
+        .store
+        .lock()
+        .unwrap()
+        .objects
+        .insert(request.archive_key.clone(), b"an existing archive".to_vec());
+    let operations = world.start();
+    start(&operations, &request);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "archive_exists");
+    assert_eq!(
+        world.repository.object(&request.archive_key).unwrap(),
+        b"an existing archive".to_vec()
+    );
+}
+
+#[tokio::test]
+async fn a_snapshot_whose_parent_contradicts_the_local_record_is_refused() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    record_source(&world, "Win98", Uuid::new_v4());
+    let operations = world.start();
+    let request = snapshot("Win98", Uuid::new_v4(), None);
+    start(&operations, &request);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "snapshot_parent_mismatch");
+    assert!(world.repository.keys().is_empty());
+}
+
+#[tokio::test]
+async fn a_snapshot_of_a_copy_without_a_local_record_relies_on_the_server() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let operations = world.start();
+    let master = Uuid::new_v4();
+    let request = snapshot("Win98", master, None);
+    start(&operations, &request);
+    result_of(&operations).await;
+    operations.handle(committed(&request, false));
+    cleanup_of(&operations).await;
+    assert_eq!(local_source(&world, "Win98"), Some(request.version_id));
+}
+
+#[tokio::test]
+async fn a_snapshot_whose_upload_keeps_failing_publishes_nothing_and_changes_nothing() {
+    let mut world = World::new();
+    world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    for _ in 0..2 {
+        world
+            .repository
+            .fail("upload", RepositoryError::new(Kind::Interrupted, "dropped"));
+    }
+    world.attempts = 2;
+    let operations = world.start();
+    let request = snapshot("Win98", master, None);
+    start(&operations, &request);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "upload_interrupted");
+    assert!(
+        !world.repository.keys().contains(&request.archive_key),
+        "nothing published under the final key"
+    );
+    assert_eq!(local_source(&world, "Win98"), Some(master));
+}
+
+#[tokio::test]
+async fn a_snapshot_of_a_working_copy_reads_it_and_leaves_the_persistent_copy_alone() {
+    let world = World::new();
+    let persistent = world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    let (workspace, root) = working_copy(&world, "Win98", master);
+    let operations = world.start();
+    let request = snapshot("Win98", master, Some(workspace));
+    start(&operations, &request);
+    result_of(&operations).await;
+
+    let paths = archived_paths(&world, &request.archive_key);
+    assert!(
+        paths.contains(&"changed-in-session.txt".to_owned()),
+        "{paths:?}"
+    );
+    assert!(
+        !paths.contains(&"disk.qcow2".to_owned()),
+        "the persistent copy was read: {paths:?}"
+    );
+
+    operations.handle(committed(&request, true));
+    assert_eq!(
+        cleanup_of(&operations).await.local_copy,
+        LocalCopyStatus::Preserved
+    );
+    assert!(root.join("changed-in-session.txt").exists());
+    assert!(persistent.join("disk.qcow2").exists());
+    let record = emucat_agent::workspaces::read_record(&world.state, workspace).unwrap();
+    assert_eq!(record.source_version_id, request.version_id);
+    assert_eq!(
+        local_source(&world, "Win98"),
+        Some(master),
+        "the persistent copy is untouched"
+    );
+
+    // The next snapshot of it must name the one just made.
+    let stale = snapshot("Win98", master, Some(workspace));
+    operations.handle(closed(&request));
+    start(&operations, &stale);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "snapshot_parent_mismatch");
+}
+
+#[tokio::test]
+async fn a_snapshot_of_a_missing_or_foreign_working_copy_is_refused() {
+    let world = World::new();
+    let master = Uuid::new_v4();
+    let (workspace, _) = working_copy(&world, "Win98", master);
+    world.qemu_vm("Other");
+    let operations = world.start();
+    for request in [
+        snapshot("Win98", master, Some(Uuid::new_v4())),
+        // A working copy of Win98, named as one of Other.
+        snapshot("Other", master, Some(workspace)),
+    ] {
+        start(&operations, &request);
+        let (code, _) = failure_of(&operations).await;
+        assert_eq!(code, "workspace_unavailable");
+    }
+    assert!(world.repository.keys().is_empty());
+}
+
+#[tokio::test]
+async fn a_working_copy_is_listed_and_discarded_only_when_asked() {
+    let world = World::new();
+    let (workspace, root) = working_copy(&world, "Win98", Uuid::new_v4());
+    let operations = world.start();
+    let listed = operations
+        .sync_messages()
+        .into_iter()
+        .find_map(|message| match message {
+            Message::AgentRestoreSync(sync) => Some(sync.workspaces),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(listed, vec![workspace]);
+
+    // Named as another VM's, nothing is removed.
+    operations.handle(Message::ServerWorkspaceDiscard(
+        emucat_agent::protocol::WorkspaceDiscard {
+            workspace_id: workspace,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: VmName::new("Other").unwrap(),
+        },
+    ));
+    let refused = discard_result(&operations).await;
+    assert!(!refused.removed);
+    assert_eq!(refused.code.as_deref(), Some("workspace_mismatch"));
+    assert!(root.exists());
+
+    operations.handle(Message::ServerWorkspaceDiscard(
+        emucat_agent::protocol::WorkspaceDiscard {
+            workspace_id: workspace,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: VmName::new("win98").unwrap(),
+        },
+    ));
+    let removed = discard_result(&operations).await;
+    assert!(removed.removed, "{removed:?}");
+    assert!(!root.exists());
+    assert!(emucat_agent::workspaces::held(&world.state).is_empty());
+    // Asking again is harmless.
+    operations.handle(Message::ServerWorkspaceDiscard(
+        emucat_agent::protocol::WorkspaceDiscard {
+            workspace_id: workspace,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: VmName::new("Win98").unwrap(),
+        },
+    ));
+    assert!(discard_result(&operations).await.removed);
+}
+
+async fn discard_result(
+    operations: &AgentOperations,
+) -> emucat_agent::protocol::WorkspaceDiscardResult {
+    match next_message(operations, |message| {
+        matches!(message, Message::AgentWorkspaceDiscardResult(_))
+    })
+    .await
+    {
+        Message::AgentWorkspaceDiscardResult(result) => result,
+        _ => unreachable!(),
+    }
 }

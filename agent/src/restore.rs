@@ -472,6 +472,21 @@ impl RestoreManager {
             .map(|config| config.base_path.clone())
     }
 
+    /// Where a restore publishes: the emulator's base path, or a working copy's own directory, which the
+    /// agent derives from its state directory and the working copy's UUID alone.
+    fn target_base(&self, request: &RestoreRequest) -> Option<PathBuf> {
+        match request.workspace_id {
+            Some(workspace_id) => {
+                self.base_path(request.emulator_type)?;
+                Some(crate::workspaces::workspace_base(
+                    &self.config.state_dir,
+                    workspace_id,
+                ))
+            }
+            None => self.base_path(request.emulator_type),
+        }
+    }
+
     fn record_failure(&self, mut journal: Journal, failed: JobFailure) {
         let operation_id = journal.request.operation_id;
         let report = RestoreFailure {
@@ -501,7 +516,7 @@ impl RestoreManager {
             remove_staging_files(&self.config.staging_dir, operation_id);
             match journal.phase {
                 RestorePhase::Running => {
-                    if let Some(base) = self.base_path(journal.request.emulator_type) {
+                    if let Some(base) = self.target_base(&journal.request) {
                         remove_staged_directory(&staged_directory(&base, operation_id));
                     }
                     self.record_failure(
@@ -523,7 +538,7 @@ impl RestoreManager {
     /// is this operation's only if it is the very one that was assembled. Anything else is left alone.
     fn resolve_publishing(&self, mut journal: Journal) {
         let operation_id = journal.request.operation_id;
-        let Some(base) = self.base_path(journal.request.emulator_type) else {
+        let Some(base) = self.target_base(&journal.request) else {
             self.record_failure(
                 journal,
                 failure(
@@ -593,6 +608,12 @@ impl RestoreManager {
         if let Err(error) = self.persist(journal.clone()) {
             tracing::error!(%error, %operation_id, "Cannot record a publication");
         }
+        // A working copy's record was written before the rename, and the persistent copy's state is not
+        // this restore's business.
+        if journal.request.workspace_id.is_some() {
+            self.send(Message::AgentRestoreResult(result));
+            return;
+        }
         // Local bookkeeping. If it fails, the server still knows, and the next report says so.
         if let Err(error) = record_local_source(
             &self.config.state_dir,
@@ -624,6 +645,7 @@ impl RestoreManager {
             operations,
             capabilities: self.capabilities(),
             local_copies: self.local_copies(),
+            workspaces: crate::workspaces::held(&self.config.state_dir),
         })
     }
 
@@ -806,7 +828,7 @@ impl RestoreManager {
             running.insert(operation_id, cancel.clone());
         }
 
-        let emulator = request.emulator_type;
+        let target = self.target_base(&request);
         let journal = Journal {
             request,
             phase: RestorePhase::Running,
@@ -837,8 +859,8 @@ impl RestoreManager {
             if let Err(failed) = outcome {
                 tracing::warn!(%operation_id, code = %failed.code, message = %failed.message, "Restore failed");
                 remove_staging_files(&this.config.staging_dir, operation_id);
-                if let Some(base) = this.base_path(emulator) {
-                    remove_staged_directory(&staged_directory(&base, operation_id));
+                if let Some(base) = &target {
+                    remove_staged_directory(&staged_directory(base, operation_id));
                 }
                 if let Some(journal) = this.journal(operation_id) {
                     this.record_failure(journal, failed);
@@ -1007,12 +1029,22 @@ impl RestoreManager {
                 "A hash in the request is not valid",
             ));
         }
-        let base_path = self.base_path(request.emulator_type).ok_or_else(|| {
+        let base_path = self.target_base(&request).ok_or_else(|| {
             failure(
                 "restore_emulator_not_configured",
                 format!("{} is not configured on this agent", request.emulator_type),
             )
         })?;
+        // A working copy's directory is created here, empty, the first time. Its parent is under the
+        // state directory, which is never inside a base path.
+        if request.workspace_id.is_some() {
+            fs::create_dir_all(&base_path).map_err(|error| {
+                failure(
+                    "restore_staging_failed",
+                    format!("Cannot create the working copy's directory: {error}"),
+                )
+            })?;
+        }
         let repository = self.config.repositories.open(request.repository_id)?;
 
         let base_identity = {
@@ -1141,7 +1173,24 @@ impl RestoreManager {
 
         let destination = crate::filesystem::vm_directory(&base_path, &request.vm_name);
         // Kept before the rename, so that a crash right after it can be told from one right before it.
-        {
+        if let Some(workspace_id) = request.workspace_id {
+            crate::workspaces::write_record(
+                &self.config.state_dir,
+                &crate::workspaces::WorkspaceRecord {
+                    workspace_id,
+                    emulator_type: request.emulator_type,
+                    vm_name: request.vm_name.clone(),
+                    source_version_id: request.version_id,
+                    manifest_sha256: Some(inspected.manifest_sha256.clone()),
+                },
+            )
+            .map_err(|error| {
+                failure(
+                    "restore_staging_failed",
+                    format!("Cannot record the working copy: {error}"),
+                )
+            })?;
+        } else {
             let path = local_manifest_path(
                 &self.config.state_dir,
                 request.emulator_type,
@@ -1676,6 +1725,7 @@ impl RestoreManager {
             archive_sha256: request.archive_sha256.clone(),
             manifest_sha256: request.manifest_sha256.clone(),
             expected_uncompressed_bytes: None,
+            workspace_id: None,
         };
         let obtained = self
             .obtain_archive(&as_restore, &*repository, &key, cancel)
