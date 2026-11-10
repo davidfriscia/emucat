@@ -533,6 +533,32 @@ describe('creating a snapshot', () => {
     expect(await localSource(w)).toBe(operation.versionId);
   });
 
+  it('lets a published but uncommitted snapshot be cancelled, and only then deletes the archive', async () => {
+    const w = await world();
+    const operation = await snapshot(w);
+    await w.agent.next('server.registration_request');
+    await w.context.pool.query(
+      `CREATE TRIGGER fail_snapshot_commit BEFORE INSERT ON vm_versions FOR EACH ROW
+       SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'simulated commit failure'`,
+    );
+    w.agent.send(envelope('agent.registration_result', resultFor(operation)));
+    await barrier(w.agent);
+    await w.context.pool.query('DROP TRIGGER fail_snapshot_commit');
+    // Published, verified, waiting in committing: an administrator decides against it.
+    const cancelled = await w.admin.request({
+      method: 'POST',
+      url: `/admin/registrations/${operation.id}/cancel`,
+    });
+    expect(cancelled.statusCode, cancelled.body).toBe(200);
+    expect(registrationOperationSchema.parse(cancelled.json()).state).toBe('cancelled');
+    // The agent repeats its report, and is told that nothing refers to what it published.
+    w.agent.send(envelope('agent.registration_result', resultFor(operation)));
+    const ack = await w.agent.next('server.registration_ack');
+    expect(ack.payload).toMatchObject({ outcome: 'rejected', deletePublished: true });
+    expect(await versionCount(w)).toBe(1);
+    expect(await localSource(w)).toBe(w.masterId);
+  });
+
   it('tells the agent to delete what it published when the snapshot was cancelled first', async () => {
     const w = await world();
     const operation = await snapshot(w);

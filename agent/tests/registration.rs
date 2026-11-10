@@ -2238,3 +2238,102 @@ async fn a_removal_a_crash_interrupted_is_finished_on_the_next_start() {
     assert!(emucat_agent::workspaces::read_record(&world.state, workspace).is_none());
     assert!(unrelated.exists());
 }
+
+#[tokio::test]
+async fn a_snapshot_survives_a_restart_between_publication_and_commit() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    let operations = world.start();
+    let request = snapshot("Win98", master, None);
+    start(&operations, &request);
+    let result = result_of(&operations).await;
+    // The agent stops before the server's answer arrives.
+    operations.shutdown();
+    drop(operations);
+
+    let restarted = world.start();
+    settle().await;
+    assert!(restarted.sync_messages().iter().any(|message| matches!(
+        message,
+        Message::AgentRegistrationResult(again) if again == &result
+    )));
+    assert_eq!(
+        world.repository.store.lock().unwrap().publishes,
+        1,
+        "published once, and never again"
+    );
+    assert_eq!(
+        local_source(&world, "Win98"),
+        Some(master),
+        "not the snapshot's until committed"
+    );
+
+    restarted.handle(committed(&request, false));
+    assert_eq!(
+        cleanup_of(&restarted).await.local_copy,
+        LocalCopyStatus::Preserved
+    );
+    assert_eq!(local_source(&world, "Win98"), Some(request.version_id));
+    // A second answer, as a lost acknowledgement repeated, changes nothing more.
+    restarted.handle(committed(&request, false));
+    settle().await;
+    assert_eq!(world.repository.keys(), vec![request.archive_key.clone()]);
+}
+
+#[tokio::test]
+async fn a_snapshot_cancelled_during_its_upload_publishes_nothing_and_keeps_its_lineage() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    let hold = Arc::new(tokio::sync::Notify::new());
+    world.repository.store.lock().unwrap().hold_upload = Some(Arc::clone(&hold));
+    let operations = world.start();
+    let request = snapshot("Win98", master, None);
+    start(&operations, &request);
+    next_message(&operations, |message| {
+        matches!(
+            message,
+            Message::AgentRegistrationProgress(progress)
+                if progress.stage == RegistrationStage::Uploading
+        )
+    })
+    .await;
+    operations.handle(Message::ServerRegistrationCancel(RegistrationCancel {
+        operation_id: request.operation_id,
+    }));
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "cancelled");
+    assert!(world.repository.keys().is_empty());
+    assert_eq!(local_source(&world, "Win98"), Some(master));
+    assert_eq!(fs::read_dir(&world.staging).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn a_snapshot_rejected_after_publication_removes_only_its_own_archive() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    // Another version's archive is already there, and must survive.
+    let other = format!("archives/qemu/win98/{}.zip", Uuid::new_v4());
+    world
+        .repository
+        .store
+        .lock()
+        .unwrap()
+        .objects
+        .insert(other.clone(), b"another version".to_vec());
+    let operations = world.start();
+    let request = snapshot("Win98", master, None);
+    start(&operations, &request);
+    result_of(&operations).await;
+    // Cancelled on the server before it could commit: nothing refers to the archive.
+    operations.handle(rejected(&request, true));
+    settle().await;
+    assert_eq!(world.repository.keys(), vec![other]);
+    assert_eq!(local_source(&world, "Win98"), Some(master));
+    assert!(operations.open_operations().is_empty());
+}
