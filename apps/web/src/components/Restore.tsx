@@ -2,6 +2,7 @@ import {
   EMULATOR_LABELS,
   isRestoreCancellable,
   isRestoreTerminal,
+  type RegistrationOperation,
   type RestoreAgentOption,
   type RestoreIneligibleReason,
   type RestoreOperation,
@@ -14,11 +15,23 @@ import { Link } from 'react-router';
 import { cancelRestore, fetchRestoreOptions, fetchRestores, startRestore } from '../api';
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
+import { InfoDialog, nameMatches } from './Dialogs';
 import { useModalDialog } from './Gallery';
+import {
+  CreateSnapshotDialog,
+  shortId,
+  SnapshotProgress,
+  versionLabel,
+  type SnapshotRequest,
+} from './Snapshots';
 import { FormError } from './States';
+
+export { versionLabel } from './Snapshots';
 
 const ACTIVE_POLL_MS = 1_500;
 const IDLE_POLL_MS = 10_000;
+/** How many finished restores the history shows. Every row is kept by the server. */
+const HISTORY_ROWS = 20;
 
 const STATE_TEXT: Record<RestoreState, string> = {
   queued: 'Waiting for the agent',
@@ -51,9 +64,14 @@ const INELIGIBLE_TEXT: Record<RestoreIneligibleReason, string> = {
   repository_not_authorized: 'not associated with this repository',
   repository_not_configured: 'no local settings for this repository',
   local_copy_exists: 'it already holds a copy',
+  no_local_copy: 'it holds no copy to replace',
   vm_running: 'the VM is running there',
   operation_in_progress: 'busy with another operation',
 };
+
+export function restoreStateText(state: RestoreState): string {
+  return STATE_TEXT[state];
+}
 
 function stateBadge(state: RestoreState): string {
   switch (state) {
@@ -118,6 +136,26 @@ function cacheText(cache: RestoreOperation['cache']): string | null {
   return null;
 }
 
+/** Names versions for people, when the page knows them; otherwise a short identifier. */
+export type VersionNamer = (versionId: string | null) => string;
+
+const shortNamer: VersionNamer = (versionId) => (versionId ? shortId(versionId) : 'Unknown');
+
+export function versionNamer(options: RestoreOptionsResponse | null | undefined): VersionNamer {
+  const versions = options?.versions ?? [];
+  return (versionId) => {
+    if (!versionId) return 'Unknown';
+    const version = versions.find((item) => item.versionId === versionId);
+    if (version) return versionLabel(version);
+    return options?.master?.versionId === versionId ? 'Master' : shortId(versionId);
+  };
+}
+
+function restoreKind(operation: RestoreOperation): string {
+  if (operation.workspaceId) return 'Remote session';
+  return operation.replacement ? 'Replacement' : 'Restore';
+}
+
 /** One restore, however far along it is. */
 export function RestoreCard({
   operation,
@@ -152,6 +190,9 @@ export function RestoreCard({
         <span className={`badge ${stateBadge(operation.state)}`}>
           {STATE_TEXT[operation.state]}
         </span>
+        {operation.replacement ? (
+          <span className="badge text-bg-warning">Replaces the local copy</span>
+        ) : null}
         <span className="small">
           {showVm ? (
             <>
@@ -167,6 +208,32 @@ export function RestoreCard({
       </div>
       <FormError error={error} />
       {!finished ? <RestoreProgress operation={operation} /> : null}
+      <RestoreOutcome operation={operation} cache={cache} />
+      {isRestoreCancellable(operation.state) ? (
+        <button
+          type="button"
+          className="btn btn-sm btn-outline-danger"
+          disabled={busy || operation.cancelRequested}
+          onClick={() => void cancel()}
+        >
+          {operation.cancelRequested ? 'Cancelling…' : 'Cancel'}
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
+/** What a restore did or why it did not: shared by the progress card and the details dialog. */
+function RestoreOutcome({
+  operation,
+  cache,
+}: {
+  operation: RestoreOperation;
+  cache: string | null;
+}) {
+  const finished = isRestoreTerminal(operation.state);
+  return (
+    <>
       {cache ? <p className="small mb-2">{cache}</p> : null}
       {operation.error ? (
         <div
@@ -204,22 +271,181 @@ export function RestoreCard({
           ) : null}
         </dl>
       ) : null}
-      {operation.state === 'succeeded' ? (
-        <p className="small text-body-secondary mb-0">
+      {operation.state === 'succeeded' && !operation.workspaceId ? (
+        <p className="small text-body-secondary mb-2">
           The VM was not started. Run it yourself when you want to.
         </p>
       ) : null}
-      {isRestoreCancellable(operation.state) ? (
-        <button
-          type="button"
-          className="btn btn-sm btn-outline-danger"
-          disabled={busy || operation.cancelRequested}
-          onClick={() => void cancel()}
-        >
-          {operation.cancelRequested ? 'Cancelling…' : 'Cancel'}
-        </button>
+    </>
+  );
+}
+
+/** Everything recorded about one restore. It names identities and hashes, never a credential. */
+function RestoreDetails({
+  operation,
+  nameVersion,
+}: {
+  operation: RestoreOperation;
+  nameVersion: VersionNamer;
+}) {
+  const cache = cacheText(operation.cache);
+  return (
+    <>
+      <div className="d-flex flex-wrap gap-1 mb-2">
+        <span className={`badge ${stateBadge(operation.state)}`}>
+          {STATE_TEXT[operation.state]}
+        </span>
+        <span className="badge text-bg-light border">{restoreKind(operation)}</span>
+      </div>
+      <dl className="small settings-facts mb-2">
+        <dt>VM</dt>
+        <dd className="vm-identity">{operation.vmName}</dd>
+        <dt>Emulator</dt>
+        <dd>{EMULATOR_LABELS[operation.emulatorType]}</dd>
+        <dt>Agent</dt>
+        <dd>{operation.agentName}</dd>
+        <dt>Version</dt>
+        <dd>
+          {nameVersion(operation.versionId)}{' '}
+          <span className="vm-identity">{operation.versionId}</span>
+        </dd>
+        {operation.replacement ? (
+          <>
+            <dt>Replaced</dt>
+            <dd>
+              {operation.replacement.replacedVersionId
+                ? `A copy of ${nameVersion(operation.replacement.replacedVersionId)}`
+                : 'A copy whose version was not known'}
+              {operation.replacement.discardLocalChanges
+                ? ', its local changes discarded on request'
+                : ', checked to be unchanged first'}
+            </dd>
+          </>
+        ) : null}
+        <dt>Repository</dt>
+        <dd>{operation.repositoryName}</dd>
+        <dt>Archive</dt>
+        <dd>
+          {formatBytes(operation.archive.sizeBytes)}, SHA-256{' '}
+          <span className="vm-identity">{operation.archive.sha256}</span>
+        </dd>
+        <dt>Requested</dt>
+        <dd>
+          {formatTime(operation.createdAt)}
+          {operation.requestedByDisplayName ? ` by ${operation.requestedByDisplayName}` : ''}
+        </dd>
+        <dt>Finished</dt>
+        <dd>{operation.finishedAt ? formatTime(operation.finishedAt) : 'Not yet'}</dd>
+        <dt>Operation</dt>
+        <dd className="vm-identity">{operation.id}</dd>
+      </dl>
+      <RestoreOutcome operation={operation} cache={cache} />
+    </>
+  );
+}
+
+/**
+ * Restores as a compact table, newest first, with every detail one click away. Restores still running
+ * are shown above it with their progress, because that is when they need attention.
+ */
+export function RestoreHistory({
+  operations,
+  showVm = false,
+  nameVersion = shortNamer,
+  onChange,
+}: {
+  operations: RestoreOperation[];
+  showVm?: boolean;
+  nameVersion?: VersionNamer;
+  onChange: () => void;
+}) {
+  const [details, setDetails] = useState<RestoreOperation | null>(null);
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const running = operations.filter((operation) => !isRestoreTerminal(operation.state));
+  const rows = operations.slice(0, HISTORY_ROWS);
+  const close = () => {
+    setDetails(null);
+    opener.current?.focus();
+  };
+  return (
+    <>
+      {running.map((operation) => (
+        <RestoreCard key={operation.id} operation={operation} showVm={showVm} onChange={onChange} />
+      ))}
+      {rows.length > 0 ? (
+        <div className="table-responsive">
+          <table className="table table-sm small align-middle mb-0 restore-history">
+            <caption className="visually-hidden">Restore history, newest first</caption>
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">{showVm ? 'VM and agent' : 'Agent'}</th>
+                <th scope="col">Version</th>
+                <th scope="col">Kind</th>
+                <th scope="col">Status</th>
+                <th scope="col">
+                  <span className="visually-hidden">Details</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((operation) => (
+                <tr key={operation.id}>
+                  <td className="text-nowrap">{formatTime(operation.createdAt)}</td>
+                  <td>
+                    {showVm ? (
+                      <>
+                        <span className="vm-identity">{operation.vmName}</span> on{' '}
+                      </>
+                    ) : null}
+                    {operation.agentName}
+                  </td>
+                  <td>{nameVersion(operation.versionId)}</td>
+                  <td>
+                    {operation.replacement ? (
+                      <span className="badge text-bg-warning">Replacement</span>
+                    ) : (
+                      restoreKind(operation)
+                    )}
+                  </td>
+                  <td>
+                    <span className={`badge ${stateBadge(operation.state)}`}>
+                      {STATE_TEXT[operation.state]}
+                    </span>
+                  </td>
+                  <td className="text-end">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-secondary theme-button"
+                      aria-label={`Details of the restore on ${operation.agentName}, ${formatTime(operation.createdAt)}`}
+                      onClick={(event) => {
+                        opener.current = event.currentTarget;
+                        setDetails(operation);
+                      }}
+                    >
+                      Details
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : null}
-    </article>
+      {operations.length > rows.length ? (
+        <p className="small text-body-secondary mt-2 mb-0">
+          The {HISTORY_ROWS} most recent of {operations.length} restores.
+        </p>
+      ) : null}
+      {details ? (
+        <InfoDialog title="Restore details" onClose={close}>
+          <RestoreDetails
+            operation={operations.find((item) => item.id === details.id) ?? details}
+            nameVersion={nameVersion}
+          />
+        </InfoDialog>
+      ) : null}
+    </>
   );
 }
 
@@ -228,21 +454,28 @@ function localText(option: RestoreAgentOption): string {
   if (availability === 'none') return 'No local copy';
   if (availability === 'absent') return 'No longer present on this agent';
   if (contentStatus === 'verified') return `Verified copy, as of ${formatTime(lastVerifiedAt)}`;
-  if (contentStatus === 'modified') return 'Has a local copy that differs from the master';
+  if (contentStatus === 'modified') return 'Has a local copy that differs from its version';
   return 'Has a local copy, not verified since the agent last connected';
 }
 
-/** How a version is named for people: the master, or a snapshot's label and when it was made. */
-export function versionLabel(version: {
-  kind: 'master' | 'snapshot';
-  snapshotName: string | null;
-}): string {
-  return version.kind === 'master' ? 'Master' : (version.snapshotName ?? 'Snapshot');
+/** Whether a restore on this agent would replace its persistent copy. */
+function replaces(agent: RestoreAgentOption): boolean {
+  return agent.local.availability === 'present';
+}
+
+/** Whether this agent can take a restore of this VM now, as a new copy or as a replacement. */
+function canTake(agent: RestoreAgentOption): boolean {
+  return replaces(agent) ? agent.replace.eligible : agent.eligible;
+}
+
+function refusal(agent: RestoreAgentOption): RestoreIneligibleReason | null {
+  return replaces(agent) ? agent.replace.reason : agent.ineligibleReason;
 }
 
 /**
  * The confirmation. It explains what will and will not happen, and offers no way to choose a path. Any
- * version can be restored: the master, or any snapshot in the tree.
+ * version can be restored: the master, or any snapshot in the tree. On an agent that already holds a
+ * copy, it is an explicit replacement: what is there now, what replaces it, and the VM's name typed.
  */
 export function RestoreDialog({
   vm,
@@ -250,34 +483,48 @@ export function RestoreDialog({
   initialVersionId,
   onClose,
   onStarted,
+  onSnapshotFirst,
 }: {
   vm: VmIdentity;
   options: RestoreOptionsResponse;
   initialVersionId?: string | undefined;
   onClose: () => void;
   onStarted: () => void;
+  /** Offered when the copy being replaced may hold changes and its version is known. */
+  onSnapshotFirst?: ((request: SnapshotRequest) => void) | undefined;
 }) {
-  const eligible = options.agents.filter((agent) => agent.eligible);
-  const [agentId, setAgentId] = useState(eligible[0]?.agentId ?? '');
+  const [agentId, setAgentId] = useState(
+    (options.agents.find(canTake) ?? options.agents[0])?.agentId ?? '',
+  );
   const [versionId, setVersionId] = useState(
     initialVersionId ?? options.master?.versionId ?? options.versions[0]?.versionId ?? '',
   );
+  const [discard, setDiscard] = useState(false);
+  const [typed, setTyped] = useState('');
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLDivElement>(null);
   const select = useRef<HTMLSelectElement>(null);
   useModalDialog(dialog, select, onClose);
 
-  const versions = options.versions.length > 0 ? options.versions : [];
-  const master =
-    versions.find((version) => version.versionId === versionId) ??
+  const versions = options.versions;
+  const version =
+    versions.find((item) => item.versionId === versionId) ??
     (options.master ? { ...options.master, kind: 'master' as const, snapshotName: null } : null);
   const chosen = options.agents.find((agent) => agent.agentId === agentId);
-  if (!master) return null;
+  if (!version) return null;
+  const nameVersion = versionNamer(options);
+  const replacing = chosen !== undefined && replaces(chosen);
+  const modified = replacing && chosen.local.contentStatus === 'modified';
+  const mayHaveChanges = replacing && chosen.local.contentStatus !== 'verified';
+  const ready =
+    chosen !== undefined &&
+    canTake(chosen) &&
+    (!replacing || (nameMatches(typed, vm.vmName) && (!modified || discard)));
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!chosen) return;
+    if (!chosen || !ready) return;
     setError(null);
     setBusy(true);
     try {
@@ -285,7 +532,16 @@ export function RestoreDialog({
         agentId: chosen.agentId,
         emulatorType: vm.emulatorType,
         vmName: vm.vmName,
-        versionId: master.versionId,
+        versionId: version.versionId,
+        ...(replacing
+          ? {
+              replace: {
+                expectedVersionId: chosen.local.sourceVersionId,
+                discardLocalChanges: discard,
+                confirmVmName: typed.trim(),
+              },
+            }
+          : {}),
       });
       onStarted();
     } catch (failure) {
@@ -295,8 +551,8 @@ export function RestoreDialog({
   };
 
   const needed =
-    master.totalUncompressedBytes !== null
-      ? master.archiveSizeBytes + master.totalUncompressedBytes
+    version.totalUncompressedBytes !== null
+      ? version.archiveSizeBytes + version.totalUncompressedBytes
       : null;
 
   return (
@@ -310,14 +566,23 @@ export function RestoreDialog({
       >
         <form className="card-body" onSubmit={(event) => void submit(event)}>
           <h2 id="restore-dialog-title" className="h5 card-title">
-            Restore {vm.vmName}
+            {replacing ? `Replace the local copy of ${vm.vmName}` : `Restore ${vm.vmName}`}
           </h2>
-          <p className="small">
-            This creates a local copy of the immutable version you choose on the agent you choose.
-            The version is not changed, an existing directory is never overwritten, and the VM is
-            not started. A snapshot made from the restored copy afterwards branches from this
-            version.
-          </p>
+          {replacing ? (
+            <p className="small">
+              This replaces the persistent local copy on {chosen.agentName} with the immutable
+              version you choose. The new version is downloaded, verified and extracted beside the
+              current copy first; only then is the current copy moved aside and removed. If anything
+              fails before that, the current copy is left as it is. The VM is not started.
+            </p>
+          ) : (
+            <p className="small">
+              This creates a local copy of the immutable version you choose on the agent you choose.
+              The version is not changed, an existing directory is never overwritten, and the VM is
+              not started. A snapshot made from the restored copy afterwards branches from this
+              version.
+            </p>
+          )}
           <FormError error={error} />
           {versions.length > 1 ? (
             <div className="mb-3">
@@ -330,13 +595,13 @@ export function RestoreDialog({
                 value={versionId}
                 onChange={(event) => setVersionId(event.target.value)}
               >
-                {versions.map((version) => (
+                {versions.map((item) => (
                   <option
-                    key={version.versionId}
-                    value={version.versionId}
-                    disabled={!version.repositoryEnabled}
+                    key={item.versionId}
+                    value={item.versionId}
+                    disabled={!item.repositoryEnabled}
                   >
-                    {versionLabel(version)}, {formatTime(version.createdAt)}
+                    {versionLabel(item)}, {formatTime(item.createdAt)}
                   </option>
                 ))}
               </select>
@@ -351,14 +616,25 @@ export function RestoreDialog({
               ref={select}
               className="form-select"
               value={agentId}
-              onChange={(event) => setAgentId(event.target.value)}
+              onChange={(event) => {
+                setAgentId(event.target.value);
+                setTyped('');
+                setDiscard(false);
+              }}
             >
-              {options.agents.map((agent) => (
-                <option key={agent.agentId} value={agent.agentId} disabled={!agent.eligible}>
-                  {agent.agentName}
-                  {agent.ineligibleReason ? ` (${INELIGIBLE_TEXT[agent.ineligibleReason]})` : ''}
-                </option>
-              ))}
+              {options.agents.map((agent) => {
+                const reason = refusal(agent);
+                return (
+                  <option key={agent.agentId} value={agent.agentId} disabled={!canTake(agent)}>
+                    {agent.agentName}
+                    {reason
+                      ? ` (${INELIGIBLE_TEXT[reason]})`
+                      : replaces(agent)
+                        ? ' (replaces its copy)'
+                        : ''}
+                  </option>
+                );
+              })}
             </select>
           </div>
           <dl className="small settings-facts">
@@ -366,14 +642,29 @@ export function RestoreDialog({
             <dd className="vm-identity">{vm.vmName}</dd>
             <dt>Emulator</dt>
             <dd>{EMULATOR_LABELS[vm.emulatorType]}</dd>
-            <dt>Version</dt>
+            {replacing ? (
+              <>
+                <dt>Installed now</dt>
+                <dd>
+                  {chosen.local.sourceVersionId ? (
+                    <>
+                      {nameVersion(chosen.local.sourceVersionId)}{' '}
+                      <span className="vm-identity">{chosen.local.sourceVersionId}</span>
+                    </>
+                  ) : (
+                    'A copy whose version is not known'
+                  )}
+                </dd>
+              </>
+            ) : null}
+            <dt>{replacing ? 'Replaced by' : 'Version'}</dt>
             <dd>
-              {versionLabel(master)} <span className="vm-identity">{master.versionId}</span>
+              {versionLabel(version)} <span className="vm-identity">{version.versionId}</span>
             </dd>
             <dt>Archive size</dt>
-            <dd>{formatBytes(master.archiveSizeBytes)}</dd>
+            <dd>{formatBytes(version.archiveSizeBytes)}</dd>
             <dt>Repository</dt>
-            <dd>{master.repositoryName}</dd>
+            <dd>{version.repositoryName}</dd>
             <dt>Destination</dt>
             <dd className="vm-identity">
               {chosen?.destination ?? 'Decided by the agent, in its base path'}
@@ -387,9 +678,71 @@ export function RestoreDialog({
                 : 'Not known until the agent has read the archive'}
             </dd>
           </dl>
+          {replacing ? (
+            <div className="border-top pt-3 mb-3">
+              {mayHaveChanges ? (
+                <div className="alert alert-warning small" role="alert">
+                  {modified
+                    ? 'The current copy differs from its version: it holds changes that are in no snapshot.'
+                    : 'The current copy has not been verified since the agent last connected, so it may hold changes that are in no snapshot.'}{' '}
+                  Replacing it removes them for good.
+                  {onSnapshotFirst && chosen.local.sourceVersionId ? (
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-primary"
+                        onClick={() =>
+                          onSnapshotFirst({
+                            agentId: chosen.agentId,
+                            agentName: chosen.agentName,
+                            parentVersionId: chosen.local.sourceVersionId!,
+                            parentLabel: nameVersion(chosen.local.sourceVersionId),
+                          })
+                        }
+                      >
+                        Snapshot it first…
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="form-check mb-3">
+                <input
+                  id="restore-discard"
+                  className="form-check-input"
+                  type="checkbox"
+                  checked={discard}
+                  onChange={(event) => setDiscard(event.target.checked)}
+                  aria-describedby="restore-discard-help"
+                />
+                <label className="form-check-label" htmlFor="restore-discard">
+                  Discard any changes in the current copy
+                </label>
+                <div id="restore-discard-help" className="form-text mt-0">
+                  {modified
+                    ? 'Required: the current copy is known to differ.'
+                    : 'Without this, the agent first verifies the current copy against its version, and refuses if anything differs.'}
+                </div>
+              </div>
+              <label htmlFor="restore-confirm-name" className="form-label">
+                Type <span className="vm-identity">{vm.vmName}</span> to confirm
+              </label>
+              <input
+                id="restore-confirm-name"
+                className="form-control"
+                autoComplete="off"
+                value={typed}
+                onChange={(event) => setTyped(event.target.value)}
+              />
+            </div>
+          ) : null}
           <div className="d-flex flex-wrap gap-2">
-            <button type="submit" className="btn btn-primary" disabled={busy || !chosen?.eligible}>
-              {busy ? 'Starting…' : 'Restore'}
+            <button
+              type="submit"
+              className={`btn ${replacing ? 'btn-danger' : 'btn-primary'}`}
+              disabled={busy || !ready}
+            >
+              {busy ? 'Starting…' : replacing ? 'Replace' : 'Restore'}
             </button>
             <button
               type="button"
@@ -405,7 +758,10 @@ export function RestoreDialog({
   );
 }
 
-/** What exists in the repository, who holds a copy, and restoring one. Administrators only. */
+/**
+ * The agents' persistent copies of this VM, restoring or replacing one, and every restore. Administrators
+ * only.
+ */
 export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
   const { emulatorType, vmName } = vm;
   const identity = { emulatorType, vmName };
@@ -421,6 +777,8 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
   const operations = usePolledData(loadOperations, fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS);
   const options = usePolledData(loadOptions, fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [snapshotFirst, setSnapshotFirst] = useState<SnapshotRequest | null>(null);
+  const [snapshotOperation, setSnapshotOperation] = useState<RegistrationOperation | null>(null);
   const restoreButton = useRef<HTMLButtonElement>(null);
 
   const list = operations.data?.operations ?? [];
@@ -438,84 +796,106 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
 
   const master = options.data?.master ?? null;
   const agents = options.data?.agents ?? [];
-  const canRestore = agents.some((agent) => agent.eligible);
+  const canRestore = agents.some(canTake);
+  const nameVersion = versionNamer(options.data);
 
   return (
     <section className="card" aria-labelledby="vm-restore-heading">
       <div className="card-body">
-        <h2 id="vm-restore-heading" className="h6 card-title">
-          Master and local copies
-        </h2>
-        {options.error && !options.data ? (
-          <p className="small text-body-secondary">This information is not available right now.</p>
-        ) : null}
-        {master ? (
-          <dl className="small settings-facts">
-            <dt>Master version</dt>
-            <dd className="vm-identity">{master.versionId}</dd>
-            <dt>Created</dt>
-            <dd>{formatTime(master.createdAt)}</dd>
-            <dt>Repository</dt>
-            <dd>{master.repositoryName}</dd>
-            <dt>Archive size</dt>
-            <dd>{formatBytes(master.archiveSizeBytes)}</dd>
-            <dt>Archive SHA-256</dt>
-            <dd className="vm-identity">{master.archiveSha256}</dd>
-            {master.fileCount !== null ? (
-              <>
-                <dt>Files</dt>
-                <dd>{master.fileCount}</dd>
-              </>
-            ) : null}
-          </dl>
-        ) : options.data ? (
-          <p className="small">This VM has no master version to restore.</p>
-        ) : null}
-        {agents.length > 0 ? (
-          <>
-            <h3 className="h6 mt-3">Agents</h3>
-            <ul className="list-unstyled small mb-3">
-              {agents.map((agent) => (
-                <li key={agent.agentId} className="mb-1">
-                  <Link to={`/admin/agents/${agent.agentId}`}>{agent.agentName}</Link>:{' '}
-                  {localText(agent)}
-                  {agent.online ? '' : ', offline'}
-                </li>
-              ))}
-            </ul>
-          </>
-        ) : null}
-        {master ? (
-          <>
+        <div className="d-flex flex-wrap align-items-center gap-2 mb-2">
+          <h2 id="vm-restore-heading" className="h6 card-title mb-0 flex-grow-1">
+            Local copies and restores
+          </h2>
+          {master ? (
             <button
               ref={restoreButton}
               type="button"
-              className="btn btn-outline-primary"
+              className="btn btn-sm btn-outline-primary"
               disabled={!canRestore}
+              aria-haspopup="dialog"
               onClick={() => setDialogOpen(true)}
             >
               Restore…
             </button>
-            {!canRestore && options.data ? (
-              <p className="small text-body-secondary mt-2 mb-0">
-                No agent can restore this VM right now.{' '}
-                {agents
-                  .map(
-                    (agent) =>
-                      `${agent.agentName}: ${agent.ineligibleReason ? INELIGIBLE_TEXT[agent.ineligibleReason] : 'ready'}`,
-                  )
-                  .join('; ')}
-              </p>
-            ) : null}
-          </>
+          ) : null}
+        </div>
+        {options.error && !options.data ? (
+          <p className="small text-body-secondary">This information is not available right now.</p>
+        ) : null}
+        {options.data && !master ? (
+          <p className="small">This VM has no master version to restore.</p>
+        ) : null}
+        {snapshotOperation ? (
+          <SnapshotProgress
+            key={snapshotOperation.id}
+            operationId={snapshotOperation.id}
+            onFinished={refresh}
+          />
+        ) : null}
+        {master ? (
+          <p className="small text-body-secondary">
+            Each agent holds at most one persistent copy of this VM, the one Local mode runs. Any
+            version can be restored to it; on an agent that already holds one, restoring replaces
+            it, after a confirmation. The master is{' '}
+            <span className="vm-identity" title={master.versionId}>
+              {shortId(master.versionId)}
+            </span>
+            , {formatBytes(master.archiveSizeBytes)} in {master.repositoryName}.
+          </p>
+        ) : null}
+        {agents.length > 0 ? (
+          <div className="table-responsive mb-3">
+            <table className="table table-sm small align-middle mb-0">
+              <caption className="visually-hidden">Persistent copies of {vmName}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Agent</th>
+                  <th scope="col">Persistent copy</th>
+                  <th scope="col">Version</th>
+                  <th scope="col">Restore</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agents.map((agent) => {
+                  const reason = refusal(agent);
+                  return (
+                    <tr key={agent.agentId}>
+                      <td>
+                        <Link to={`/admin/agents/${agent.agentId}`}>{agent.agentName}</Link>
+                        {agent.online ? null : (
+                          <span className="badge text-bg-secondary ms-1">Offline</span>
+                        )}
+                      </td>
+                      <td>{localText(agent)}</td>
+                      <td>
+                        {agent.local.availability === 'present'
+                          ? nameVersion(agent.local.sourceVersionId)
+                          : '—'}
+                      </td>
+                      <td>
+                        {canTake(agent)
+                          ? replaces(agent)
+                            ? 'Can be replaced'
+                            : 'Can be restored'
+                          : reason
+                            ? `Not now: ${INELIGIBLE_TEXT[reason]}`
+                            : 'Not now'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+        {master && !canRestore && options.data ? (
+          <p className="small text-body-secondary">No agent can restore this VM right now.</p>
         ) : null}
         {list.length > 0 ? (
-          <div className="mt-3">
-            <h3 className="h6">Restores</h3>
-            {list.slice(0, 5).map((operation) => (
-              <RestoreCard key={operation.id} operation={operation} onChange={refresh} />
-            ))}
-          </div>
+          <>
+            <h3 className="h6 mt-3">Restore history</h3>
+            <RestoreHistory operations={list} nameVersion={nameVersion} onChange={refresh} />
+          </>
         ) : null}
       </div>
       {dialogOpen && options.data ? (
@@ -525,6 +905,26 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
           onClose={closeDialog}
           onStarted={() => {
             closeDialog();
+            refresh();
+          }}
+          onSnapshotFirst={(request) => {
+            setDialogOpen(false);
+            setSnapshotFirst(request);
+          }}
+        />
+      ) : null}
+      {snapshotFirst ? (
+        <CreateSnapshotDialog
+          vm={identity}
+          request={snapshotFirst}
+          onClose={() => {
+            setSnapshotFirst(null);
+            restoreButton.current?.focus();
+          }}
+          onStarted={(operation) => {
+            setSnapshotFirst(null);
+            setSnapshotOperation(operation);
+            restoreButton.current?.focus();
             refresh();
           }}
         />
@@ -547,9 +947,7 @@ export function AgentRestores({ agentId }: { agentId: string }) {
       <h2 id="restores-heading" className="h5">
         Restores
       </h2>
-      {list.slice(0, 10).map((operation) => (
-        <RestoreCard key={operation.id} operation={operation} showVm onChange={refresh} />
-      ))}
+      <RestoreHistory operations={list} showVm onChange={refresh} />
     </section>
   );
 }

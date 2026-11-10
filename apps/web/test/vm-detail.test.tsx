@@ -40,6 +40,11 @@ function agent(overrides: Partial<ExecutionAgentOption> = {}): ExecutionAgentOpt
     online: true,
     launch: { eligible: true, reason: null, problem: null },
     verify: { eligible: true, reason: null },
+    remote: {
+      remote_volatile: { eligible: false, reason: 'mode_not_supported', problem: null },
+      remote_snapshot: { eligible: false, reason: 'mode_not_supported', problem: null },
+    },
+    activeWorkspaceId: null,
     local: {
       present: true,
       contentStatus: 'unverified',
@@ -151,6 +156,7 @@ describe('the Launch action', () => {
         mode: 'local',
         state: 'requested',
         versionId: null,
+        workspaceId: null,
         pid: null,
         processStartedAt: null,
         requestedAt: PAST,

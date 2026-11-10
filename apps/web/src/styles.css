@@ -588,3 +588,60 @@ h2,
     padding-left: 0.5rem;
   }
 }
+
+/* Wide administration pages: the whole window, up to a comfortable reading limit. */
+main.container:has(> .page-wide) {
+  max-width: min(100%, 120rem);
+}
+
+.vm-admin-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.vm-admin-title {
+  flex: 1 1 20rem;
+  min-width: 0;
+}
+
+.vm-admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.vm-admin-top,
+.vm-admin-panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+}
+
+@media (min-width: 992px) {
+  .vm-admin-top {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+
+@media (max-width: 575.98px) {
+  .vm-admin-actions {
+    width: 100%;
+  }
+
+  .vm-admin-actions > * {
+    flex: 1 1 auto;
+  }
+}
+
+/* The run panel over a page is wider than a confirmation: it has two columns on large screens. */
+.run-dialog {
+  max-width: 72rem;
+}
+
+.restore-history td {
+  overflow-wrap: anywhere;
+}

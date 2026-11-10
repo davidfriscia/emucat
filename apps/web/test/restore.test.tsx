@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { RestoreOperation, RestoreOptionsResponse } from '@emucat/contracts';
 import { describe, expect, it } from 'vitest';
-import { adminVm, apiError, mockApi, renderAt, signedInAsAdmin } from './mock-api';
+import { adminVm, apiError, mockApi, renderAt, Reply, signedInAsAdmin } from './mock-api';
 
 const VM_PATH = '/admin/vms/qemu/Win98';
 const OPTIONS_PATH = `${VM_PATH}/restore-options`;
@@ -27,6 +27,7 @@ function agentOption(overrides: object = {}) {
       sourceVersionId: null,
       lastVerifiedAt: null,
     },
+    replace: { eligible: false, reason: 'no_local_copy' },
     cacheUsedBytes: 0,
     cacheMaxBytes: 1000,
     ...overrides,
@@ -65,6 +66,7 @@ function operation(overrides: Partial<RestoreOperation> = {}): RestoreOperation 
     vmName: 'Win98',
     versionId: VERSION_ID,
     workspaceId: null,
+    replacement: null,
     state: 'queued',
     archive: { sizeBytes: 2048, sha256: SHA },
     progress: { doneBytes: null, totalBytes: null },
@@ -113,6 +115,7 @@ describe('the VM’s page', () => {
             },
             eligible: false,
             ineligibleReason: 'local_copy_exists',
+            replace: { eligible: false, reason: 'vm_running' },
           }),
           agentOption({
             agentId: OTHER_AGENT_ID,
@@ -132,12 +135,21 @@ describe('the VM’s page', () => {
     });
     renderAt(VM_PATH);
     const section = (
-      await screen.findByRole('heading', { name: 'Master and local copies' })
+      await screen.findByRole('heading', { name: 'Local copies and restores' })
     ).closest('section') as HTMLElement;
-    await within(section).findByText(VERSION_ID);
-    expect(within(section).getByText('NAS')).toBeTruthy();
-    expect(within(section).getByText(/Verified copy, as of/)).toBeTruthy();
-    expect(within(section).getByText(/No longer present on this agent/)).toBeTruthy();
+    expect(await within(section).findByTitle(VERSION_ID)).toBeTruthy();
+    expect(within(section).getByText(/in NAS/)).toBeTruthy();
+    const table = within(
+      within(section).getByRole('table', { name: 'Persistent copies of Win98' }),
+    );
+    const [, studyPc, laptop] = table.getAllByRole('row');
+    expect(within(studyPc as HTMLElement).getByText(/Verified copy, as of/)).toBeTruthy();
+    expect(within(studyPc as HTMLElement).getByText('Master')).toBeTruthy();
+    expect(
+      within(studyPc as HTMLElement).getByText('Not now: the VM is running there'),
+    ).toBeTruthy();
+    expect(within(laptop as HTMLElement).getByText(/No longer present on this agent/)).toBeTruthy();
+    expect(within(laptop as HTMLElement).getByText('Offline')).toBeTruthy();
     expect(
       (within(section).getByRole('button', { name: 'Restore…' }) as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -162,7 +174,7 @@ describe('the VM’s page', () => {
       }),
     });
     renderAt(VM_PATH);
-    expect(await screen.findByText(/differs from the master/)).toBeTruthy();
+    expect(await screen.findByText(/differs from its version/)).toBeTruthy();
   });
 
   it('has no restore for a VM with no master', async () => {
@@ -283,6 +295,137 @@ describe('the dialog', () => {
   });
 });
 
+describe('replacing a local copy', () => {
+  const SNAPSHOT_ID = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6010';
+  const holding = (contentStatus: 'verified' | 'modified' | 'unverified') =>
+    options({
+      versions: [
+        {
+          ...(options().master as NonNullable<RestoreOptionsResponse['master']>),
+          kind: 'master',
+          parentVersionId: null,
+          snapshotName: null,
+        },
+        {
+          ...(options().master as NonNullable<RestoreOptionsResponse['master']>),
+          versionId: SNAPSHOT_ID,
+          kind: 'snapshot',
+          parentVersionId: VERSION_ID,
+          snapshotName: 'Win98_after_setup',
+        },
+      ],
+      agents: [
+        agentOption({
+          eligible: false,
+          ineligibleReason: 'local_copy_exists',
+          replace: { eligible: true, reason: null },
+          local: {
+            availability: 'present',
+            contentStatus,
+            sourceVersionId: VERSION_ID,
+            lastVerifiedAt: contentStatus === 'verified' ? PAST : null,
+          },
+        }),
+      ] as RestoreOptionsResponse['agents'],
+    });
+
+  const openReplacement = async () => {
+    renderAt(VM_PATH);
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore…' }));
+    return within(await screen.findByRole('dialog', { name: 'Replace the local copy of Win98' }));
+  };
+
+  it('shows what is installed and what replaces it, and needs the name typed', async () => {
+    const api = base({
+      [`GET ${OPTIONS_PATH}`]: holding('verified'),
+      'POST /admin/restores': operation({
+        replacement: { replacedVersionId: VERSION_ID, discardLocalChanges: false },
+      }),
+    });
+    const dialog = await openReplacement();
+    fireEvent.change(dialog.getByLabelText('Version'), { target: { value: SNAPSHOT_ID } });
+    expect(dialog.getByText('Installed now')).toBeTruthy();
+    expect(dialog.getByText('Replaced by')).toBeTruthy();
+    expect(dialog.getByText(/the current copy is left as it is/)).toBeTruthy();
+    // A verified copy needs no warning, and no discard.
+    expect(dialog.queryByRole('alert')).toBeNull();
+    const replace = dialog.getByRole('button', { name: 'Replace' }) as HTMLButtonElement;
+    expect(replace.disabled).toBe(true);
+    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'Win95' } });
+    expect(replace.disabled).toBe(true);
+    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'win98' } });
+    expect(replace.disabled).toBe(false);
+    fireEvent.click(replace);
+    await waitFor(() => expect(api.callsTo('POST', '/admin/restores')).toHaveLength(1));
+    expect(api.callsTo('POST', '/admin/restores')[0]?.body).toEqual({
+      agentId: AGENT_ID,
+      emulatorType: 'qemu',
+      vmName: 'Win98',
+      versionId: SNAPSHOT_ID,
+      replace: {
+        expectedVersionId: VERSION_ID,
+        discardLocalChanges: false,
+        confirmVmName: 'win98',
+      },
+    });
+  });
+
+  it('requires discarding the changes of a modified copy, and offers a snapshot first', async () => {
+    const api = base({
+      [`GET ${OPTIONS_PATH}`]: holding('modified'),
+      [`POST ${VM_PATH}/snapshots`]: new Reply(202, {}),
+    });
+    const dialog = await openReplacement();
+    expect(dialog.getByRole('alert').textContent).toMatch(/removes them for good/);
+    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'Win98' } });
+    const replace = dialog.getByRole('button', { name: 'Replace' }) as HTMLButtonElement;
+    expect(replace.disabled).toBe(true);
+    fireEvent.click(dialog.getByLabelText('Discard any changes in the current copy'));
+    expect(replace.disabled).toBe(false);
+
+    fireEvent.click(dialog.getByRole('button', { name: 'Snapshot it first…' }));
+    const snapshot = within(
+      await screen.findByRole('dialog', { name: 'Create a snapshot from Study PC' }),
+    );
+    expect(snapshot.getByText('Master')).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: 'Replace the local copy of Win98' })).toBeNull();
+    fireEvent.click(snapshot.getByRole('button', { name: 'Create snapshot' }));
+    await waitFor(() => expect(api.callsTo('POST', `${VM_PATH}/snapshots`)).toHaveLength(1));
+    expect(api.callsTo('POST', `${VM_PATH}/snapshots`)[0]?.body).toMatchObject({
+      agentId: AGENT_ID,
+      parentVersionId: VERSION_ID,
+    });
+    expect(api.callsTo('POST', '/admin/restores')).toHaveLength(0);
+  });
+
+  it('warns that an unverified copy may hold changes, without requiring the discard', async () => {
+    base({ [`GET ${OPTIONS_PATH}`]: holding('unverified') });
+    const dialog = await openReplacement();
+    expect(dialog.getByRole('alert').textContent).toMatch(/may hold changes/);
+    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'Win98' } });
+    expect((dialog.getByRole('button', { name: 'Replace' }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    expect(dialog.getByText(/verifies the current copy against its version/)).toBeTruthy();
+  });
+
+  it('says why a copy cannot be replaced now', async () => {
+    const refused = holding('verified');
+    refused.agents = [
+      {
+        ...(refused.agents[0] as RestoreOptionsResponse['agents'][number]),
+        replace: { eligible: false, reason: 'vm_running' },
+      },
+    ];
+    base({ [`GET ${OPTIONS_PATH}`]: refused });
+    renderAt(VM_PATH);
+    expect(await screen.findByText('Not now: the VM is running there')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Restore…' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+});
+
 describe('an operation', () => {
   const show = async (shown: Partial<RestoreOperation>) => {
     const api = base({ 'GET /admin/restores': { operations: [operation(shown)] } });
@@ -328,8 +471,19 @@ describe('an operation', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
   });
 
+  /** A finished restore is a row of the history, with its details in a dialog. */
+  const details = async (shown: Partial<RestoreOperation>) => {
+    base({ 'GET /admin/restores': { operations: [operation(shown)] } });
+    renderAt(VM_PATH);
+    const button = await screen.findByRole('button', {
+      name: /Details of the restore on Study PC/,
+    });
+    fireEvent.click(button);
+    return { button, dialog: await screen.findByRole('dialog', { name: 'Restore details' }) };
+  };
+
   it('reports a finished restore in full, and that nothing was started', async () => {
-    await show({
+    const { button, dialog } = await details({
       state: 'succeeded',
       finishedAt: PAST,
       localDirectory: 'C:\\vms\\qemu\\Win98',
@@ -342,28 +496,66 @@ describe('an operation', () => {
       },
       cache: { hit: true, downloadedBytes: 0, archiveCached: true, totalBytes: 2048 },
     });
-    const card = screen.getByRole('article', { name: 'Restore on Study PC' });
-    const view = within(card);
+    // Finished restores are not cards any more: they are rows.
+    expect(screen.queryByRole('article', { name: 'Restore on Study PC' })).toBeNull();
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    const view = within(dialog);
     expect(view.getByText('Restored')).toBeTruthy();
     expect(view.getByText('C:\\vms\\qemu\\Win98')).toBeTruthy();
-    expect(view.getByText(VERSION_ID)).toBeTruthy();
+    expect(view.getAllByText(VERSION_ID).length).toBeGreaterThan(0);
     expect(view.getByText(/3 files were verified by the agent/)).toBeTruthy();
     expect(view.getByText(/Nothing was downloaded/)).toBeTruthy();
-    expect(view.getByText('2.0 KiB')).toBeTruthy();
     expect(view.getByText(/The VM was not started/)).toBeTruthy();
     expect(view.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    // Focus goes in, and comes back to the row it was opened from.
+    expect(document.activeElement).toBe(view.getByRole('button', { name: 'Close' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.activeElement).toBe(button);
   });
 
   it('shows a failure with what to do about it', async () => {
-    await show({
+    const { dialog } = await details({
       state: 'failed',
       finishedAt: PAST,
       error: { code: 'restore_destination_exists', message: 'Win98 already exists' },
       recovery: 'Move it away yourself if you want to restore here.',
     });
-    expect(screen.getByRole('alert').textContent).toContain('restore_destination_exists');
-    expect(screen.getByRole('alert').textContent).toContain('Win98 already exists');
-    expect(screen.getByRole('alert').textContent).toContain('Move it away yourself');
+    const alert = within(dialog).getByRole('alert');
+    expect(alert.textContent).toContain('restore_destination_exists');
+    expect(alert.textContent).toContain('Win98 already exists');
+    expect(alert.textContent).toContain('Move it away yourself');
+  });
+
+  it('lists the history as a table, and marks replacements', async () => {
+    base({
+      'GET /admin/restores': {
+        operations: [
+          operation({
+            state: 'succeeded',
+            finishedAt: PAST,
+            replacement: { replacedVersionId: VERSION_ID, discardLocalChanges: true },
+          }),
+          operation({
+            id: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6006',
+            state: 'cancelled',
+            finishedAt: PAST,
+          }),
+        ],
+      },
+    });
+    renderAt(VM_PATH);
+    const table = await screen.findByRole('table', { name: 'Restore history, newest first' });
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0] as HTMLElement).getByText('Replacement')).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).getByText('Master')).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText('Cancelled')).toBeTruthy();
+    fireEvent.click(within(rows[0] as HTMLElement).getByRole('button', { name: /Details/ }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Restore details' }));
+    expect(dialog.getByText(/its local changes discarded on request/)).toBeTruthy();
+    // Identities and hashes only: nothing about how the repository is reached.
+    expect(dialog.queryByText(/password|sftp:|host/i)).toBeNull();
   });
 
   it('says when the agent is away, without claiming anything failed', async () => {
@@ -401,7 +593,8 @@ describe('the agent’s page', () => {
     renderAt(`/admin/agents/${AGENT_ID}`);
     const heading = await screen.findByRole('heading', { name: 'Restores' });
     const section = heading.closest('section') as HTMLElement;
-    expect(within(section).getByText('Win98')).toBeTruthy();
+    expect(within(section).getAllByText('Win98').length).toBeGreaterThan(0);
+    expect(within(section).getByRole('table')).toBeTruthy();
     expect(within(section).getAllByText('Extracting and verifying files').length).toBeGreaterThan(
       0,
     );

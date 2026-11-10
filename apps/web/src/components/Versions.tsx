@@ -1,21 +1,16 @@
 import {
   buildVersionTree,
-  isRegistrationTerminal,
-  registrationRecovery,
+  type ExecutionMode,
   type RegistrationOperation,
+  type RemoteSession,
   type RestoreOptionsResponse,
   type VersionNode,
   type VersionTreeEntry,
   type VmIdentity,
-  type VmWorkspace,
-  type WorkspaceState,
 } from '@emucat/contracts';
-import { useCallback, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import {
-  createSnapshot,
-  createWorkspace,
   discardWorkspace,
-  fetchRegistration,
   fetchRestoreOptions,
   fetchVersionTree,
   fetchWorkspaces,
@@ -24,8 +19,16 @@ import {
 } from '../api';
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
-import { useModalDialog } from './Gallery';
-import { RestoreDialog, versionLabel } from './Restore';
+import { ConfirmDialog } from './Dialogs';
+import { VmLaunchDialog, WORKSPACE_STATE_TEXT, type RunPreselection } from './Execution';
+import { RestoreDialog } from './Restore';
+import {
+  CreateSnapshotDialog,
+  shortId,
+  SnapshotProgress,
+  versionLabel,
+  type SnapshotRequest,
+} from './Snapshots';
 import { FormError } from './States';
 
 /**
@@ -36,31 +39,6 @@ import { FormError } from './States';
 
 const ACTIVE_POLL_MS = 1_500;
 const IDLE_POLL_MS = 10_000;
-
-const WORKSPACE_STATE_TEXT: Record<WorkspaceState, string> = {
-  preparing: 'Preparing',
-  ready: 'Ready',
-  discarding: 'Being discarded',
-  discarded: 'Discarded',
-  failed: 'Failed',
-  lost: 'Lost',
-};
-
-const SNAPSHOT_STATE_TEXT: Partial<Record<RegistrationOperation['state'], string>> = {
-  queued: 'Waiting for the agent',
-  validating: 'Checking the local copy',
-  archiving: 'Archiving',
-  uploading: 'Uploading to the repository',
-  verifying: 'Verifying the uploaded archive',
-  committing: 'Recording the snapshot',
-  cleaning_local: 'Finishing',
-  succeeded: 'Snapshot created',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-  partial_success: 'Created, with a problem',
-};
-
-const shortId = (id: string) => id.slice(0, 8);
 
 function newRequestId(): string {
   return crypto.randomUUID();
@@ -75,7 +53,7 @@ function verificationText(node: VersionNode): string {
 }
 
 function holderText(holder: VersionNode['holders'][number]): string {
-  if (holder.kind === 'workspace') return `Working copy on ${holder.agentName}`;
+  if (holder.kind === 'workspace') return `Temporary or working copy on ${holder.agentName}`;
   const status =
     holder.contentStatus === 'verified'
       ? 'verified'
@@ -92,14 +70,14 @@ function VersionItem({
   restoreOptions,
   onRestore,
   onSnapshot,
-  onRemote,
+  onRun,
 }: {
   entry: VersionTreeEntry;
   vm: VmIdentity;
   restoreOptions: RestoreOptionsResponse | null;
   onRestore: (versionId: string) => void;
   onSnapshot: (node: VersionNode, agentId: string, agentName: string) => void;
-  onRemote: (node: VersionNode) => void;
+  onRun: (node: VersionNode, mode: ExecutionMode) => void;
 }) {
   const { node, depth, children } = entry;
   const [expanded, setExpanded] = useState(true);
@@ -192,9 +170,19 @@ function VersionItem({
               type="button"
               className="btn btn-sm btn-outline-primary"
               disabled={!node.available}
-              onClick={() => onRemote(node)}
+              aria-label={`Run ${versionLabel(node)} in Remote Volatile`}
+              onClick={() => onRun(node, 'remote_volatile')}
             >
-              Launch in Remote Snapshot…
+              Run volatile…
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-primary"
+              disabled={!node.available}
+              aria-label={`Run ${versionLabel(node)} in Remote Snapshot`}
+              onClick={() => onRun(node, 'remote_snapshot')}
+            >
+              Run and snapshot…
             </button>
             {localHolders.map((holder) => (
               <button
@@ -219,211 +207,12 @@ function VersionItem({
               restoreOptions={restoreOptions}
               onRestore={onRestore}
               onSnapshot={onSnapshot}
-              onRemote={onRemote}
+              onRun={onRun}
             />
           ))}
         </ul>
       ) : null}
     </li>
-  );
-}
-
-/** A small confirmation, so that every consequential action is a deliberate one. */
-function ConfirmDialog({
-  title,
-  children,
-  action,
-  danger = false,
-  confirmName,
-  onConfirm,
-  onClose,
-}: {
-  title: string;
-  children: React.ReactNode;
-  action: string;
-  danger?: boolean;
-  /** When set, this name has to be typed first. */
-  confirmName?: string | undefined;
-  onConfirm: (typed: string | undefined) => Promise<void>;
-  onClose: () => void;
-}) {
-  const dialog = useRef<HTMLDivElement>(null);
-  const first = useRef<HTMLInputElement & HTMLButtonElement>(null);
-  const [typed, setTyped] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  useModalDialog(dialog, first, onClose);
-  const matches =
-    confirmName === undefined || typed.trim().toLowerCase() === confirmName.toLowerCase();
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!matches) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await onConfirm(confirmName === undefined ? undefined : typed.trim());
-    } catch (failure) {
-      setError(failure);
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="modal-backdrop-custom">
-      <div
-        ref={dialog}
-        className="card restore-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="version-dialog-title"
-      >
-        <form className="card-body" onSubmit={(event) => void submit(event)}>
-          <h2 id="version-dialog-title" className="h5 card-title">
-            {title}
-          </h2>
-          <div className="small mb-3">{children}</div>
-          <FormError error={error} />
-          {confirmName !== undefined ? (
-            <>
-              <label htmlFor="version-confirm-name" className="form-label">
-                Type <span className="vm-identity">{confirmName}</span> to confirm
-              </label>
-              <input
-                id="version-confirm-name"
-                ref={first}
-                className="form-control mb-3"
-                autoComplete="off"
-                value={typed}
-                onChange={(event) => setTyped(event.target.value)}
-              />
-            </>
-          ) : null}
-          <div className="d-flex flex-wrap gap-2">
-            <button
-              type="submit"
-              ref={confirmName === undefined ? first : undefined}
-              className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`}
-              disabled={busy || !matches}
-            >
-              {busy ? 'Working…' : action}
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline-secondary theme-button"
-              onClick={onClose}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-/** Chooses the agent that will run a working copy of a version. */
-function RemoteSnapshotDialog({
-  vm,
-  node,
-  options,
-  onClose,
-  onStarted,
-}: {
-  vm: VmIdentity;
-  node: VersionNode;
-  options: RestoreOptionsResponse | null;
-  onClose: () => void;
-  onStarted: () => void;
-}) {
-  const agents = (options?.agents ?? []).filter((agent) => agent.online);
-  const [agentId, setAgentId] = useState(agents[0]?.agentId ?? '');
-  // One request per dialog: a retry after a lost answer finds the working copy it already prepared.
-  const [requestId] = useState(newRequestId);
-  return (
-    <ConfirmDialog
-      title={`Launch ${versionLabel(node)} in Remote Snapshot`}
-      action="Prepare and launch"
-      onClose={onClose}
-      onConfirm={async () => {
-        await createWorkspace(vm, { agentId, versionId: node.id, requestId, launch: true });
-        onStarted();
-      }}
-    >
-      <p>
-        The agent restores this version into a separate working copy, verified like any restore, and
-        launches it there. The persistent local copy is not touched, and the version itself never
-        changes. When you stop the VM, nothing is published: you decide afterwards whether to
-        preserve the changes as a new snapshot of this version, or to discard them.
-      </p>
-      <label htmlFor="remote-agent" className="form-label">
-        Agent
-      </label>
-      <select
-        id="remote-agent"
-        className="form-select"
-        value={agentId}
-        onChange={(event) => setAgentId(event.target.value)}
-      >
-        {agents.length === 0 ? <option value="">No agent is online</option> : null}
-        {agents.map((agent) => (
-          <option key={agent.agentId} value={agent.agentId}>
-            {agent.agentName}
-          </option>
-        ))}
-      </select>
-    </ConfirmDialog>
-  );
-}
-
-/** The snapshot being created, followed until it ends. */
-function SnapshotProgress({
-  operationId,
-  onFinished,
-}: {
-  operationId: string;
-  onFinished: () => void;
-}) {
-  const load = useCallback(
-    (signal: AbortSignal) => fetchRegistration(operationId, signal),
-    [operationId],
-  );
-  const [done, setDone] = useState(false);
-  const { data } = usePolledData(load, done ? null : ACTIVE_POLL_MS);
-  if (data && isRegistrationTerminal(data.state) && !done) {
-    setDone(true);
-    onFinished();
-  }
-  if (!data) return null;
-  const percent =
-    data.progress.doneBytes !== null && data.progress.totalBytes
-      ? Math.round((100 * data.progress.doneBytes) / data.progress.totalBytes)
-      : null;
-  const failed = data.state === 'failed' || data.state === 'cancelled';
-  return (
-    <div
-      className={`alert ${failed ? 'alert-danger' : data.state === 'succeeded' ? 'alert-success' : 'alert-info'} small`}
-      role="status"
-      aria-live="polite"
-    >
-      <strong>{data.snapshotName ?? 'Snapshot'}</strong>:{' '}
-      {SNAPSHOT_STATE_TEXT[data.state] ?? data.state}
-      {percent !== null && !isRegistrationTerminal(data.state) ? ` (${percent}%)` : null}
-      {data.error ? (
-        <div className="mt-1">
-          {data.error.message}
-          {registrationRecovery(data.error.code) ? (
-            <div className="text-body-secondary">{registrationRecovery(data.error.code)}</div>
-          ) : null}
-        </div>
-      ) : null}
-      {data.state === 'succeeded' ? (
-        <div className="mt-1">
-          A new immutable version, <span className="vm-identity">{shortId(data.versionId)}</span>,
-          is a child of <span className="vm-identity">{shortId(data.parentVersionId ?? '')}</span>.
-        </div>
-      ) : null}
-    </div>
   );
 }
 
@@ -433,7 +222,7 @@ function WorkspaceCard({
   onSnapshotStarted,
   onChange,
 }: {
-  workspace: VmWorkspace;
+  workspace: RemoteSession;
   vmName: string;
   onSnapshotStarted: (operation: RegistrationOperation) => void;
   onChange: () => void;
@@ -565,7 +354,17 @@ function WorkspaceCard({
   );
 }
 
-export function VmVersionHistory({ vm }: { vm: VmIdentity }) {
+/**
+ * A VM's version history. Running a version is done in the run panel: these buttons only choose the
+ * version and mode there (`onRun`), or, where there is no run panel, open it over the page.
+ */
+export function VmVersionHistory({
+  vm,
+  onRun,
+}: {
+  vm: VmIdentity;
+  onRun?: ((preselect: Omit<RunPreselection, 'token'>) => void) | undefined;
+}) {
   const { emulatorType, vmName } = vm;
   const identity = { emulatorType, vmName };
   const loadTree = useCallback(
@@ -586,19 +385,16 @@ export function VmVersionHistory({ vm }: { vm: VmIdentity }) {
   const workspaces = usePolledData(loadWorkspaces, interval);
   const options = usePolledData(loadOptions, interval);
   const [restoring, setRestoring] = useState<string | null>(null);
-  const [remote, setRemote] = useState<VersionNode | null>(null);
-  const [snapshotting, setSnapshotting] = useState<{
-    node: VersionNode;
-    agentId: string;
-    agentName: string;
-    requestId: string;
-  } | null>(null);
+  const [running, setRunning] = useState<RunPreselection | null>(null);
+  const [snapshotting, setSnapshotting] = useState<SnapshotRequest | null>(null);
   const [snapshotOperation, setSnapshotOperation] = useState<string | null>(null);
+  const runToken = useRef(0);
 
-  const workspaceList = workspaces.data?.workspaces ?? [];
+  // Only Milestone 7's manual working copies are managed here. Remote sessions belong to the run panel.
+  const manual = (workspaces.data?.workspaces ?? []).filter((item) => item.purpose === 'manual');
   const busy =
     snapshotOperation !== null ||
-    workspaceList.some((item) => item.state === 'preparing' || item.state === 'discarding');
+    manual.some((item) => item.state === 'preparing' || item.state === 'discarding');
   if (busy !== fastPoll) setFastPoll(busy);
 
   const refresh = () => {
@@ -615,12 +411,19 @@ export function VmVersionHistory({ vm }: { vm: VmIdentity }) {
   if (!tree.data) return <p className="small text-body-secondary">Loading the version history…</p>;
 
   const built = buildVersionTree(tree.data.versions);
-  const activeWorkspaces = workspaceList.filter((item) =>
-    ['preparing', 'ready', 'discarding'].includes(item.state),
+  const activeManual = manual.filter((item) =>
+    ['preparing', 'ready', 'running', 'discarding'].includes(item.state),
   );
-  const recentEnded = workspaceList
-    .filter((item) => ['failed', 'lost'].includes(item.state))
-    .slice(0, 3);
+  const recentEnded = manual.filter((item) => ['failed', 'lost'].includes(item.state)).slice(0, 3);
+
+  const run = (node: VersionNode, mode: ExecutionMode) => {
+    if (onRun) {
+      onRun({ versionId: node.id, mode });
+      return;
+    }
+    runToken.current += 1;
+    setRunning({ versionId: node.id, mode, token: runToken.current });
+  };
 
   return (
     <div className="version-history">
@@ -643,7 +446,7 @@ export function VmVersionHistory({ vm }: { vm: VmIdentity }) {
           <p className="small text-body-secondary">
             {built.count === 1 ? 'One version' : `${built.count} versions`}. Every version is a
             full, immutable archive; a snapshot records the version it was made from, so history can
-            branch.
+            branch. Running a version in a remote mode never changes it, nor any local copy.
           </p>
           <ul role="tree" aria-label={`Versions of ${vmName}`} className="version-tree">
             <VersionItem
@@ -652,32 +455,39 @@ export function VmVersionHistory({ vm }: { vm: VmIdentity }) {
               restoreOptions={options.data}
               onRestore={setRestoring}
               onSnapshot={(node, agentId, agentName) =>
-                setSnapshotting({ node, agentId, agentName, requestId: newRequestId() })
+                setSnapshotting({
+                  agentId,
+                  agentName,
+                  parentVersionId: node.id,
+                  parentLabel: versionLabel(node),
+                })
               }
-              onRemote={setRemote}
+              onRun={run}
             />
           </ul>
         </>
       )}
 
-      <h3 className="h6 mt-4">Remote Snapshot working copies</h3>
-      {activeWorkspaces.length === 0 && recentEnded.length === 0 ? (
-        <p className="small text-body-secondary">
-          None. Launch a version in Remote Snapshot to run it without touching any local copy.
-        </p>
-      ) : (
-        <ul className="list-unstyled">
-          {[...activeWorkspaces, ...recentEnded].map((workspace) => (
-            <WorkspaceCard
-              key={workspace.id}
-              workspace={workspace}
-              vmName={vmName}
-              onSnapshotStarted={(operation) => setSnapshotOperation(operation.id)}
-              onChange={refresh}
-            />
-          ))}
-        </ul>
-      )}
+      {activeManual.length > 0 || recentEnded.length > 0 ? (
+        <>
+          <h3 className="h6 mt-4">Manual working copies</h3>
+          <p className="small text-body-secondary">
+            Working copies prepared by hand before remote sessions finished on their own. They are
+            kept exactly as they were, and only change when you preserve or discard them here.
+          </p>
+          <ul className="list-unstyled">
+            {[...activeManual, ...recentEnded].map((workspace) => (
+              <WorkspaceCard
+                key={workspace.id}
+                workspace={workspace}
+                vmName={vmName}
+                onSnapshotStarted={(operation) => setSnapshotOperation(operation.id)}
+                onChange={refresh}
+              />
+            ))}
+          </ul>
+        </>
+      ) : null}
 
       {restoring && options.data ? (
         <RestoreDialog
@@ -689,58 +499,51 @@ export function VmVersionHistory({ vm }: { vm: VmIdentity }) {
             setRestoring(null);
             refresh();
           }}
-        />
-      ) : null}
-      {remote ? (
-        <RemoteSnapshotDialog
-          vm={identity}
-          node={remote}
-          options={options.data}
-          onClose={() => setRemote(null)}
-          onStarted={() => {
-            setRemote(null);
-            refresh();
+          onSnapshotFirst={(request) => {
+            setRestoring(null);
+            setSnapshotting(request);
           }}
         />
       ) : null}
+      {running ? (
+        <VmLaunchDialog
+          vm={identity}
+          title={vmName}
+          preselect={running}
+          onClose={() => setRunning(null)}
+        />
+      ) : null}
       {snapshotting ? (
-        <ConfirmDialog
-          title={`Create a snapshot from ${snapshotting.agentName}`}
-          action="Create snapshot"
+        <CreateSnapshotDialog
+          vm={identity}
+          request={snapshotting}
           onClose={() => setSnapshotting(null)}
-          onConfirm={async () => {
-            const operation = await createSnapshot(identity, {
-              agentId: snapshotting.agentId,
-              parentVersionId: snapshotting.node.id,
-              requestId: snapshotting.requestId,
-            });
+          onStarted={(operation: RegistrationOperation) => {
             setSnapshotting(null);
             setSnapshotOperation(operation.id);
             refresh();
           }}
-        >
-          <p>
-            The agent archives its local copy of {vmName} as a new, immutable snapshot whose parent
-            is <strong>{versionLabel(snapshotting.node)}</strong>, the version that copy came from.
-            The archive is uploaded and verified in the repository before anything is recorded, and
-            no existing version is changed. The local copy is read, never removed.
-          </p>
-          <p className="mb-0">The VM must not be running on that agent.</p>
-        </ConfirmDialog>
+        />
       ) : null}
     </div>
   );
 }
 
 /** The version history as a section of the VM's administration page. */
-export function VmVersionsSection({ vm }: { vm: VmIdentity }) {
+export function VmVersionsSection({
+  vm,
+  onRun,
+}: {
+  vm: VmIdentity;
+  onRun?: ((preselect: Omit<RunPreselection, 'token'>) => void) | undefined;
+}) {
   return (
     <section className="card" aria-labelledby="vm-versions-heading">
       <div className="card-body">
         <h2 id="vm-versions-heading" className="h6 card-title">
           Version history
         </h2>
-        <VmVersionHistory vm={vm} />
+        <VmVersionHistory vm={vm} onRun={onRun} />
       </div>
     </section>
   );

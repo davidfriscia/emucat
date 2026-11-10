@@ -130,6 +130,24 @@ describe('catalog management', () => {
 });
 
 describe('VM editor', () => {
+  it('uses the full width: actions in the header, then metadata and details, then the panels', async () => {
+    mockApi({ ...signedInAsAdmin, [`GET ${VM_PATH}`]: adminVm() });
+    renderAt(VM_PATH);
+    await screen.findByRole('heading', { level: 1, name: 'Windows 98 SE' });
+    expect(document.querySelector('main > .page-wide')).toBeTruthy();
+    const actions = within(screen.getByRole('group', { name: 'VM actions' }));
+    expect(actions.getByRole('button', { name: /Make (public|private)/ })).toBeTruthy();
+    expect(actions.getByRole('link', { name: 'Manage media' })).toBeTruthy();
+    const headings = screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent);
+    expect(headings.slice(0, 5)).toEqual([
+      'Metadata',
+      'Details',
+      'Run and verify',
+      'Local copies and restores',
+      'Version history',
+    ]);
+  });
+
   it('shows the identity as read-only text', async () => {
     mockApi({ ...signedInAsAdmin, [`GET ${VM_PATH}`]: adminVm() });
     renderAt(VM_PATH);
@@ -210,7 +228,7 @@ describe('VM editor', () => {
     renderAt(VM_PATH);
     fireEvent.click(await screen.findByRole('button', { name: 'Make public' }));
     expect(await screen.findByRole('button', { name: 'Make private' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'View the public page' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'View public page' })).toBeTruthy();
     expect(api.callsTo('PUT', `${VM_PATH}/visibility`)[0]?.body).toEqual({ visibility: 'public' });
   });
 

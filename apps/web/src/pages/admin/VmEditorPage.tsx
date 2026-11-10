@@ -8,7 +8,7 @@ import {
   type AdminVmDetail,
   type VmIdentity,
 } from '@emucat/contracts';
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router';
 import {
   ApiRequestError,
@@ -18,7 +18,7 @@ import {
   updateVmVisibility,
 } from '../../api';
 import { EmulatorBadge, VisibilityBadge } from '../../components/Catalog';
-import { VmExecutionSection } from '../../components/Execution';
+import { VmExecutionSection, type RunPreselection } from '../../components/Execution';
 import { VmRestoreSection } from '../../components/Restore';
 import { VmVersionsSection } from '../../components/Versions';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
@@ -126,22 +126,22 @@ function VisibilityControl({
   };
 
   return (
-    <>
-      <FormError error={error} />
-      <p className="small">
-        {vm.visibility === 'public'
-          ? 'Anyone can see this VM and all of its screenshots in the public catalog.'
-          : 'Only signed-in administrators can see this VM and its screenshots. Making it public publishes all of its screenshots.'}
-      </p>
+    <div className="d-flex flex-column align-items-stretch">
       <button
         type="button"
         className={`btn ${target === 'public' ? 'btn-primary' : 'btn-outline-danger'}`}
         disabled={submitting}
+        aria-describedby="vm-visibility-text"
         onClick={() => void change()}
       >
         {target === 'public' ? 'Make public' : 'Make private'}
       </button>
-    </>
+      {error ? (
+        <div className="mt-2">
+          <FormError error={error} />
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -178,6 +178,9 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
     [emulatorType, vmName],
   );
   const media = useAsync(loadMedia);
+  // The version history chooses a version and mode in the run panel, which stays the one place to run.
+  const [preselect, setPreselect] = useState<RunPreselection | null>(null);
+  const runToken = useRef(0);
 
   // A change to a screenshot can change the VM's cover, and the server is what says how.
   const mediaChanged = (next: AdminMediaListResponse) => {
@@ -211,75 +214,90 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
 
   const vm = state.data;
   return (
-    <>
+    <div className="page-wide vm-admin">
       <title>{`${vmTitle(vm)} · Manage · EmuCat`}</title>
       <nav aria-label="Breadcrumb" className="small mb-3">
         <Link to="/admin/catalog">Manage the catalog</Link>
       </nav>
-      <div className="d-flex flex-wrap align-items-center gap-2 mb-3">
-        <h1 className="h3 mb-0">{vmTitle(vm)}</h1>
-        <EmulatorBadge emulatorType={vm.emulatorType} />
-        <VisibilityBadge visibility={vm.visibility} />
-      </div>
-      <div className="settings-grid">
-        <section className="card">
+      <header className="vm-admin-header mb-4">
+        <div className="vm-admin-title">
+          <div className="d-flex flex-wrap align-items-center gap-2">
+            <h1 className="h3 mb-0">{vmTitle(vm)}</h1>
+            <EmulatorBadge emulatorType={vm.emulatorType} />
+            <VisibilityBadge visibility={vm.visibility} />
+          </div>
+          <p className="small text-body-secondary mb-0 mt-1">
+            <span className="vm-identity">{vm.vmName}</span> ·{' '}
+            {vm.versionCount === 1 ? '1 version' : `${vm.versionCount} versions`} ·{' '}
+            {vm.mediaCount === 1 ? '1 image' : `${vm.mediaCount} images`}
+          </p>
+        </div>
+        <div className="vm-admin-actions" role="group" aria-label="VM actions">
+          <VisibilityControl vm={vm} onChanged={visibilityChanged} />
+          <Link to="media" relative="path" className="btn btn-outline-primary">
+            Manage media
+          </Link>
+          {vm.visibility === 'public' ? (
+            <Link to={publicVmRoute(vm)} className="btn btn-outline-secondary theme-button">
+              View public page
+            </Link>
+          ) : null}
+        </div>
+      </header>
+      <div className="vm-admin-top mb-4">
+        <section className="card" aria-labelledby="vm-metadata-heading">
           <div className="card-body">
-            <h2 className="h6 card-title">Metadata</h2>
+            <h2 id="vm-metadata-heading" className="h6 card-title">
+              Metadata
+            </h2>
             <MetadataForm vm={vm} onSaved={setData} />
           </div>
         </section>
-        <div className="d-flex flex-column gap-3">
-          <section className="card">
-            <div className="card-body">
-              <h2 className="h6 card-title">Visibility</h2>
-              <VisibilityControl vm={vm} onChanged={visibilityChanged} />
-              <PublicCoverNotice vm={vm} />
-              {vm.visibility === 'public' ? (
-                <p className="small mt-2 mb-0">
-                  <Link to={publicVmRoute(vm)}>View the public page</Link>
-                </p>
-              ) : null}
-            </div>
-          </section>
-          <section className="card">
-            <div className="card-body">
-              <h2 className="h6 card-title">Media</h2>
-              <p className="small">
-                {vm.mediaCount === 1 ? '1 image.' : `${vm.mediaCount} images.`}{' '}
-                {vm.mainMediaId ? 'A main image is selected.' : 'No main image is selected.'}
-              </p>
-              <Link to="media" relative="path" className="btn btn-outline-primary">
-                Manage media
-              </Link>
-            </div>
-          </section>
-          <VmRestoreSection vm={identity} />
-          <VmExecutionSection vm={identity} />
-          <section className="card">
-            <div className="card-body">
-              <h2 className="h6 card-title">Identity</h2>
-              <dl className="mb-0 small settings-facts">
-                <dt>Emulator</dt>
-                <dd className="vm-identity">{vm.emulatorType}</dd>
-                <dt>VM name</dt>
-                <dd className="vm-identity">{vm.vmName}</dd>
-                <dt>Versions</dt>
-                <dd>{vm.versionCount}</dd>
-                <dt>Registered</dt>
-                <dd>{new Date(vm.createdAt).toLocaleString()}</dd>
-                <dt>Updated</dt>
-                <dd>{new Date(vm.updatedAt).toLocaleString()}</dd>
-              </dl>
-              <p className="small text-body-secondary mt-2 mb-0">
-                The identity is the VM&apos;s directory name and cannot be changed here. Renaming
-                the directory makes it a different VM.
-              </p>
-            </div>
-          </section>
-        </div>
+        <section className="card" aria-labelledby="vm-details-heading">
+          <div className="card-body">
+            <h2 id="vm-details-heading" className="h6 card-title">
+              Details
+            </h2>
+            <p id="vm-visibility-text" className="small mb-0">
+              {vm.visibility === 'public'
+                ? 'Anyone can see this VM and all of its screenshots in the public catalog.'
+                : 'Only signed-in administrators can see this VM and its screenshots. Making it public publishes all of its screenshots.'}
+            </p>
+            <PublicCoverNotice vm={vm} />
+            <dl className="mt-3 mb-0 small settings-facts">
+              <dt>Emulator</dt>
+              <dd className="vm-identity">{vm.emulatorType}</dd>
+              <dt>VM name</dt>
+              <dd className="vm-identity">{vm.vmName}</dd>
+              <dt>Versions</dt>
+              <dd>{vm.versionCount}</dd>
+              <dt>Media</dt>
+              <dd>
+                {vm.mediaCount === 1 ? '1 image' : `${vm.mediaCount} images`},{' '}
+                {vm.mainMediaId ? 'a main image is selected' : 'no main image is selected'}
+              </dd>
+              <dt>Registered</dt>
+              <dd>{new Date(vm.createdAt).toLocaleString()}</dd>
+              <dt>Updated</dt>
+              <dd>{new Date(vm.updatedAt).toLocaleString()}</dd>
+            </dl>
+            <p className="small text-body-secondary mt-2 mb-0">
+              The identity is the VM&apos;s directory name and cannot be changed here. Renaming the
+              directory makes it a different VM.
+            </p>
+          </div>
+        </section>
       </div>
-      <div className="mt-4">
-        <VmVersionsSection vm={identity} />
+      <div className="vm-admin-panels">
+        <VmExecutionSection vm={identity} preselect={preselect} />
+        <VmRestoreSection vm={identity} />
+        <VmVersionsSection
+          vm={identity}
+          onRun={(choice) => {
+            runToken.current += 1;
+            setPreselect({ ...choice, token: runToken.current });
+          }}
+        />
       </div>
       <section className="mt-4" aria-labelledby="vm-screenshots-heading">
         <h2 id="vm-screenshots-heading" className="h5">
@@ -303,7 +321,7 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
           <VmMediaGrid vm={vm} media={media.state.data.media} onChange={mediaChanged} showMain />
         ) : null}
       </section>
-    </>
+    </div>
   );
 }
 

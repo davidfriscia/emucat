@@ -38,8 +38,8 @@ import {
   vmSessionSchema,
   vmVerificationSchema,
   versionTreeResponseSchema,
-  vmWorkspaceSchema,
-  workspaceListResponseSchema,
+  remoteSessionSchema,
+  remoteSessionListResponseSchema,
   type AdminCatalogResponse,
   type AdminMediaListResponse,
   type AdminMediaSyncResponse,
@@ -54,8 +54,8 @@ import {
   type CreateSnapshotRequest,
   type CreateWorkspaceRequest,
   type VersionTreeResponse,
-  type VmWorkspace,
-  type WorkspaceListResponse,
+  type RemoteSession,
+  type RemoteSessionListResponse,
   type DiscoveryOperation,
   type DiscoveryStateResponse,
   type EmulatorType,
@@ -703,17 +703,20 @@ export function fetchRegistration(
 export function fetchWorkspaces(
   vm: VmIdentity,
   signal?: AbortSignal,
-): Promise<WorkspaceListResponse> {
-  return requestJson(`${relative(adminVmApiPath(vm))}/workspaces`, workspaceListResponseSchema, {
-    signal,
-  });
+): Promise<RemoteSessionListResponse> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/workspaces`,
+    remoteSessionListResponseSchema,
+    { signal },
+  );
 }
 
+/** Starts a remote session: a temporary copy of one version, run, then removed or published. */
 export function createWorkspace(
   vm: VmIdentity,
   request: CreateWorkspaceRequest,
-): Promise<VmWorkspace> {
-  return requestJson(`${relative(adminVmApiPath(vm))}/workspaces`, vmWorkspaceSchema, {
+): Promise<RemoteSession> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/workspaces`, remoteSessionSchema, {
     method: 'POST',
     body: request,
   });
@@ -736,12 +739,32 @@ export function preserveWorkspace(
   });
 }
 
+/** Discards a working copy, or abandons a Remote Snapshot that was not published. */
 export function discardWorkspace(
   workspaceId: string,
   confirmVmName: string | undefined,
-): Promise<VmWorkspace> {
-  return requestJson(`/admin/workspaces/${workspaceId}/discard`, vmWorkspaceSchema, {
+): Promise<RemoteSession> {
+  return requestJson(`/admin/workspaces/${workspaceId}/discard`, remoteSessionSchema, {
     method: 'POST',
     body: confirmVmName === undefined ? {} : { confirmVmName },
+  });
+}
+
+/** Retries a failed Remote Snapshot publication. Nothing is published twice. */
+export function retryPublication(workspaceId: string): Promise<RemoteSession> {
+  return requestJson(`/admin/workspaces/${workspaceId}/retry-publication`, remoteSessionSchema, {
+    method: 'POST',
+    body: {},
+  });
+}
+
+/** Lets a held remote session go on, once its emulator is known not to run. */
+export function resumeWorkspace(
+  workspaceId: string,
+  confirmVmName: string,
+): Promise<RemoteSession> {
+  return requestJson(`/admin/workspaces/${workspaceId}/resume`, remoteSessionSchema, {
+    method: 'POST',
+    body: { confirmVmName },
   });
 }

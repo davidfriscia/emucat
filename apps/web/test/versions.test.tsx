@@ -3,7 +3,7 @@ import type {
   RegistrationOperation,
   RestoreOptionsResponse,
   VersionNode,
-  VmWorkspace,
+  RemoteSession,
 } from '@emucat/contracts';
 import { describe, expect, it } from 'vitest';
 import { adminVm, apiError, mockApi, renderAt, signedInAsAdmin } from './mock-api';
@@ -90,6 +90,7 @@ function restoreOptions(): RestoreOptionsResponse {
     version(MASTER, 'master', null),
     version(SNAP_A, 'snapshot', MASTER),
     version(SNAP_B, 'snapshot', MASTER),
+    version(SNAP_C, 'snapshot', SNAP_A),
   ];
   return {
     master: master ?? null,
@@ -108,6 +109,7 @@ function restoreOptions(): RestoreOptionsResponse {
           sourceVersionId: null,
           lastVerifiedAt: null,
         },
+        replace: { eligible: false, reason: 'no_local_copy' },
         cacheUsedBytes: 0,
         cacheMaxBytes: 1000,
       },
@@ -115,7 +117,7 @@ function restoreOptions(): RestoreOptionsResponse {
   } as RestoreOptionsResponse;
 }
 
-function workspace(overrides: Partial<VmWorkspace> = {}): VmWorkspace {
+function workspace(overrides: Partial<RemoteSession> = {}): RemoteSession {
   return {
     id: WORKSPACE,
     agentId: AGENT_ID,
@@ -123,18 +125,29 @@ function workspace(overrides: Partial<VmWorkspace> = {}): VmWorkspace {
     agentOnline: true,
     emulatorType: 'qemu',
     vmName: 'Win98',
+    purpose: 'manual',
     state: 'ready',
     baseVersionId: SNAP_A,
     sourceVersionId: SNAP_A,
     mayHaveChanges: true,
     launchOnReady: false,
     restoreOperationId: null,
+    sessionId: null,
+    snapshotOperationId: null,
+    publishAttempts: 0,
+    nextRetryAt: null,
+    abandonedAt: null,
+    snapshotVersionId: null,
     localDirectory: 'C:\\state\\workspaces\\x\\Win98',
     error: null,
     requestedByDisplayName: 'Ada Admin',
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     finishedAt: null,
+    restore: null,
+    session: null,
+    snapshot: null,
+    recovery: null,
     ...overrides,
   };
 }
@@ -320,6 +333,7 @@ function restoreOperationStub() {
     vmName: 'Win98',
     versionId: SNAP_A,
     workspaceId: null,
+    replacement: null,
     state: 'queued',
     archive: { sizeBytes: 2048, sha256: SHA },
     progress: { doneBytes: null, totalBytes: null },
@@ -336,26 +350,112 @@ function restoreOperationStub() {
   };
 }
 
-describe('Remote Snapshot', () => {
-  it('prepares and launches a working copy of the chosen version, after a confirmation', async () => {
+function executionOptions() {
+  const remote = { eligible: true, reason: null, problem: null };
+  return {
+    modes: [
+      { mode: 'local', available: true, reason: null },
+      { mode: 'remote_volatile', available: true, reason: null },
+      { mode: 'remote_snapshot', available: true, reason: null },
+    ],
+    agents: [
+      {
+        agentId: AGENT_ID,
+        agentName: 'Study PC',
+        online: true,
+        launch: { eligible: false, reason: 'vm_not_on_agent', problem: null },
+        verify: { eligible: false, reason: 'vm_not_on_agent' },
+        remote: { remote_volatile: remote, remote_snapshot: remote },
+        activeWorkspaceId: null,
+        local: { present: false, contentStatus: null, sourceVersionId: null, lastVerifiedAt: null },
+        activeSession: null,
+        lastSession: null,
+        lastVerification: null,
+      },
+    ],
+  };
+}
+
+describe('running a version', () => {
+  it('chooses the version and mode in the run panel, which is where it starts', async () => {
     const api = base({
-      [`POST ${VM_PATH}/workspaces`]: workspace({ state: 'preparing', launchOnReady: true }),
+      [`GET ${VM_PATH}/execution-options`]: executionOptions(),
+      'GET /admin/sessions': { sessions: [] },
+      [`POST ${VM_PATH}/workspaces`]: workspace({
+        purpose: 'remote_snapshot',
+        state: 'preparing',
+        baseVersionId: SNAP_C,
+        sourceVersionId: SNAP_C,
+      }),
     });
     const tree = await history();
     const c = within(tree).getAllByRole('treeitem')[2] as HTMLElement;
-    fireEvent.click(within(c).getByRole('button', { name: 'Launch in Remote Snapshot…' }));
-    const dialog = await screen.findByRole('dialog', {
-      name: 'Launch Win98_202601010003 in Remote Snapshot',
-    });
-    expect(within(dialog).getByText(/nothing is published/)).toBeTruthy();
-    expect(within(dialog).getByText(/persistent local copy is not touched/)).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Prepare and launch' }));
+    fireEvent.click(
+      within(c).getByRole('button', { name: 'Run Win98_202601010003 in Remote Snapshot' }),
+    );
+    // Nothing starts from the history itself: it only chooses.
+    expect(api.callsTo('POST', `${VM_PATH}/workspaces`)).toHaveLength(0);
+    const heading = screen.getByRole('heading', { name: 'Run and verify' });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    const panel = within(heading.closest('section') as HTMLElement);
+    expect(
+      (panel.getByRole('radio', { name: 'Remote Snapshot' }) as HTMLInputElement).checked,
+    ).toBe(true);
+    expect((panel.getByLabelText('Version') as HTMLSelectElement).value).toBe(SNAP_C);
+    expect(panel.getByText(/parent is exactly this version/)).toBeTruthy();
+    fireEvent.click(panel.getByRole('button', { name: 'Start Remote Snapshot' }));
     await waitFor(() => expect(api.callsTo('POST', `${VM_PATH}/workspaces`)).toHaveLength(1));
     const body = api.callsTo('POST', `${VM_PATH}/workspaces`)[0]?.body as Record<string, unknown>;
-    expect(body).toMatchObject({ agentId: AGENT_ID, versionId: SNAP_C, launch: true });
-    expect(Object.keys(body).sort()).toEqual(['agentId', 'launch', 'requestId', 'versionId']);
+    expect(body).toMatchObject({ agentId: AGENT_ID, versionId: SNAP_C, mode: 'remote_snapshot' });
+    expect(Object.keys(body).sort()).toEqual(['agentId', 'mode', 'requestId', 'versionId']);
   });
 
+  it('chooses Remote Volatile the same way, and another version replaces the first choice', async () => {
+    base({
+      [`GET ${VM_PATH}/execution-options`]: executionOptions(),
+      'GET /admin/sessions': { sessions: [] },
+    });
+    const tree = await history();
+    const items = within(tree).getAllByRole('treeitem');
+    fireEvent.click(
+      within(items[2] as HTMLElement).getByRole('button', {
+        name: 'Run Win98_202601010003 in Remote Volatile',
+      }),
+    );
+    const panel = within(
+      screen.getByRole('heading', { name: 'Run and verify' }).closest('section') as HTMLElement,
+    );
+    await waitFor(() =>
+      expect((panel.getByLabelText('Version') as HTMLSelectElement).value).toBe(SNAP_C),
+    );
+    expect(
+      (panel.getByRole('radio', { name: 'Remote Volatile' }) as HTMLInputElement).checked,
+    ).toBe(true);
+    fireEvent.click(
+      within(items[1] as HTMLElement).getAllByRole('button', {
+        name: 'Run Win98_202601010001 in Remote Snapshot',
+      })[0] as HTMLElement,
+    );
+    await waitFor(() =>
+      expect((panel.getByLabelText('Version') as HTMLSelectElement).value).toBe(SNAP_A),
+    );
+    expect(
+      (panel.getByRole('radio', { name: 'Remote Snapshot' }) as HTMLInputElement).checked,
+    ).toBe(true);
+  });
+
+  it('lists remote sessions in the run panel, not among the manual working copies', async () => {
+    base({
+      [`GET ${VM_PATH}/workspaces`]: {
+        workspaces: [workspace({ purpose: 'remote_volatile', state: 'running' })],
+      },
+    });
+    await history();
+    expect(screen.queryByRole('heading', { name: 'Manual working copies' })).toBeNull();
+  });
+});
+
+describe('manual working copies', () => {
   it('preserves a stopped working copy only when asked', async () => {
     const api = base({
       [`GET ${VM_PATH}/workspaces`]: { workspaces: [workspace()] },
@@ -469,5 +569,33 @@ describe('the public VM page', () => {
     expect(await screen.findByRole('tree', { name: 'Versions of Win98' })).toBeTruthy();
     const panel = screen.getByRole('tabpanel');
     expect(panel.getAttribute('aria-labelledby')).toBe(versions.id);
+  });
+
+  it('opens the launcher on the chosen version and mode, where there is no run panel', async () => {
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${PUBLIC_PATH}`]: detail,
+      [`GET ${VM_PATH}/versions`]: branchingTree(),
+      [`GET ${VM_PATH}/workspaces`]: { workspaces: [] },
+      [`GET ${VM_PATH}/restore-options`]: restoreOptions(),
+      [`GET ${VM_PATH}/execution-options`]: executionOptions(),
+      'GET /admin/sessions': { sessions: [] },
+    });
+    renderAt('/vms/qemu/Win98');
+    fireEvent.click(await screen.findByRole('tab', { name: 'Version history' }));
+    const tree = await screen.findByRole('tree', { name: 'Versions of Win98' });
+    const a = within(tree).getAllByRole('treeitem')[1] as HTMLElement;
+    fireEvent.click(
+      within(a).getAllByRole('button', {
+        name: 'Run Win98_202601010001 in Remote Volatile',
+      })[0] as HTMLElement,
+    );
+    const dialog = within(await screen.findByRole('dialog', { name: 'Launch Win98' }));
+    await waitFor(() =>
+      expect((dialog.getByLabelText('Version') as HTMLSelectElement).value).toBe(SNAP_A),
+    );
+    expect(
+      (dialog.getByRole('radio', { name: 'Remote Volatile' }) as HTMLInputElement).checked,
+    ).toBe(true);
   });
 });
