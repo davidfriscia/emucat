@@ -12,6 +12,9 @@ import {
   type ExecutionSyncPayload,
   type LaunchIneligibleReason,
   type LaunchRequest,
+  type RemoteIneligibleReason,
+  type RemoteSessionMode,
+  type RestoreSyncPayload,
   type ServerMessage,
   type VerifyIneligibleReason,
   type VerifyRequest,
@@ -35,6 +38,8 @@ export interface ExecutionLink {
   executionCapabilities(agentId: string): ExecutionSyncPayload['capabilities'] | null;
   /** Whether the agent said which working copies it holds, which only agents that keep them do. */
   workspacesSupported(agentId: string): boolean;
+  /** What `agent.restore_sync` said on this connection: a remote session begins with a restore. */
+  restoreCapabilities(agentId: string): RestoreSyncPayload['capabilities'] | null;
   send(agentId: string, message: Pick<ServerMessage, 'type' | 'payload'>): boolean;
 }
 
@@ -234,6 +239,31 @@ interface AgentFacts {
   busyAtAll: boolean;
 }
 
+/** What a remote session needs on top of a launch: a restore of the VM's repository into a working copy. */
+interface RemoteFacts {
+  hasVersions: boolean;
+  repositoryId: string | null;
+  authorized: boolean;
+  activeWorkspace: boolean;
+}
+
+const REMOTE_TEXT: Record<RemoteIneligibleReason, string> = {
+  agent_revoked: 'This agent has been revoked.',
+  agent_offline: 'This agent is offline.',
+  agent_cannot_launch: 'This agent’s version cannot launch VMs. Update it.',
+  emulator_not_launchable: 'This agent cannot launch this emulator. Check its executable setting.',
+  mode_not_supported: 'This agent’s version cannot run this mode. Update it.',
+  agent_cannot_restore: 'This agent’s version cannot obtain VMs from a repository. Update it.',
+  emulator_not_configured: 'This agent has no base path configured for this emulator.',
+  repository_not_authorized: 'This agent is not associated with this VM’s repository.',
+  repository_not_configured: 'This agent has no local configuration for this VM’s repository.',
+  no_versions: 'This VM has no version in a repository yet.',
+  session_active: 'This VM is already running on this agent.',
+  remote_session_pending:
+    'A remote session of this VM is still active on this agent: wait for it to finish, or resolve it first.',
+  operation_in_progress: 'This agent is busy with another operation.',
+};
+
 /**
  * Sessions and verifications on the server's side. Like the other coordinators it keeps no state of its
  * own: `vm_sessions` and `vm_verifications` are the record, so a restart of the server loses nothing, and
@@ -250,6 +280,120 @@ export class ExecutionCoordinator {
     options: Partial<ExecutionOptions> = {},
   ) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
+  }
+
+  /**
+   * Called when the session of a working copy changes state, so that a remote session can move on
+   * (decision 0040). `confirmed` says that an administrator has said the emulator no longer runs. A missed
+   * call is harmless: the remote sessions' sweep looks again.
+   */
+  onWorkspaceSession: ((workspaceId: string, confirmed: boolean) => void) | null = null;
+
+  private notifyWorkspace(workspaceId: string | null, confirmed = false): void {
+    if (workspaceId) this.onWorkspaceSession?.(workspaceId, confirmed);
+  }
+
+  /** Why an agent cannot start a remote session of this VM in this mode now, or `null` if it can. */
+  remoteIneligible(
+    agentId: string,
+    emulatorType: VmIdentity['emulatorType'],
+    mode: RemoteSessionMode,
+    facts: AgentFacts,
+    remote: RemoteFacts,
+  ): { reason: RemoteIneligibleReason; problem: string | null } | null {
+    if (facts.revoked) return { reason: 'agent_revoked', problem: null };
+    if (!this.link.isOnline(agentId)) return { reason: 'agent_offline', problem: null };
+    const capabilities = this.link.executionCapabilities(agentId);
+    if (!capabilities) return { reason: 'agent_cannot_launch', problem: null };
+    const emulator = capabilities.emulators.find((item) => item.emulatorType === emulatorType);
+    if (!emulator?.launchable) {
+      return { reason: 'emulator_not_launchable', problem: emulator?.problem ?? null };
+    }
+    if (!this.canRunRemote(agentId, mode)) return { reason: 'mode_not_supported', problem: null };
+    const restore = this.link.restoreCapabilities(agentId);
+    if (!restore) return { reason: 'agent_cannot_restore', problem: null };
+    if (!restore.emulators.some((item) => item.emulatorType === emulatorType)) {
+      return { reason: 'emulator_not_configured', problem: null };
+    }
+    if (!remote.hasVersions || !remote.repositoryId)
+      return { reason: 'no_versions', problem: null };
+    if (!remote.authorized) return { reason: 'repository_not_authorized', problem: null };
+    if (!restore.repositoryIds.includes(remote.repositoryId)) {
+      return { reason: 'repository_not_configured', problem: null };
+    }
+    if (facts.activeSession) return { reason: 'session_active', problem: null };
+    if (remote.activeWorkspace) return { reason: 'remote_session_pending', problem: null };
+    if (facts.busyAtAll) return { reason: 'operation_in_progress', problem: null };
+    return null;
+  }
+
+  /** Refuses a remote session that cannot start now, with the reason. Nothing is ever substituted. */
+  async requireRemote(agentId: string, vm: VmIdentity, mode: RemoteSessionMode): Promise<void> {
+    const [agents] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT revoked_at, paired_at FROM agents WHERE id = ?',
+      [agentId],
+    );
+    if (!agents[0] || !agents[0].paired_at) {
+      throw new ApiError(404, 'agent_not_found', 'Agent not found');
+    }
+    const facts: AgentFacts = {
+      revoked: agents[0].revoked_at !== null,
+      ...(await this.facts(this.pool, agentId, vm)),
+    };
+    const refused = this.remoteIneligible(
+      agentId,
+      vm.emulatorType,
+      mode,
+      facts,
+      await this.remoteFacts(agentId, vm),
+    );
+    if (refused) {
+      const code =
+        refused.reason === 'mode_not_supported' ? 'execution_mode_unavailable' : refused.reason;
+      const text =
+        refused.reason === 'mode_not_supported'
+          ? EXECUTION_MODE_UNAVAILABLE_REASONS[mode]
+          : (refused.problem ?? REMOTE_TEXT[refused.reason]);
+      throw new ApiError(409, code, `${text} Nothing was prepared.`);
+    }
+  }
+
+  private async remoteFacts(agentId: string, vm: VmIdentity): Promise<RemoteFacts> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT
+         (SELECT version.repository_id FROM vm_versions AS version
+           WHERE version.emulator_type = ? AND version.vm_name = ? AND version.kind = 'master'
+           LIMIT 1) AS repository_id,
+         (SELECT COUNT(*) FROM vm_versions AS version
+           WHERE version.emulator_type = ? AND version.vm_name = ?) AS versions,
+         (SELECT COUNT(*) FROM vm_versions AS version
+           JOIN agent_repositories AS ar
+             ON ar.repository_id = version.repository_id AND ar.agent_id = ?
+           WHERE version.emulator_type = ? AND version.vm_name = ? AND version.kind = 'master')
+           AS authorized,
+         (SELECT COUNT(*) FROM vm_workspaces
+           WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1)
+           AS workspaces`,
+      [
+        vm.emulatorType,
+        vm.vmName,
+        vm.emulatorType,
+        vm.vmName,
+        agentId,
+        vm.emulatorType,
+        vm.vmName,
+        agentId,
+        vm.emulatorType,
+        vm.vmName,
+      ],
+    );
+    const row = rows[0] as RowDataPacket;
+    return {
+      hasVersions: Number(row.versions) > 0,
+      repositoryId: (row.repository_id as string | null) ?? null,
+      authorized: Number(row.authorized) > 0,
+      activeWorkspace: Number(row.workspaces) > 0,
+    };
   }
 
   private launchIneligible(
@@ -363,6 +507,20 @@ export class ExecutionCoordinator {
         [agentId, vm.emulatorType, vm.vmName],
       );
       const latest = active[0] ? toSession(active[0], this.link.isOnline(agentId)) : null;
+      const remoteFacts = await this.remoteFacts(agentId, vm);
+      const remote = (mode: RemoteSessionMode) => {
+        const refused = this.remoteIneligible(agentId, vm.emulatorType, mode, facts, remoteFacts);
+        return {
+          eligible: refused === null,
+          reason: refused?.reason ?? null,
+          problem: refused?.problem ?? null,
+        };
+      };
+      const [workspaces] = await this.pool.execute<RowDataPacket[]>(
+        `SELECT id FROM vm_workspaces
+         WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1`,
+        [agentId, vm.emulatorType, vm.vmName],
+      );
       options.push({
         agentId,
         agentName: agent.name as string,
@@ -373,6 +531,11 @@ export class ExecutionCoordinator {
           problem: launch?.problem ?? null,
         },
         verify: { eligible: verify === null, reason: verify },
+        remote: {
+          remote_volatile: remote('remote_volatile'),
+          remote_snapshot: remote('remote_snapshot'),
+        },
+        activeWorkspaceId: (workspaces[0]?.id as string | undefined) ?? null,
         local: {
           present: facts.localPresent,
           contentStatus:
@@ -391,7 +554,10 @@ export class ExecutionCoordinator {
       modes: EXECUTION_MODES.map((mode) => ({
         mode,
         available: IMPLEMENTED_EXECUTION_MODES.includes(mode),
-        reason: mode === 'local' ? null : EXECUTION_MODE_UNAVAILABLE_REASONS[mode],
+        reason:
+          IMPLEMENTED_EXECUTION_MODES.includes(mode) || mode === 'local'
+            ? null
+            : EXECUTION_MODE_UNAVAILABLE_REASONS[mode],
       })),
       agents: options,
     };
@@ -401,7 +567,7 @@ export class ExecutionCoordinator {
    * Starts one session for a request. A repeated request, from a double click or a retry, finds the
    * session it already started. A mode this version cannot run is refused, never replaced.
    */
-  async launch(input: LaunchRequest, userId: string): Promise<VmSession> {
+  async launch(input: LaunchRequest, userId: string | null): Promise<VmSession> {
     const { agentId, emulatorType, vmName, mode, requestId } = input;
     const [repeated] = await this.pool.execute<SessionRow[]>(
       `${SESSION_QUERY} WHERE s.request_id = ?`,
@@ -418,11 +584,11 @@ export class ExecutionCoordinator {
     }
 
     const workspaceId = input.workspaceId ?? null;
-    if (mode === 'remote_snapshot' && !this.canRunRemoteSnapshot(agentId)) {
+    if (mode !== 'local' && !this.canRunRemote(agentId, mode)) {
       throw new ApiError(
         409,
         'execution_mode_unavailable',
-        'This agent cannot run Remote Snapshot sessions. Update it. Nothing was launched.',
+        `${EXECUTION_MODE_UNAVAILABLE_REASONS[mode]} Nothing was launched.`,
       );
     }
 
@@ -451,12 +617,22 @@ export class ExecutionCoordinator {
       if (workspaceId) {
         // A working copy has its own directory: what matters is that it is ready, not the local copy.
         const [workspaces] = await connection.execute<RowDataPacket[]>(
-          `SELECT state, source_version_id FROM vm_workspaces
+          `SELECT state, purpose, base_version_id, source_version_id FROM vm_workspaces
            WHERE id = ? AND agent_id = ? AND emulator_type = ? AND vm_name = ? FOR UPDATE`,
           [workspaceId, agentId, emulatorType, canonicalName],
         );
         workspace = workspaces[0];
         if (!workspace) throw new ApiError(404, 'workspace_not_found', 'Working copy not found');
+        // A remote session runs only in the mode it was prepared for; a Milestone 7 working copy only
+        // as Remote Snapshot, as it always did. The agent checks this again.
+        const purpose = workspace.purpose as string;
+        if ((purpose === 'manual' ? 'remote_snapshot' : purpose) !== mode) {
+          throw new ApiError(
+            409,
+            'workspace_purpose_mismatch',
+            'This working copy was prepared for another mode. Nothing was launched.',
+          );
+        }
         if (workspace.state !== 'ready') {
           throw new ApiError(
             409,
@@ -474,7 +650,10 @@ export class ExecutionCoordinator {
         throw new ApiError(409, refused.reason, refused.problem ?? LAUNCH_TEXT[refused.reason]);
       }
       if (workspace) {
-        versionId = workspace.source_version_id as string;
+        // A remote session runs exactly the version that was chosen for it.
+        versionId = (
+          workspace.purpose === 'manual' ? workspace.source_version_id : workspace.base_version_id
+        ) as string;
       } else {
         const [states] = await connection.execute<RowDataPacket[]>(
           `SELECT local_source_version_id FROM agent_vm_state
@@ -502,10 +681,15 @@ export class ExecutionCoordinator {
           ],
         );
         if (workspaceId) {
-          // Whatever happens next, the working copy may now differ from its source.
+          // Whatever happens next, the working copy may now differ from its source. A remote session is
+          // running from this moment, and its session is the one that says when it ends.
           await connection.execute(
-            `UPDATE vm_workspaces SET may_have_changes = TRUE, launch_on_ready = FALSE WHERE id = ?`,
-            [workspaceId],
+            `UPDATE vm_workspaces
+             SET may_have_changes = TRUE, launch_on_ready = FALSE,
+                 state = IF(purpose = 'manual', state, 'running'),
+                 session_id = IF(purpose = 'manual', session_id, ?)
+             WHERE id = ?`,
+            [sessionId, workspaceId],
           );
         }
       } catch (error) {
@@ -544,10 +728,10 @@ export class ExecutionCoordinator {
     return this.requireSession(sessionId);
   }
 
-  /** Remote Snapshot needs the agent to say it runs the mode, and that it keeps working copies. */
-  canRunRemoteSnapshot(agentId: string): boolean {
+  /** A remote mode needs the agent to say it runs the mode, and that it keeps working copies. */
+  canRunRemote(agentId: string, mode: RemoteSessionMode): boolean {
     return (
-      this.link.executionCapabilities(agentId)?.modes.includes('remote_snapshot') === true &&
+      this.link.executionCapabilities(agentId)?.modes.includes(mode) === true &&
       this.link.workspacesSupported(agentId)
     );
   }
@@ -645,6 +829,8 @@ export class ExecutionCoordinator {
       [sessionId],
     );
     this.link.send(session.agentId, { type: 'server.vm_execution_ack', payload: { sessionId } });
+    // Typing the name here is the confirmation a held remote session would otherwise ask for.
+    this.notifyWorkspace(session.workspaceId, true);
     return this.requireSession(sessionId);
   }
 
@@ -875,6 +1061,11 @@ export class ExecutionCoordinator {
        WHERE id = ? AND active_marker = 1`,
       [state, code, executionRecovery(code) ?? code, sessionId],
     );
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT workspace_id FROM vm_sessions WHERE id = ?',
+      [sessionId],
+    );
+    this.notifyWorkspace((rows[0]?.workspace_id as string | null | undefined) ?? null);
   }
 
   /**
@@ -942,6 +1133,8 @@ export class ExecutionCoordinator {
       }
       throw error;
     }
+    // An end lets a remote session move on, and a reopened session brings a held one back to running.
+    this.notifyWorkspace(row.workspace_id);
     if (terminal) this.ack(agentId, sessionId);
   }
 

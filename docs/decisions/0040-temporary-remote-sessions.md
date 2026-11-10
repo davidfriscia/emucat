@@ -10,10 +10,10 @@ run) stand.
 Milestone 7 shipped Remote Snapshot as a **working copy** an administrator prepares, launches, then explicitly
 preserves or discards. That is not the intended product:
 
-| Mode              | Intended semantics                                                                                   |
-| ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `local`           | The persistent local copy runs, and keeps its changes                                                |
-| `remote_volatile` | A chosen remote version runs from a temporary copy, and every change is thrown away when it exits     |
+| Mode              | Intended semantics                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------ |
+| `local`           | The persistent local copy runs, and keeps its changes                                                  |
+| `remote_volatile` | A chosen remote version runs from a temporary copy, and every change is thrown away when it exits      |
 | `remote_snapshot` | A chosen remote version runs from a temporary copy, and when it exits its state becomes a new snapshot |
 
 Both remote modes need the same thing: an isolated directory holding a verified extraction of an exact version,
@@ -43,18 +43,18 @@ preparing ──restore committed──▶ ready ──launch──▶ running �
                                                                                                                       └─ abandon (typed name) ─▶ discarding
 ```
 
-| State            | Meaning                                                                                          |
-| ---------------- | ------------------------------------------------------------------------------------------------ |
-| `preparing`      | The selected archive is being obtained (cache or SFTP), verified and extracted by a restore      |
-| `ready`          | Extracted; the launch is being sent                                                              |
-| `running`        | Its session is active, `unknown` included                                                        |
-| `held`           | The session ended without the agent accounting for the process. Nothing proceeds until confirmed |
-| `publishing`     | Remote Snapshot only: the snapshot of the temporary copy is being archived, uploaded, committed  |
-| `publish_failed` | Remote Snapshot only: publication failed. The temporary copy is kept. Retry or abandon           |
-| `discarding`     | The temporary copy is being removed. Repeated until the agent confirms                           |
+| State            | Meaning                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------- |
+| `preparing`      | The selected archive is being obtained (cache or SFTP), verified and extracted by a restore       |
+| `ready`          | Extracted; the launch is being sent                                                               |
+| `running`        | Its session is active, `unknown` included                                                         |
+| `held`           | The session ended without the agent accounting for the process. Nothing proceeds until confirmed  |
+| `publishing`     | Remote Snapshot only: the snapshot of the temporary copy is being archived, uploaded, committed   |
+| `publish_failed` | Remote Snapshot only: publication failed. The temporary copy is kept. Retry or abandon            |
+| `discarding`     | The temporary copy is being removed. Repeated until the agent confirms                            |
 | `discarded`      | Removed. For Remote Snapshot this means the snapshot was committed first, or explicitly abandoned |
-| `failed`         | Preparation failed. Nothing was extracted                                                        |
-| `lost`           | The agent no longer has it, or was revoked                                                       |
+| `failed`         | Preparation failed. Nothing was extracted                                                         |
+| `lost`           | The agent no longer has it, or was revoked                                                        |
 
 `preparing`, `ready`, `running`, `held`, `publishing`, `publish_failed` and `discarding` are active, and the existing
 unique key still allows one active working copy per VM per agent. A Remote Snapshot whose publication is pending
@@ -78,7 +78,7 @@ answer or a restart of either side advances it exactly once:
   recorded in `snapshot_operation_id`, and `publish_attempts` moves, in one conditional update; until then a
   repeated attempt (after a crash, or from a second trigger) asks for the same request ID, and the registration
   coordinator's idempotency returns the operation already created. A retry first moves `publish_failed →
-  publishing` with a conditional update, so of two retries at once one does nothing. An attempt that failed never
+publishing` with a conditional update, so of two retries at once one does nothing. An attempt that failed never
   committed a version: registration commits only from a verified, published archive, and one in `committing` is
   retried by the registration coordinator, not replaced. So a retry can never produce a second version for the same
   session;

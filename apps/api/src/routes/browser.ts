@@ -14,7 +14,7 @@ import type { MediaPolicy } from '../media/uploads.js';
 import type { RegistrationCoordinator, RegistrationPolicy } from '../registration/coordinator.js';
 import type { RestoreCoordinator } from '../restore/coordinator.js';
 import type { MediaStorage } from '../storage/media-storage.js';
-import type { WorkspaceCoordinator } from '../workspaces/coordinator.js';
+import type { RemoteSessionOptions, WorkspaceCoordinator } from '../workspaces/coordinator.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
 import { registerAdminExecutionRoutes } from './admin-execution.js';
@@ -44,6 +44,8 @@ export interface BrowserDependencies {
   pairingRateLimits: PairingRateLimits;
   /** Limits on acting on discovery results. Tests shorten them. */
   registrationPolicy?: RegistrationPolicy;
+  /** How remote sessions retry and sweep. Tests shorten the delays, or turn the timer off. */
+  remoteSessions?: Partial<RemoteSessionOptions>;
   /** Version reporting and the deployment service. Defaults to none configured. */
   deployment?: DeploymentDependencies;
 }

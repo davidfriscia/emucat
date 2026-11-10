@@ -15,7 +15,9 @@ import {
   type RestoreState,
   type RestoreSyncPayload,
   type ServerMessage,
+  type RemoteSessionMode,
   type VmIdentity,
+  vmNameKey,
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
@@ -40,6 +42,10 @@ interface OperationRow extends RowDataPacket {
   vm_name: string;
   version_id: string;
   workspace_id: string | null;
+  workspace_purpose: string | null;
+  replace_existing: number;
+  replaced_version_id: string | null;
+  discard_local_changes: number;
   state: RestoreState;
   archive_key: string;
   archive_sha256: string;
@@ -68,7 +74,9 @@ interface OperationRow extends RowDataPacket {
 const OPERATION_QUERY = `
   SELECT op.id, op.agent_id, a.name AS agent_name, op.repository_id, r.name AS repository_name,
          u.display_name AS requested_by_display_name,
-         op.emulator_type, op.vm_name, op.version_id, op.workspace_id, op.state,
+         op.emulator_type, op.vm_name, op.version_id, op.workspace_id,
+         w.purpose AS workspace_purpose, op.replace_existing, op.replaced_version_id,
+         op.discard_local_changes, op.state,
          op.archive_key, op.archive_sha256, op.archive_size_bytes,
          op.expected_manifest_sha256, op.expected_uncompressed_bytes,
          op.progress_done_bytes, op.progress_total_bytes,
@@ -79,7 +87,8 @@ const OPERATION_QUERY = `
   FROM restore_operations AS op
   JOIN agents AS a ON a.id = op.agent_id
   JOIN repositories AS r ON r.id = op.repository_id
-  LEFT JOIN users AS u ON u.id = op.requested_by_user_id`;
+  LEFT JOIN users AS u ON u.id = op.requested_by_user_id
+  LEFT JOIN vm_workspaces AS w ON w.id = op.workspace_id`;
 
 /** Stages only move forward, apart from going back to download again after a bad copy. */
 const STAGE_ALLOWED_FROM: Record<RestoreProgressPayload['stage'], readonly RestoreState[]> = {
@@ -115,6 +124,12 @@ function toOperation(row: OperationRow, online: boolean): RestoreOperation {
     vmName: row.vm_name,
     versionId: row.version_id,
     workspaceId: row.workspace_id,
+    replacement: row.replace_existing
+      ? {
+          replacedVersionId: row.replaced_version_id,
+          discardLocalChanges: row.discard_local_changes !== 0,
+        }
+      : null,
     state: row.state,
     archive: { sizeBytes: Number(row.archive_size_bytes), sha256: row.archive_sha256 },
     progress: {
@@ -164,14 +179,25 @@ function requestFor(row: OperationRow): RestoreRequestPayload {
     manifestSha256: row.expected_manifest_sha256,
     expectedUncompressedBytes: toNumber(row.expected_uncompressed_bytes),
     ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+    ...(row.workspace_purpose === 'remote_volatile' || row.workspace_purpose === 'remote_snapshot'
+      ? { workspacePurpose: row.workspace_purpose }
+      : {}),
+    ...(row.replace_existing
+      ? {
+          replace: {
+            expectedVersionId: row.replaced_version_id,
+            discardLocalChanges: row.discard_local_changes !== 0,
+          },
+        }
+      : {}),
   };
 }
 
-/** A restore that prepares a Remote Snapshot working copy, rather than the persistent local copy. */
+/** A restore that prepares a remote session's working copy, rather than the persistent local copy. */
 export interface WorkspaceTarget {
   workspaceId: string;
   requestId: string;
-  launchOnReady: boolean;
+  purpose: RemoteSessionMode;
 }
 
 const FAILURE_TEXT: Record<string, string> = {
@@ -187,7 +213,9 @@ const INELIGIBLE_TEXT: Record<RestoreIneligibleReason, string> = {
   emulator_not_configured: 'This agent has no base path configured for this emulator.',
   repository_not_authorized: 'This agent is not associated with this VM’s repository.',
   repository_not_configured: 'This agent has no local configuration for this VM’s repository.',
-  local_copy_exists: 'This agent already holds a copy of this VM, and it is never overwritten.',
+  local_copy_exists:
+    'This agent already holds a copy of this VM. Replace it explicitly, or run the version as a remote session.',
+  no_local_copy: 'This agent holds no copy of this VM to replace. Restore it normally.',
   vm_running:
     'This VM is running on this agent, or may be. Stop it, or dismiss the session, first.',
   operation_in_progress: 'This agent is busy with another operation.',
@@ -223,22 +251,25 @@ export class RestoreCoordinator {
     emulatorType: VmIdentity['emulatorType'],
     repositoryId: string,
     facts: EligibilityFacts,
-    intoWorkspace = false,
+    target: 'create' | 'replace' | 'workspace' = 'create',
   ): RestoreIneligibleReason | null {
     if (facts.revoked) return 'agent_revoked';
     if (!this.link.isOnline(agentId)) return 'agent_offline';
     const capabilities = this.link.restoreCapabilities(agentId);
     if (!capabilities) return 'agent_cannot_restore';
+    // Only an agent that says it replaces safely is ever asked to (decision 0040).
+    if (target === 'replace' && capabilities.replaceLocal !== true) return 'agent_cannot_restore';
     if (!capabilities.emulators.some((emulator) => emulator.emulatorType === emulatorType)) {
       return 'emulator_not_configured';
     }
     if (!facts.authorized) return 'repository_not_authorized';
     if (!capabilities.repositoryIds.includes(repositoryId)) return 'repository_not_configured';
     if (facts.running) return 'vm_running';
-    // A working copy has its own directory: the persistent copy is neither in the way nor at risk.
-    if (!intoWorkspace && facts.localState !== null && facts.localState !== 'absent') {
-      return 'local_copy_exists';
-    }
+    // A working copy has its own directory: the persistent copy is neither in the way nor at risk. A
+    // replacement needs one to replace, and an ordinary restore never touches one.
+    const present = facts.localState !== null && facts.localState !== 'absent';
+    if (target === 'create' && present) return 'local_copy_exists';
+    if (target === 'replace' && !present) return 'no_local_copy';
     if (facts.busy) return 'operation_in_progress';
     return null;
   }
@@ -307,6 +338,19 @@ export class RestoreCoordinator {
         running: Number(row.active_sessions) > 0,
         busy: Number(row.active_operations) > 0,
       });
+      const replace = this.ineligible(
+        agentId,
+        vm.emulatorType,
+        repositoryId,
+        {
+          revoked: false,
+          authorized: row.authorized !== null,
+          localState: state,
+          running: Number(row.active_sessions) > 0,
+          busy: Number(row.active_operations) > 0,
+        },
+        'replace',
+      );
       const capabilities = this.link.restoreCapabilities(agentId);
       const base = capabilities?.emulators.find(
         (emulator) => emulator.emulatorType === vm.emulatorType,
@@ -327,6 +371,7 @@ export class RestoreCoordinator {
           sourceVersionId: (row.local_source_version_id as string | null) ?? null,
           lastVerifiedAt: (row.last_verified_at as Date | null)?.toISOString() ?? null,
         },
+        replace: { eligible: replace === null, reason: replace },
         cacheUsedBytes: capabilities?.cacheUsedBytes ?? null,
         cacheMaxBytes: capabilities?.cacheMaxBytes ?? null,
       };
@@ -355,6 +400,7 @@ export class RestoreCoordinator {
     workspace: WorkspaceTarget | null = null,
   ): Promise<RestoreOperation> {
     const { agentId, emulatorType, vmName, versionId } = input;
+    const replace = workspace ? null : (input.replace ?? null);
     const operationId = randomUUID();
     let request: RestoreRequestPayload;
 
@@ -393,8 +439,8 @@ export class RestoreCoordinator {
       const repositoryId = version.repository_id as string;
 
       const [states] = await connection.execute<RowDataPacket[]>(
-        `SELECT execution_state FROM agent_vm_state
-         WHERE agent_id = ? AND emulator_type = ? AND vm_name = ?`,
+        `SELECT execution_state, content_status, local_source_version_id FROM agent_vm_state
+         WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? FOR UPDATE`,
         [agentId, emulatorType, canonicalName],
       );
       const [registrations] = await connection.execute<RowDataPacket[]>(
@@ -419,17 +465,18 @@ export class RestoreCoordinator {
           running: sessions.length > 0,
           busy: registrations.length > 0,
         },
-        workspace !== null,
+        workspace ? 'workspace' : replace ? 'replace' : 'create',
       );
       if (reason) throw new ApiError(409, reason, INELIGIBLE_TEXT[reason]);
+      if (replace) this.checkReplacement(replace, canonicalName, states[0]);
 
       if (workspace) {
         try {
           await connection.execute(
             `INSERT INTO vm_workspaces
-               (id, agent_id, requested_by_user_id, request_id, emulator_type, vm_name,
+               (id, agent_id, requested_by_user_id, request_id, emulator_type, vm_name, purpose,
                 base_version_id, source_version_id, launch_on_ready)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)`,
             [
               workspace.workspaceId,
               agentId,
@@ -437,9 +484,9 @@ export class RestoreCoordinator {
               workspace.requestId,
               emulatorType,
               canonicalName,
+              workspace.purpose,
               versionId,
               versionId,
-              workspace.launchOnReady,
             ],
           );
         } catch (error) {
@@ -447,7 +494,7 @@ export class RestoreCoordinator {
             throw new ApiError(
               409,
               'workspace_exists',
-              'This agent already has a working copy of this VM. Discard it first.',
+              'A remote session of this VM is still active on this agent. Wait for it to finish, or resolve it first.',
             );
           }
           throw error;
@@ -465,15 +512,26 @@ export class RestoreCoordinator {
         archiveSha256: version.archive_sha256 as string,
         manifestSha256: (version.manifest_sha256 as string | null) ?? null,
         expectedUncompressedBytes: toNumber(version.total_uncompressed_bytes as number | null),
-        ...(workspace ? { workspaceId: workspace.workspaceId } : {}),
+        ...(workspace
+          ? { workspaceId: workspace.workspaceId, workspacePurpose: workspace.purpose }
+          : {}),
+        ...(replace
+          ? {
+              replace: {
+                expectedVersionId: replace.expectedVersionId,
+                discardLocalChanges: replace.discardLocalChanges,
+              },
+            }
+          : {}),
       };
       try {
         await connection.execute(
           `INSERT INTO restore_operations
              (id, agent_id, repository_id, requested_by_user_id, emulator_type, vm_name, version_id,
               archive_key, archive_sha256, archive_size_bytes, expected_manifest_sha256,
-              expected_uncompressed_bytes, workspace_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              expected_uncompressed_bytes, workspace_id, replace_existing, replaced_version_id,
+              discard_local_changes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             operationId,
             agentId,
@@ -488,6 +546,9 @@ export class RestoreCoordinator {
             request.manifestSha256,
             request.expectedUncompressedBytes,
             workspace?.workspaceId ?? null,
+            replace !== null,
+            replace?.expectedVersionId ?? null,
+            replace?.discardLocalChanges ?? false,
           ],
         );
       } catch (error) {
@@ -507,6 +568,40 @@ export class RestoreCoordinator {
     // If this cannot be delivered, the operation stays queued and goes out when the agent reconnects.
     this.dispatch(agentId, request);
     return this.require(operationId);
+  }
+
+  /**
+   * What the server can check about a replacement before asking the agent, which checks it all again on
+   * its own disk: that the page showed the copy recorded here, that the name was typed, and that changes
+   * recorded here are acknowledged as lost.
+   */
+  private checkReplacement(
+    replace: NonNullable<CreateRestoreRequest['replace']>,
+    vmName: string,
+    state: RowDataPacket | undefined,
+  ): void {
+    if (vmNameKey(replace.confirmVmName) !== vmNameKey(vmName)) {
+      throw new ApiError(
+        400,
+        'confirmation_mismatch',
+        'Type the VM’s name to replace its local copy.',
+      );
+    }
+    const recorded = (state?.local_source_version_id as string | null | undefined) ?? null;
+    if (recorded !== replace.expectedVersionId) {
+      throw new ApiError(
+        409,
+        'local_copy_changed',
+        'The local copy is no longer the one this page showed. Reload, and check what it is now.',
+      );
+    }
+    if (state?.content_status === 'modified' && !replace.discardLocalChanges) {
+      throw new ApiError(
+        409,
+        'local_copy_modified',
+        'The local copy has changes that are in no version. Snapshot it first, or confirm that they are lost.',
+      );
+    }
   }
 
   async get(operationId: string): Promise<RestoreOperation | null> {

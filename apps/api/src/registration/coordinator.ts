@@ -231,6 +231,22 @@ export class RegistrationCoordinator {
     private readonly policy: RegistrationPolicy = DEFAULT_REGISTRATION_POLICY,
   ) {}
 
+  /**
+   * Called when a snapshot of a working copy may have changed state, so that a remote session can move
+   * on (decision 0040). A missed call is harmless: the remote sessions' sweep looks again.
+   */
+  onWorkspaceSnapshot: ((workspaceId: string) => void) | null = null;
+
+  private async notifyWorkspace(operationId: string): Promise<void> {
+    if (!this.onWorkspaceSnapshot) return;
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT workspace_id FROM registration_operations WHERE id = ?',
+      [operationId],
+    );
+    const workspaceId = rows[0]?.workspace_id as string | null | undefined;
+    if (workspaceId) this.onWorkspaceSnapshot(workspaceId);
+  }
+
   close(): void {
     for (const timer of this.healthTimers.values()) clearTimeout(timer);
     this.healthTimers.clear();
@@ -357,7 +373,7 @@ export class RegistrationCoordinator {
   async createSnapshot(
     vm: VmIdentity,
     input: SnapshotInput,
-    userId: string,
+    userId: string | null,
   ): Promise<RegistrationOperation> {
     const { agentId, parentVersionId, requestId } = input;
     const workspaceId = input.workspaceId ?? null;
@@ -422,13 +438,23 @@ export class RegistrationCoordinator {
 
       if (workspaceId) {
         const [workspaces] = await connection.execute<RowDataPacket[]>(
-          `SELECT state, source_version_id FROM vm_workspaces
+          `SELECT state, purpose, source_version_id FROM vm_workspaces
            WHERE id = ? AND agent_id = ? AND emulator_type = ? AND vm_name = ?`,
           [workspaceId, agentId, vm.emulatorType, canonicalName],
         );
         const workspace = workspaces[0];
         if (!workspace) throw new ApiError(404, 'workspace_not_found', 'Working copy not found');
-        if (workspace.state !== 'ready') {
+        // A Remote Volatile copy is never published, and a Remote Snapshot one only by its own lifecycle,
+        // once its session has ended (decision 0040). A Milestone 7 one is preserved by hand when ready.
+        if (workspace.purpose === 'remote_volatile') {
+          throw new ApiError(
+            409,
+            'workspace_purpose_mismatch',
+            'This is a Remote Volatile session: its changes are never published.',
+          );
+        }
+        const publishable = workspace.purpose === 'manual' ? 'ready' : 'publishing';
+        if (workspace.state !== publishable) {
           throw new ApiError(
             409,
             'workspace_unavailable',
@@ -640,6 +666,7 @@ export class RegistrationCoordinator {
     if (tell) {
       this.link.send(tell, { type: 'server.registration_cancel', payload: { operationId } });
     }
+    await this.notifyWorkspace(operationId);
     return this.require(operationId);
   }
 
@@ -914,6 +941,7 @@ export class RegistrationCoordinator {
       await connection.beginTransaction();
       const outcome = await this.commitIn(connection, operationId);
       await connection.commit();
+      if (outcome.outcome === 'rejected') await this.notifyWorkspace(operationId);
       return outcome;
     } catch (error) {
       await connection.rollback();
@@ -1103,6 +1131,7 @@ export class RegistrationCoordinator {
        WHERE id = ? AND agent_id = ?`,
       [cancelled ? 'cancelled' : 'failed', code, message, operationId, agentId],
     );
+    await this.notifyWorkspace(operationId);
     this.ack(agentId, { operationId, outcome: 'closed' });
   }
 
@@ -1129,6 +1158,7 @@ export class RegistrationCoordinator {
          WHERE id = ? AND state = 'cleaning_local'`,
         [operationId],
       );
+      await this.notifyWorkspace(operationId);
       this.ack(agentId, { operationId, outcome: 'closed' });
       return;
     }
@@ -1245,6 +1275,7 @@ export class RegistrationCoordinator {
        WHERE id = ? AND active_marker = 1 AND state <> 'cleaning_local'`,
       [code, FAILURE_TEXT[code] ?? code, operationId],
     );
+    await this.notifyWorkspace(operationId);
   }
 
   private async markPartial(
@@ -1259,5 +1290,6 @@ export class RegistrationCoordinator {
        WHERE id = ? AND state = 'cleaning_local'`,
       [localCopy, code, FAILURE_TEXT[code] ?? code, operationId],
     );
+    await this.notifyWorkspace(operationId);
   }
 }

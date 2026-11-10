@@ -84,6 +84,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             isOnline: (agentId) => hub.isOnline(agentId),
             executionCapabilities: (agentId) => hub.executionCapabilities(agentId),
             workspacesSupported: (agentId) => hub.workspacesSupported(agentId),
+            restoreCapabilities: (agentId) => hub.restoreCapabilities(agentId),
             send: (agentId, message) => hub.sendToAgent(agentId, message),
           },
           app.log,
@@ -99,8 +100,12 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           restores,
           execution,
           registrations,
+          browser.remoteSessions,
         );
         hub.setWorkspaces(workspaces);
+        // Remote sessions move on by themselves, and the sweep is what retries what is due.
+        workspaces.start();
+        app.addHook('onClose', () => workspaces.close());
         await api.register(async (scope) =>
           registerBrowserRoutes(
             scope,

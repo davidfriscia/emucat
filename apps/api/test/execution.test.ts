@@ -197,21 +197,25 @@ async function errorCode(response: { json: <T>() => T }): Promise<string> {
 }
 
 describe('options', () => {
-  it('offers local and Remote Snapshot execution, and says why Remote Volatile is unavailable', async () => {
+  it('offers all three modes, and says for each agent why a remote one cannot start', async () => {
     const w = await world();
     const response = await w.admin.get('/admin/vms/qemu/Win98/execution-options');
     expect(response.statusCode, response.body).toBe(200);
     const options = executionOptionsResponseSchema.parse(response.json());
-    expect(options.modes.map((mode) => [mode.mode, mode.available])).toEqual([
-      ['local', true],
-      ['remote_volatile', false],
-      ['remote_snapshot', true],
+    expect(options.modes.map((mode) => [mode.mode, mode.available, mode.reason])).toEqual([
+      ['local', true, null],
+      ['remote_volatile', true, null],
+      ['remote_snapshot', true, null],
     ]);
-    expect(options.modes[1]?.reason).toMatch(/remote display/);
-    expect(options.modes[2]?.reason).toMatch(/working copy/);
+    // This agent only says it runs local sessions: the remote modes are refused, with the reason.
     expect(options.agents[0]).toMatchObject({
       launch: { eligible: true, reason: null },
       verify: { eligible: true, reason: null },
+      remote: {
+        remote_volatile: { eligible: false, reason: 'mode_not_supported' },
+        remote_snapshot: { eligible: false, reason: 'mode_not_supported' },
+      },
+      activeWorkspaceId: null,
       local: { present: true, sourceVersionId: w.versionId },
       activeSession: null,
     });
@@ -308,10 +312,11 @@ describe('launch', () => {
   it('refuses a remote mode, and never falls back to a local launch', async () => {
     const w = await world();
     const attempts: [object, number, string][] = [
-      [{ mode: 'remote_volatile' }, 409, 'execution_mode_unavailable'],
-      // Remote Snapshot runs a working copy, so it has to name one.
+      // A remote mode runs a working copy, so it has to name one.
+      [{ mode: 'remote_volatile' }, 400, 'validation_failed'],
       [{ mode: 'remote_snapshot' }, 400, 'validation_failed'],
       // This agent only says it runs local sessions.
+      [{ mode: 'remote_volatile', workspaceId: randomUUID() }, 409, 'execution_mode_unavailable'],
       [{ mode: 'remote_snapshot', workspaceId: randomUUID() }, 409, 'execution_mode_unavailable'],
     ];
     for (const [overrides, status, code] of attempts) {

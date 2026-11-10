@@ -4,6 +4,8 @@ import {
   discardWorkspaceRequestSchema,
   launchWorkspaceRequestSchema,
   preserveWorkspaceRequestSchema,
+  resumeWorkspaceRequestSchema,
+  retryPublicationRequestSchema,
   vmPathParamsSchema,
   workspacePathParamsSchema,
   type CreateSnapshotRequest,
@@ -12,11 +14,12 @@ import {
   type LaunchWorkspaceRequest,
   type PreserveWorkspaceRequest,
   type RegistrationOperation,
+  type RemoteSession,
+  type RemoteSessionListResponse,
+  type ResumeWorkspaceRequest,
   type VersionTreeResponse,
   type VmIdentity,
   type VmSession,
-  type VmWorkspace,
-  type WorkspaceListResponse,
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
 import type { z } from 'zod';
@@ -94,7 +97,7 @@ export function registerAdminVersionRoutes(
       api.get(
         '/vms/:emulatorType/:vmName/workspaces',
         { schema: { params: vmPathParamsSchema } },
-        async (request): Promise<WorkspaceListResponse> => {
+        async (request): Promise<RemoteSessionListResponse> => {
           const vm = request.params as VmIdentity;
           await requireVm(vm);
           return { workspaces: await workspaces.list(vm) };
@@ -104,14 +107,20 @@ export function registerAdminVersionRoutes(
       api.post(
         '/vms/:emulatorType/:vmName/workspaces',
         { schema: { params: vmPathParamsSchema, body: createWorkspaceRequestSchema } },
-        async (request, reply): Promise<VmWorkspace> => {
+        async (request, reply): Promise<RemoteSession> => {
           const vm = request.params as VmIdentity;
           await requireVm(vm);
           const body = request.body as CreateWorkspaceRequest;
           const workspace = await workspaces.create(vm, body, sessionOf(request).user.id);
           request.log.info(
-            { workspaceId: workspace.id, vmName: workspace.vmName, agentId: body.agentId },
-            'Remote Snapshot working copy requested',
+            {
+              workspaceId: workspace.id,
+              vmName: workspace.vmName,
+              agentId: body.agentId,
+              versionId: body.versionId,
+              mode: body.mode,
+            },
+            'Remote session requested',
           );
           reply.status(202);
           return workspace;
@@ -121,7 +130,7 @@ export function registerAdminVersionRoutes(
       api.get(
         '/workspaces/:workspaceId',
         { schema: { params: workspacePathParamsSchema } },
-        async (request): Promise<VmWorkspace> => {
+        async (request): Promise<RemoteSession> => {
           const { workspaceId } = request.params as z.infer<typeof workspacePathParamsSchema>;
           const workspace = await workspaces.get(workspaceId);
           if (!workspace) throw new ApiError(404, 'workspace_not_found', 'Working copy not found');
@@ -165,11 +174,39 @@ export function registerAdminVersionRoutes(
       api.post(
         '/workspaces/:workspaceId/discard',
         { schema: { params: workspacePathParamsSchema, body: discardWorkspaceRequestSchema } },
-        async (request): Promise<VmWorkspace> => {
+        async (request): Promise<RemoteSession> => {
           const { workspaceId } = request.params as z.infer<typeof workspacePathParamsSchema>;
           const { confirmVmName } = request.body as DiscardWorkspaceRequest;
           const workspace = await workspaces.discard(workspaceId, confirmVmName);
-          request.log.info({ workspaceId }, 'Working copy discard requested');
+          request.log.info(
+            { workspaceId, abandoned: workspace.abandonedAt !== null },
+            'Working copy discard requested',
+          );
+          return workspace;
+        },
+      );
+
+      api.post(
+        '/workspaces/:workspaceId/retry-publication',
+        { schema: { params: workspacePathParamsSchema, body: retryPublicationRequestSchema } },
+        async (request, reply): Promise<RemoteSession> => {
+          const { workspaceId } = request.params as z.infer<typeof workspacePathParamsSchema>;
+          const workspace = await workspaces.retryPublication(workspaceId);
+          request.log.info({ workspaceId }, 'Remote snapshot publication retried');
+          reply.status(202);
+          return workspace;
+        },
+      );
+
+      api.post(
+        '/workspaces/:workspaceId/resume',
+        { schema: { params: workspacePathParamsSchema, body: resumeWorkspaceRequestSchema } },
+        async (request, reply): Promise<RemoteSession> => {
+          const { workspaceId } = request.params as z.infer<typeof workspacePathParamsSchema>;
+          const { confirmVmName } = request.body as ResumeWorkspaceRequest;
+          const workspace = await workspaces.resume(workspaceId, confirmVmName);
+          request.log.info({ workspaceId }, 'Held remote session resumed');
+          reply.status(202);
           return workspace;
         },
       );
