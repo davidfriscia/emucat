@@ -217,7 +217,7 @@ An administrator restores a registered master from the VM's page, by choosing an
 
 ## Snapshots and working copies
 
-A snapshot archives this agent's copy of a registered VM as a new version, exactly as a copy registration does, and never removes anything. The agent refuses one whose parent contradicts what it recorded about the copy (`snapshot_parent_mismatch`). A copy it has no record of, from an agent version that kept none, is taken on the server's word.
+A snapshot archives this agent's copy of a registered VM as a new version, exactly as a copy registration does, and never removes anything. The agent refuses one whose parent contradicts what it recorded about the copy (`snapshot_parent_mismatch`). It also refuses, with `snapshot_lineage_unverified`, a copy whose lineage it cannot prove for this very directory: no record, a record from before Milestone 7, or a directory that replaced the one the record was made for. Verifying an unchanged copy records its lineage, after which it can be snapshotted.
 
 Remote Snapshot working copies are kept in `workspaces` under the state directory, one directory per working copy with the VM inside it and a small `.workspace.json` record beside it. Nothing else reads or writes there; discovery never sees it, since the state directory is refused inside any base path. A working copy is removed only when the server asks, and only if nothing runs or works on the VM: it is renamed to `.removing-{id}` first, and a removal a crash interrupted finishes on the next start. Delete one by hand only while the agent is stopped. See [the launcher guide](launcher.md#snapshots-and-remote-snapshot).
 

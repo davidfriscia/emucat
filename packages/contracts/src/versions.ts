@@ -185,6 +185,7 @@ export const SNAPSHOT_INELIGIBLE_REASONS = [
   'local_copy_unsafe',
   'snapshot_parent_unknown',
   'snapshot_parent_mismatch',
+  'snapshot_lineage_unverified',
   'repository_not_authorized',
   'repository_disabled',
   'vm_running',
@@ -203,6 +204,8 @@ export const SNAPSHOT_INELIGIBLE_TEXT: Record<SnapshotIneligibleReason, string> 
     'Which version this local copy came from is not known, so a snapshot could not say what it branches from.',
   snapshot_parent_mismatch:
     'This agent’s local copy comes from another version. Choose that version as the parent.',
+  snapshot_lineage_unverified:
+    'This copy disappeared and came back since it was last verified, so nothing proves which version it came from. Verify it first.',
   repository_not_authorized: 'This agent is not associated with this VM’s repository.',
   repository_disabled: 'The repository of this VM is disabled.',
   vm_running:

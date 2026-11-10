@@ -1751,7 +1751,19 @@ fn snapshot(name: &str, parent: Uuid, workspace: Option<Uuid>) -> RegistrationRe
     }
 }
 
+/// Lineage as a restore of `version` into this very directory would have recorded it.
 fn record_source(world: &World, name: &str, version: Uuid) {
+    let identity = emucat_agent::packaging::directory_identity(&world.qemu.join(name)).unwrap();
+    record_lineage(world, name, version, Some(identity));
+}
+
+/// `None` is what an agent older than Milestone 7 recorded: a version, but no directory.
+fn record_lineage(
+    world: &World,
+    name: &str,
+    version: Uuid,
+    directory: Option<emucat_agent::packaging::DirectoryIdentity>,
+) {
     fs::create_dir_all(&world.state).unwrap();
     emucat_agent::state::record_local_source(
         &world.state,
@@ -1760,6 +1772,7 @@ fn record_source(world: &World, name: &str, version: Uuid) {
         &VmName::new(name).unwrap(),
         version,
         None,
+        directory,
     )
     .unwrap();
 }
@@ -1876,17 +1889,90 @@ async fn a_snapshot_whose_parent_contradicts_the_local_record_is_refused() {
 }
 
 #[tokio::test]
-async fn a_snapshot_of_a_copy_without_a_local_record_relies_on_the_server() {
+async fn a_snapshot_of_a_copy_without_a_lineage_record_is_refused_not_attributed() {
+    // The server believes the copy came from this master. Nothing on this agent says so.
     let world = World::new();
     world.qemu_vm("Win98");
     let operations = world.start();
-    let master = Uuid::new_v4();
-    let request = snapshot("Win98", master, None);
+    let request = snapshot("Win98", Uuid::new_v4(), None);
     start(&operations, &request);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "snapshot_lineage_unverified");
+    assert!(world.repository.keys().is_empty(), "nothing was published");
+    assert_eq!(local_source(&world, "Win98"), None);
+}
+
+#[tokio::test]
+async fn a_legacy_lineage_record_without_a_directory_is_not_evidence() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_lineage(&world, "Win98", master, None);
+    let operations = world.start();
+    start(&operations, &snapshot("Win98", master, None));
+    let (code, message) = failure_of(&operations).await;
+    assert_eq!(code, "snapshot_lineage_unverified");
+    assert!(message.contains("predates"), "{message}");
+    assert!(world.repository.keys().is_empty());
+    assert_eq!(
+        local_source(&world, "Win98"),
+        Some(master),
+        "the record is kept"
+    );
+}
+
+#[tokio::test]
+async fn a_directory_replaced_under_the_same_name_does_not_inherit_its_lineage() {
+    let world = World::new();
+    let original = world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    // Someone moves the restored copy away and puts another VM with the same name in its place. The old
+    // directory is kept, so that the new one cannot reuse its identity.
+    fs::rename(&original, world.qemu.join("Win98 moved away")).unwrap();
+    world.qemu_vm("Win98");
+    let operations = world.start();
+    start(&operations, &snapshot("Win98", master, None));
+    let (code, message) = failure_of(&operations).await;
+    assert_eq!(code, "snapshot_lineage_unverified");
+    assert!(message.contains("replaced"), "{message}");
+    assert!(world.repository.keys().is_empty());
+}
+
+#[tokio::test]
+async fn a_copy_registration_records_the_lineage_a_later_snapshot_relies_on() {
+    // The production path, with nothing fabricated: copy, commit, then snapshot the same directory.
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let operations = world.start();
+    let copy = request("Win98", RegistrationMode::Copy);
+    start(&operations, &copy);
     result_of(&operations).await;
-    operations.handle(committed(&request, false));
+    operations.handle(committed(&copy, false));
     cleanup_of(&operations).await;
-    assert_eq!(local_source(&world, "Win98"), Some(request.version_id));
+    operations.handle(closed(&copy));
+
+    let first = snapshot("Win98", copy.version_id, None);
+    start(&operations, &first);
+    result_of(&operations).await;
+    operations.handle(committed(&first, false));
+    cleanup_of(&operations).await;
+    operations.handle(closed(&first));
+    assert_eq!(local_source(&world, "Win98"), Some(first.version_id));
+
+    // The lineage moved with the commit: the master is no longer this copy's parent.
+    let stale = snapshot("Win98", copy.version_id, None);
+    start(&operations, &stale);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "snapshot_parent_mismatch");
+    let second = snapshot("Win98", first.version_id, None);
+    start(&operations, &second);
+    result_of(&operations).await;
+    assert_eq!(
+        world.repository.keys().len(),
+        3,
+        "the master and two snapshots, each under its own key"
+    );
 }
 
 #[tokio::test]

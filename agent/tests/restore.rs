@@ -2433,6 +2433,7 @@ async fn a_working_copy_is_restored_beside_the_persistent_copy_and_never_touches
         &harness.vm_name,
         Uuid::from_u128(42),
         None,
+        None,
     )
     .unwrap();
 
@@ -2554,4 +2555,97 @@ async fn a_restored_working_copy_is_removed_only_when_discarded() {
     ));
     assert!(!root.exists());
     assert!(emucat_agent::workspaces::held(&harness.state).is_empty());
+}
+
+// Lineage: which version a local copy provably came from, for the directory it is. Decision 0037.
+
+#[tokio::test]
+async fn a_restore_records_lineage_for_the_directory_it_published() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    start(&operations, &harness.request());
+    outcome(&operations).await.unwrap();
+    let directory = emucat_agent::packaging::directory_identity(&harness.destination()).unwrap();
+    assert_eq!(
+        emucat_agent::state::proven_lineage(
+            &harness.state,
+            EmulatorType::Qemu,
+            &harness.vm_name,
+            directory,
+            harness.version,
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        emucat_agent::state::proven_lineage(
+            &harness.state,
+            EmulatorType::Qemu,
+            &harness.vm_name,
+            directory,
+            Uuid::new_v4(),
+        ),
+        Err(emucat_agent::state::LineageProblem::OtherVersion(
+            harness.version
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_verification_of_an_unchanged_copy_establishes_lineage_and_a_changed_one_does_not() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let restore = harness.request();
+    start(&operations, &restore);
+    outcome(&operations).await.unwrap();
+    close(&operations, restore.operation_id);
+    let directory = emucat_agent::packaging::directory_identity(&harness.destination()).unwrap();
+    let lineage = || {
+        emucat_agent::state::proven_lineage(
+            &harness.state,
+            EmulatorType::Qemu,
+            &harness.vm_name,
+            directory,
+            harness.version,
+        )
+    };
+
+    // As an agent older than Milestone 7 left it: a version, and no directory.
+    emucat_agent::state::record_local_source(
+        &harness.state,
+        Uuid::from_u128(1),
+        EmulatorType::Qemu,
+        &harness.vm_name,
+        harness.version,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        lineage(),
+        Err(emucat_agent::state::LineageProblem::NoDirectoryRecorded)
+    );
+
+    // A changed copy proves nothing.
+    let original = fs::read(harness.destination().join("a/b/c.bin")).unwrap();
+    fs::write(harness.destination().join("a/b/c.bin"), b"DEEP").unwrap();
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    assert_eq!(
+        verified(&operations, request.operation_id).await.status,
+        VerifyResultStatus::Modified
+    );
+    assert_eq!(
+        lineage(),
+        Err(emucat_agent::state::LineageProblem::NoDirectoryRecorded)
+    );
+
+    // An identical one is a copy of that version, and now says so for this directory.
+    fs::write(harness.destination().join("a/b/c.bin"), original).unwrap();
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    assert_eq!(
+        verified(&operations, request.operation_id).await.status,
+        VerifyResultStatus::Verified
+    );
+    assert_eq!(lineage(), Ok(()));
 }

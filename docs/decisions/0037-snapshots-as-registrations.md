@@ -45,7 +45,33 @@ the local copy as `preserved`, so `partial_success` cannot arise from a healthy 
 
 The administrator names the parent. The server refuses the request (`snapshot_parent_mismatch`) unless it equals
 the agent's recorded `local_source_version_id` for that VM, and refuses it (`snapshot_parent_unknown`) when there
-is none. The agent checks the same against its own local state file and refuses with the same code. A copy the agent has no record of, from a version of the agent that kept none, is taken on the server's word, which checked its own; a record that disagrees is never overruled. So:
+is none. The agent checks the same against its own local state file and refuses with the same code.
+
+**Lineage is proven per directory, never taken on trust.** The agent's record of where a copy came from also holds the
+volume and file ID of the directory it was made for: the one a restore published, a copy or snapshot read, or a
+verification found identical to its version. A snapshot is accepted only when the record names the parent **and** the
+directory under the VM's name is that same directory, before and after archiving. Otherwise it is refused with
+`snapshot_lineage_unverified`, and nothing is published:
+
+| Situation                                                        | Result                                        |
+| ---------------------------------------------------------------- | --------------------------------------------- |
+| No record on the agent                                           | Refused. The server's belief is not evidence  |
+| A record written before Milestone 7, with no directory identity  | Refused, and the record is kept               |
+| A record for another directory: the copy was replaced by another | Refused                                       |
+| Discovery saw the copy disappear and come back (`unknown`)       | Refused by the server before anything is sent |
+| A record for this directory, naming another version              | `snapshot_parent_mismatch`                    |
+
+**Compatibility.** Existing registrations, masters and catalog rows are untouched. A legacy copy that is unchanged
+becomes snapshottable by **verifying it**: a verified result is the copy, file for file, so the agent records its
+lineage with the directory's identity, and the server marks it `idle` and `verified`. Verification checks the copy
+against the version it is recorded as coming from, or the master. A legacy copy that has changed cannot be attributed
+to any version, so its changes cannot become a snapshot; restore the version to change, or use Remote Snapshot. There
+is deliberately no override: a wrong parent would be permanent, since versions never change.
+
+On Windows a file ID identifies a directory for as long as it exists. On other platforms an inode can be reused once a
+directory is deleted, so a replacement made after deleting the original may go unnoticed there.
+
+So:
 
 - a snapshot always branches from **the version the local files came from**, never silently from the newest one;
 - after restoring an old version, the next snapshot is a child of that old version, which is how branches appear;

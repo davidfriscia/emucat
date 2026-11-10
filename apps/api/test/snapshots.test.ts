@@ -595,6 +595,88 @@ describe('creating a snapshot', () => {
   });
 });
 
+describe('lineage', () => {
+  it('refuses a copy that disappeared and came back, until a verification proves what it is', async () => {
+    const w = await world();
+    const a = await snapshot(w);
+    await complete(w, a);
+    // Discovery saw the directory go and come back: it may be another VM with the same name.
+    await w.context.pool.execute(
+      "UPDATE agent_vm_state SET execution_state = 'unknown', content_status = 'unverified' WHERE agent_id = ?",
+      [w.paired.agentId],
+    );
+    const refused = await snapshotRequest(w, { parentVersionId: a.versionId });
+    expect(refused.statusCode).toBe(409);
+    expect(await errorCode(refused)).toBe('snapshot_lineage_unverified');
+
+    // Verification checks the copy against the version it is recorded as coming from, the snapshot.
+    const started = await w.admin.request({
+      method: 'POST',
+      url: '/admin/verifications',
+      payload: { agentId: w.paired.agentId, emulatorType: 'qemu', vmName: 'Win98' },
+    });
+    expect(started.statusCode, started.body).toBe(202);
+    const request = await w.agent.next('server.vm_verify');
+    expect(request.payload).toMatchObject({
+      versionId: a.versionId,
+      archiveKey: a.archiveKey,
+      manifestSha256: 'd'.repeat(64),
+    });
+    const none = { count: 0, paths: [] };
+    w.agent.send(
+      envelope('agent.vm_verify_result', {
+        operationId: request.payload.operationId,
+        versionId: a.versionId,
+        status: 'verified',
+        filesVerified: 4,
+        bytesHashed: 8192,
+        durationMs: 1,
+        missing: none,
+        modified: none,
+        unexpected: none,
+        manifestSha256: 'd'.repeat(64),
+        manifestSource: 'local',
+        code: null,
+        message: null,
+      }),
+    );
+    await w.agent.next('server.vm_verify_ack');
+    const [rows] = await w.context.pool.execute<RowDataPacket[]>(
+      'SELECT execution_state, content_status, local_source_version_id FROM agent_vm_state WHERE agent_id = ?',
+      [w.paired.agentId],
+    );
+    expect(rows[0]).toMatchObject({
+      execution_state: 'idle',
+      content_status: 'verified',
+      local_source_version_id: a.versionId,
+    });
+    expect((await snapshotRequest(w, { parentVersionId: a.versionId })).statusCode).toBe(202);
+  });
+
+  it('records the agent’s lineage refusal as a failure that owns nothing', async () => {
+    const w = await world();
+    const operation = await snapshot(w);
+    await w.agent.next('server.registration_request');
+    w.agent.send(
+      envelope('agent.registration_error', {
+        operationId: operation.id,
+        code: 'snapshot_lineage_unverified',
+        message: 'This agent has no record of which version its local copy came from',
+      }),
+    );
+    expect((await w.agent.next('server.registration_ack')).payload.outcome).toBe('closed');
+    const failed = registrationOperationSchema.parse(
+      (await w.admin.get(`/admin/registrations/${operation.id}`)).json(),
+    );
+    expect(failed).toMatchObject({
+      state: 'failed',
+      error: { code: 'snapshot_lineage_unverified' },
+    });
+    expect(failed.recovery).toMatch(/verify the local copy/);
+    expect(await versionCount(w)).toBe(1);
+  });
+});
+
 describe('restoring historical versions', () => {
   it('offers every version, and restores a snapshot like a master', async () => {
     const w = await world();

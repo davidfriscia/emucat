@@ -703,13 +703,21 @@ export class ExecutionCoordinator {
       );
       const agent = agents[0];
       if (!agent || !agent.paired_at) throw new ApiError(404, 'agent_not_found', 'Agent not found');
+      // Against the version the copy came from, when that is recorded, so that a restored snapshot
+      // verifies as itself; otherwise against the master. A verified result re-establishes lineage.
       const [versions] = await connection.execute<RowDataPacket[]>(
         `SELECT version.id, version.vm_name, version.repository_id, version.archive_key,
                 version.archive_sha256, version.archive_size_bytes, reg.manifest_sha256
          FROM vm_versions AS version
          LEFT JOIN registration_operations AS reg ON reg.version_id = version.id
-         WHERE version.emulator_type = ? AND version.vm_name = ? AND version.kind = 'master'`,
-        [emulatorType, vmName],
+         LEFT JOIN agent_vm_state AS s
+           ON s.agent_id = ? AND s.emulator_type = version.emulator_type
+          AND s.vm_name = version.vm_name AND s.local_source_version_id = version.id
+         WHERE version.emulator_type = ? AND version.vm_name = ?
+           AND (version.kind = 'master' OR s.agent_id IS NOT NULL)
+         ORDER BY s.agent_id IS NULL, version.created_at
+         LIMIT 1`,
+        [agentId, emulatorType, vmName],
       );
       const version = versions[0];
       const canonicalName = (version?.vm_name as string | undefined) ?? vmName;
@@ -1003,7 +1011,7 @@ export class ExecutionCoordinator {
           `UPDATE agent_vm_state
            SET content_status = 'verified', last_verified_at = UTC_TIMESTAMP(3),
                last_verified_sha256 = ?, local_source_version_id = ?,
-               execution_state = IF(execution_state = 'absent', 'idle', execution_state)
+               execution_state = IF(execution_state IN ('absent', 'unknown'), 'idle', execution_state)
            WHERE agent_id = ? AND emulator_type = ? AND vm_name = ?`,
           [payload.manifestSha256, row.version_id, ...identity],
         );

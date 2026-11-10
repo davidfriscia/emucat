@@ -93,6 +93,7 @@ export const REGISTRATION_ERROR_CODES = [
   // From snapshots.
   'snapshot_parent_mismatch',
   'snapshot_parent_unknown',
+  'snapshot_lineage_unverified',
   'workspace_unavailable',
   // From local cleanup, after the master exists.
   'cleanup_identity_mismatch',
@@ -153,6 +154,8 @@ const RECOVERY: Partial<Record<string, string>> = {
     'The local copy does not come from the version that was chosen as the parent. Reload the page, and choose the version the local copy came from.',
   snapshot_parent_unknown:
     'Nobody knows which version this local copy came from, so a snapshot could not say what it branches from. Restore a version, or verify the copy, first.',
+  snapshot_lineage_unverified:
+    'Nothing proves which version this directory came from: its record predates Milestone 7, or the directory was replaced. Nothing was published. If it is unchanged, verify the local copy, which records its lineage, and try again. Otherwise restore the version you want to change, or use Remote Snapshot.',
   workspace_unavailable:
     'The working copy is not on the agent any more. Prepare a new one from the version you want.',
   cleanup_identity_mismatch:

@@ -835,12 +835,7 @@ impl Inner {
             })?;
         let base_path = match request.workspace_id {
             Some(workspace_id) => self.snapshot_workspace_base(&request, workspace_id)?,
-            None => {
-                if request.mode == RegistrationMode::Snapshot {
-                    self.check_snapshot_parent(&request)?;
-                }
-                base_path
-            }
+            None => base_path,
         };
         let repository = self.config.repositories.open(request.repository_id)?;
 
@@ -858,6 +853,11 @@ impl Inner {
                 format!("Cannot identify the directory: {error}"),
             )
         })?;
+        // A snapshot's parent is a claim about where these files came from. It is accepted only for the
+        // very directory that lineage was recorded for.
+        if request.mode == RegistrationMode::Snapshot && request.workspace_id.is_none() {
+            self.check_snapshot_lineage(&request, directory)?;
+        }
         // With synchronization, screenshots are dealt with after the commit, since an unregistered VM
         // cannot upload anything. Without it, nothing could prove them safe, so this stops here.
         if request.mode == RegistrationMode::Transfer && self.config.media.is_none() {
@@ -918,6 +918,15 @@ impl Inner {
             })
             .await??
         };
+        // The lineage was proven for one directory, so the archive must be of that one, still.
+        if request.mode == RegistrationMode::Snapshot
+            && directory_identity(&root).ok() != Some(directory)
+        {
+            return Err(failure(
+                "source_changed",
+                "The directory was replaced while it was archived",
+            ));
+        }
         write_manifest(&self.manifest_path(operation_id), &built.manifest).map_err(|error| {
             failure(
                 "staging_failed",
@@ -1083,29 +1092,50 @@ impl Inner {
         Ok(crate::workspaces::workspace_base(state_dir, workspace_id))
     }
 
-    /// The parent the server names must be the version this agent recorded the local copy as coming from.
-    /// A copy this agent has no record of, from before it kept one, is taken on the server's word, which
-    /// checked its own record; a record that says otherwise is never overruled.
-    fn check_snapshot_parent(&self, request: &RegistrationRequest) -> Result<(), JobFailure> {
-        let recorded = crate::state::read_local_state(
+    /// The parent the server names must be the version this agent recorded the local copy as coming from,
+    /// and the record must have been made for this very directory: a restore that published it, a copy or
+    /// snapshot that read it, or a verification that found it identical to that version. Nothing else is
+    /// evidence. A copy with no such record, such as one recorded before Milestone 7 or one whose directory
+    /// was replaced, is refused rather than attributed to whatever the server believes. Verifying it, if
+    /// it is unchanged, records its lineage. See decision 0037.
+    fn check_snapshot_lineage(
+        &self,
+        request: &RegistrationRequest,
+        directory: DirectoryIdentity,
+    ) -> Result<(), JobFailure> {
+        use crate::state::LineageProblem;
+        let Some(parent) = request.parent_version_id else {
+            return Err(failure("invalid_request", "A snapshot names its parent"));
+        };
+        let unverified = |message: &str| {
+            failure(
+                "snapshot_lineage_unverified",
+                format!(
+                    "{message}. Verify the local copy, or restore the version you want to change"
+                ),
+            )
+        };
+        match crate::state::proven_lineage(
             &self.config.state_dir,
             request.emulator_type,
             &request.vm_name,
-        )
-        .and_then(|state| state.local_source_version_id);
-        match recorded {
-            Some(VersionId(source)) if Some(source) != request.parent_version_id => Err(failure(
+            directory,
+            parent,
+        ) {
+            Ok(()) => Ok(()),
+            Err(LineageProblem::OtherVersion(_)) => Err(failure(
                 "snapshot_parent_mismatch",
                 "This agent recorded its local copy as coming from another version",
             )),
-            Some(_) => Ok(()),
-            None => {
-                tracing::warn!(
-                    operation_id = %request.operation_id,
-                    "No local record of where this copy came from; relying on the server's"
-                );
-                Ok(())
-            }
+            Err(LineageProblem::Unrecorded) => Err(unverified(
+                "This agent has no record of which version its local copy came from",
+            )),
+            Err(LineageProblem::NoDirectoryRecorded) => Err(unverified(
+                "This agent's record of where the local copy came from predates lineage checks",
+            )),
+            Err(LineageProblem::DirectoryReplaced) => Err(unverified(
+                "The directory is not the one this agent's lineage record was made for: it was replaced",
+            )),
         }
     }
 
@@ -1437,6 +1467,8 @@ impl Inner {
                     .result
                     .as_ref()
                     .map(|result| result.manifest_sha256.as_str()),
+                // The directory that was archived, as recorded before reading it.
+                journal.identity,
             )
         {
             // Registration succeeded. Local bookkeeping can be rebuilt by a later verification.

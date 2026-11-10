@@ -625,6 +625,8 @@ impl RestoreManager {
             &journal.request.vm_name,
             journal.request.version_id,
             Some(&result.manifest_sha256),
+            // The rename moved the directory this restore assembled; its identity is that one's.
+            journal.staged_identity,
         ) {
             tracing::warn!(%error, "Cannot record the local source version");
         }
@@ -1840,6 +1842,9 @@ impl RestoreManager {
                 }
             }
         };
+        // Which directory this is, before and after reading it: a verified result establishes lineage only
+        // for the directory that was read.
+        let before = directory_identity(&root).ok();
         let (manifest, manifest_sha256, source) =
             match self.verification_manifest(request, vm, cancel).await {
                 Ok(found) => found,
@@ -1856,8 +1861,11 @@ impl RestoreManager {
         }
         let (emulator, cancel) = (request.emulator_type, cancel.clone());
         let compared = manifest.clone();
+        let read_root = root.clone();
         let outcome =
-            match blocking(move || verify_local_copy(&root, emulator, &compared, &cancel)).await {
+            match blocking(move || verify_local_copy(&read_root, emulator, &compared, &cancel))
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     return failed(
@@ -1867,13 +1875,32 @@ impl RestoreManager {
                     );
                 }
             };
+        let after = directory_identity(&root).ok();
         let status = match outcome.status {
+            VerifyStatus::Verified if before.is_none() || before != after => {
+                VerifyResultStatus::VerificationFailed
+            }
             VerifyStatus::Verified => VerifyResultStatus::Verified,
             VerifyStatus::Modified => VerifyResultStatus::Modified,
             VerifyStatus::Missing => VerifyResultStatus::Missing,
             VerifyStatus::VerificationFailed => VerifyResultStatus::VerificationFailed,
         };
-        // A verified copy is a copy of this master, so its manifest is worth keeping for next time.
+        // Identical, file for file, to this version: this directory is a copy of it, which is what a
+        // snapshot's parent must be. Recorded with the directory's identity, as a restore would.
+        if status == VerifyResultStatus::Verified
+            && let Err(error) = record_local_source(
+                &self.config.state_dir,
+                self.config.agent_id,
+                vm.emulator_type,
+                &vm.vm_name,
+                request.version_id,
+                Some(&manifest_sha256),
+                before,
+            )
+        {
+            tracing::warn!(%error, "Cannot record the verified copy's lineage");
+        }
+        // A verified copy is a copy of this version, so its manifest is worth keeping for next time.
         if status == VerifyResultStatus::Verified
             && source != ManifestSource::Local
             && let Err(error) = keep_local_manifest(
@@ -1899,7 +1926,13 @@ impl RestoreManager {
             manifest_source: Some(source.as_str().to_owned()),
             code: (status == VerifyResultStatus::VerificationFailed)
                 .then(|| "verification_failed".to_owned()),
-            message: outcome.message.map(|message| bounded(&message)),
+            message: if outcome.status == VerifyStatus::Verified
+                && status == VerifyResultStatus::VerificationFailed
+            {
+                Some("The directory was replaced while it was verified".to_owned())
+            } else {
+                outcome.message.map(|message| bounded(&message))
+            },
         }
     }
 }
