@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
+  SNAPSHOT_INELIGIBLE_TEXT,
   archiveObjectKey,
+  formatSnapshotName,
   isRegistrationCommitted,
   isRegistrationTerminal,
   isRetryableCleanup,
@@ -17,6 +19,8 @@ import {
   type RegistrationSyncPayload,
   type RepositoryHealthResultPayload,
   type ServerMessage,
+  type SnapshotIneligibleReason,
+  type VmIdentity,
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
@@ -28,6 +32,8 @@ import { recordHealthResult } from './repositories.js';
 export interface AgentLink {
   isOnline(agentId: string): boolean;
   isRegistrationCapable(agentId: string): boolean;
+  /** Whether this connection's agent said it can create snapshots. */
+  isSnapshotCapable(agentId: string): boolean;
   activeConnectionId(agentId: string): string | null;
   latestDiscovery(agentId: string): DiscoveryRecord | null;
   send(agentId: string, message: Pick<ServerMessage, 'type' | 'payload'>): boolean;
@@ -58,6 +64,10 @@ interface OperationRow extends RowDataPacket {
   mode: RegistrationOperation['mode'];
   state: RegistrationState;
   version_id: string;
+  parent_version_id: string | null;
+  snapshot_name: string | null;
+  workspace_id: string | null;
+  request_id: string | null;
   archive_key: string;
   progress_done_bytes: number | string | null;
   progress_total_bytes: number | string | null;
@@ -82,6 +92,7 @@ const OPERATION_QUERY = `
          op.repository_id, r.name AS repository_name,
          op.requested_by_user_id, u.display_name AS requested_by_display_name,
          op.emulator_type, op.vm_name, op.mode, op.state, op.version_id, op.archive_key,
+         op.parent_version_id, op.snapshot_name, op.workspace_id, op.request_id,
          op.progress_done_bytes, op.progress_total_bytes,
          op.archive_size_bytes, op.archive_sha256, op.manifest_version, op.manifest_sha256,
          op.file_count, op.total_uncompressed_bytes, op.local_copy,
@@ -132,6 +143,9 @@ function toOperation(row: OperationRow, online: boolean): RegistrationOperation 
     mode: row.mode,
     state: row.state,
     versionId: row.version_id,
+    parentVersionId: row.parent_version_id,
+    snapshotName: row.snapshot_name,
+    workspaceId: row.workspace_id,
     archiveKey: row.archive_key,
     progress: {
       doneBytes: toNumber(row.progress_done_bytes),
@@ -162,6 +176,32 @@ function toOperation(row: OperationRow, online: boolean): RegistrationOperation 
 
 function isDuplicateEntry(error: unknown): boolean {
   return (error as { code?: string }).code === 'ER_DUP_ENTRY';
+}
+
+/** What goes to the agent for an operation, from its row. Snapshot fields only when there are any. */
+function requestFor(row: OperationRow): RegistrationRequestPayload {
+  return {
+    operationId: row.id,
+    emulatorType: row.emulator_type,
+    vmName: row.vm_name,
+    mode: row.mode,
+    repositoryId: row.repository_id,
+    versionId: row.version_id,
+    archiveKey: row.archive_key,
+    ...(row.parent_version_id ? { parentVersionId: row.parent_version_id } : {}),
+    ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+  };
+}
+
+const refuseSnapshot = (reason: SnapshotIneligibleReason, status = 409) =>
+  new ApiError(status, reason, SNAPSHOT_INELIGIBLE_TEXT[reason]);
+
+export interface SnapshotInput {
+  agentId: string;
+  parentVersionId: string;
+  requestId: string;
+  /** Preserve this Remote Snapshot working copy, rather than the persistent local VM. */
+  workspaceId?: string | undefined;
 }
 
 const FAILURE_TEXT: Record<string, string> = {
@@ -307,6 +347,181 @@ export class RegistrationCoordinator {
       agentId,
     );
     return this.require(operationId);
+  }
+
+  /**
+   * A snapshot of a registered VM: the agent's persistent copy, or one of its working copies. The parent
+   * must be the version those files came from; the agent checks that again against its own state. A
+   * repeated request finds the operation it already created, whatever happened since. See decision 0037.
+   */
+  async createSnapshot(
+    vm: VmIdentity,
+    input: SnapshotInput,
+    userId: string,
+  ): Promise<RegistrationOperation> {
+    const { agentId, parentVersionId, requestId } = input;
+    const workspaceId = input.workspaceId ?? null;
+    const repeated = await this.byRequest(requestId);
+    if (repeated) return this.sameSnapshotRequest(repeated, vm, input);
+
+    if (!this.link.isOnline(agentId)) throw refuseSnapshot('agent_offline');
+    if (!this.link.isRegistrationCapable(agentId) || !this.link.isSnapshotCapable(agentId)) {
+      throw refuseSnapshot('agent_cannot_snapshot');
+    }
+
+    const operationId = randomUUID();
+    const versionId = randomUUID();
+    let canonicalName: string;
+    let repositoryId: string;
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      // Shared, as a registration's: restore and launch take it exclusively, so none start alongside.
+      const [agents] = await connection.execute<RowDataPacket[]>(
+        'SELECT revoked_at, paired_at FROM agents WHERE id = ? LOCK IN SHARE MODE',
+        [agentId],
+      );
+      if (!agents[0] || !agents[0].paired_at) {
+        throw new ApiError(404, 'agent_not_found', 'Agent not found');
+      }
+      if (agents[0].revoked_at) throw refuseSnapshot('agent_revoked');
+
+      // Scoped to the VM: a version of another VM is simply not found.
+      const [versions] = await connection.execute<RowDataPacket[]>(
+        `SELECT version.vm_name, version.repository_id, r.enabled, ar.agent_id AS authorized
+         FROM vm_versions AS version
+         JOIN repositories AS r ON r.id = version.repository_id
+         LEFT JOIN agent_repositories AS ar
+           ON ar.repository_id = version.repository_id AND ar.agent_id = ?
+         WHERE version.id = ? AND version.emulator_type = ? AND version.vm_name = ?`,
+        [agentId, parentVersionId, vm.emulatorType, vm.vmName],
+      );
+      const parent = versions[0];
+      if (!parent) throw new ApiError(404, 'version_not_found', 'Version not found');
+      canonicalName = parent.vm_name as string;
+      repositoryId = parent.repository_id as string;
+      if (!parent.enabled) throw refuseSnapshot('repository_disabled');
+      if (!parent.authorized) throw refuseSnapshot('repository_not_authorized');
+
+      const [busy] = await connection.execute<RowDataPacket[]>(
+        `SELECT 1 FROM restore_operations WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 1 FROM vm_verifications WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 1 FROM registration_operations WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 1 FROM registration_operations
+           WHERE emulator_type = ? AND vm_name = ? AND active_marker = 1`,
+        [agentId, agentId, agentId, vm.emulatorType, canonicalName],
+      );
+      if (busy.length > 0) throw refuseSnapshot('operation_in_progress');
+      // Unknown sessions count: an emulator that may be running describes no moment of its disks.
+      const [sessions] = await connection.execute<RowDataPacket[]>(
+        `SELECT 1 FROM vm_sessions
+         WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1`,
+        [agentId, vm.emulatorType, canonicalName],
+      );
+      if (sessions.length > 0) throw refuseSnapshot('vm_running');
+
+      if (workspaceId) {
+        const [workspaces] = await connection.execute<RowDataPacket[]>(
+          `SELECT state, source_version_id FROM vm_workspaces
+           WHERE id = ? AND agent_id = ? AND emulator_type = ? AND vm_name = ?`,
+          [workspaceId, agentId, vm.emulatorType, canonicalName],
+        );
+        const workspace = workspaces[0];
+        if (!workspace) throw new ApiError(404, 'workspace_not_found', 'Working copy not found');
+        if (workspace.state !== 'ready') {
+          throw new ApiError(
+            409,
+            'workspace_unavailable',
+            'This working copy is not ready, so it cannot be preserved.',
+          );
+        }
+        if (workspace.source_version_id !== parentVersionId) {
+          throw refuseSnapshot('snapshot_parent_mismatch');
+        }
+      } else {
+        const [states] = await connection.execute<RowDataPacket[]>(
+          `SELECT execution_state, local_source_version_id FROM agent_vm_state
+           WHERE agent_id = ? AND emulator_type = ? AND vm_name = ?`,
+          [agentId, vm.emulatorType, canonicalName],
+        );
+        const state = states[0];
+        if (!state || state.execution_state === 'absent')
+          throw refuseSnapshot('local_copy_missing');
+        if (state.execution_state === 'error') throw refuseSnapshot('local_copy_unsafe');
+        if (!state.local_source_version_id) throw refuseSnapshot('snapshot_parent_unknown');
+        if (state.local_source_version_id !== parentVersionId) {
+          throw refuseSnapshot('snapshot_parent_mismatch');
+        }
+      }
+
+      try {
+        await connection.execute(
+          `INSERT INTO registration_operations
+             (id, agent_id, repository_id, requested_by_user_id, request_id, emulator_type, vm_name,
+              mode, version_id, parent_version_id, snapshot_name, workspace_id, archive_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'snapshot', ?, ?, ?, ?, ?)`,
+          [
+            operationId,
+            agentId,
+            repositoryId,
+            userId,
+            requestId,
+            vm.emulatorType,
+            canonicalName,
+            versionId,
+            parentVersionId,
+            formatSnapshotName(canonicalName, new Date()),
+            workspaceId,
+            archiveObjectKey({ emulatorType: vm.emulatorType, vmName: canonicalName }, versionId),
+          ],
+        );
+      } catch (error) {
+        if (isDuplicateEntry(error)) throw refuseSnapshot('operation_in_progress');
+        throw error;
+      }
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      // Two identical requests at once: the loser finds the winner's operation.
+      if (error instanceof ApiError && error.code === 'operation_in_progress') {
+        const winner = await this.byRequest(requestId);
+        if (winner) return this.sameSnapshotRequest(winner, vm, input);
+      }
+      throw error;
+    } finally {
+      connection.release();
+    }
+
+    const row = await this.rowFor(agentId, operationId);
+    // If this cannot be delivered, the operation stays queued and goes out when the agent reconnects.
+    if (row) this.dispatch(requestFor(row), agentId);
+    return this.require(operationId);
+  }
+
+  private async byRequest(requestId: string): Promise<OperationRow | null> {
+    const [rows] = await this.pool.execute<OperationRow[]>(
+      `${OPERATION_QUERY} WHERE op.request_id = ?`,
+      [requestId],
+    );
+    return rows[0] ?? null;
+  }
+
+  private sameSnapshotRequest(
+    row: OperationRow,
+    vm: VmIdentity,
+    input: SnapshotInput,
+  ): RegistrationOperation {
+    if (
+      row.mode !== 'snapshot' ||
+      row.agent_id !== input.agentId ||
+      row.emulator_type !== vm.emulatorType ||
+      row.vm_name.toLowerCase() !== vm.vmName.toLowerCase() ||
+      row.parent_version_id !== input.parentVersionId ||
+      row.workspace_id !== (input.workspaceId ?? null)
+    ) {
+      throw new ApiError(409, 'request_id_reused', 'This request ID belongs to another operation.');
+    }
+    return toOperation(row, this.link.isOnline(row.agent_id));
   }
 
   private requireFreshDiscovery(input: CreateRegistrationRequest): void {
@@ -586,18 +801,7 @@ export class RegistrationCoordinator {
     for (const row of active) {
       if (listed.has(row.id)) continue;
       if (row.state === 'queued') {
-        this.dispatch(
-          {
-            operationId: row.id,
-            emulatorType: row.emulator_type,
-            vmName: row.vm_name,
-            mode: row.mode,
-            repositoryId: row.repository_id,
-            versionId: row.version_id,
-            archiveKey: row.archive_key,
-          },
-          agentId,
-        );
+        this.dispatch(requestFor(row), agentId);
       } else if (row.state === 'cleaning_local') {
         await this.markPartial(row.id, 'agent_lost_operation', 'unknown');
       } else {
@@ -776,6 +980,11 @@ export class RegistrationCoordinator {
       );
     }
 
+    if (row.mode === 'snapshot') {
+      await this.commitSnapshotIn(connection, row);
+      return committed;
+    }
+
     await connection.execute(
       `INSERT INTO virtual_machines
          (emulator_type, vm_name, registered_by_user_id, discovered_by_agent_id)
@@ -816,6 +1025,59 @@ export class RegistrationCoordinator {
     return committed;
   }
 
+  /**
+   * A snapshot's commit: one immutable version under its parent, and the copy it was made from now being a
+   * verified copy of it. The parent's foreign key keeps it in the same VM, and the version's trigger keeps
+   * every earlier one as it was. A working copy's source moves instead; the persistent copy is untouched.
+   */
+  private async commitSnapshotIn(connection: PoolConnection, row: RowDataPacket): Promise<void> {
+    await connection.execute(
+      `INSERT INTO vm_versions
+         (id, emulator_type, vm_name, kind, parent_version_id, snapshot_name, repository_id,
+          archive_key, archive_sha256, archive_size_bytes, created_by_agent_id, created_by_user_id)
+       VALUES (?, ?, ?, 'snapshot', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.version_id,
+        row.emulator_type,
+        row.vm_name,
+        row.parent_version_id,
+        row.snapshot_name,
+        row.repository_id,
+        row.archive_key,
+        row.archive_sha256,
+        row.archive_size_bytes,
+        row.agent_id,
+        row.requested_by_user_id,
+      ],
+    );
+    if (row.workspace_id) {
+      await connection.execute(
+        `UPDATE vm_workspaces SET source_version_id = ?, may_have_changes = FALSE
+         WHERE id = ? AND agent_id = ?`,
+        [row.version_id, row.workspace_id, row.agent_id],
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO agent_vm_state
+           (agent_id, emulator_type, vm_name, local_source_version_id, execution_state,
+            content_status, last_verified_at, last_verified_sha256)
+         VALUES (?, ?, ?, ?, 'idle', 'verified', UTC_TIMESTAMP(3), ?)
+         ON DUPLICATE KEY UPDATE local_source_version_id = VALUES(local_source_version_id),
+           execution_state = 'idle', content_status = 'verified',
+           last_verified_at = VALUES(last_verified_at),
+           last_verified_sha256 = VALUES(last_verified_sha256)`,
+        [row.agent_id, row.emulator_type, row.vm_name, row.version_id, row.manifest_sha256],
+      );
+    }
+    await connection.execute(
+      `UPDATE registration_operations
+       SET state = 'cleaning_local', committed_at = UTC_TIMESTAMP(3),
+           progress_done_bytes = NULL, progress_total_bytes = NULL
+       WHERE id = ?`,
+      [row.id],
+    );
+  }
+
   async failed(agentId: string, payload: RegistrationErrorPayload): Promise<void> {
     const { operationId, code, message } = payload;
     const row = await this.rowFor(agentId, operationId);
@@ -851,9 +1113,20 @@ export class RegistrationCoordinator {
       this.log.warn({ agentId, operationId }, 'Ignored a cleanup report that does not fit');
       return;
     }
-    // A copy cannot have removed anything, whatever a report says.
-    if (row.mode === 'copy' && localCopy !== 'preserved') {
-      this.log.error({ agentId, operationId }, 'A copy reported something other than preserved');
+    // A copy or a snapshot cannot have removed anything, whatever a report says, and nothing here may
+    // conclude otherwise about the local VM.
+    if (row.mode !== 'transfer') {
+      if (localCopy !== 'preserved') {
+        this.log.error({ agentId, operationId }, 'A copy reported something other than preserved');
+      }
+      await this.pool.execute(
+        `UPDATE registration_operations
+         SET state = 'succeeded', local_copy = 'preserved', finished_at = UTC_TIMESTAMP(3)
+         WHERE id = ? AND state = 'cleaning_local'`,
+        [operationId],
+      );
+      this.ack(agentId, { operationId, outcome: 'closed' });
+      return;
     }
     const connection = await this.pool.getConnection();
     try {

@@ -31,6 +31,7 @@ import type {
   ExecutionSyncPayload,
   VmExecutionStatusPayload,
   VmVerifyResultPayload,
+  WorkspaceDiscardResultPayload,
 } from '@emucat/contracts';
 import { DiscoveryCoordinator, type DiscoveryRecord } from './discovery.js';
 
@@ -87,6 +88,13 @@ export interface AgentExecutionHandler {
   agentRevoked(agentId: string): Promise<void>;
 }
 
+/** What is done with Remote Snapshot working-copy messages. Every call is for the active connection. */
+export interface AgentWorkspacesHandler {
+  synced(agentId: string, workspaceIds: readonly string[]): Promise<void>;
+  discardResult(agentId: string, payload: WorkspaceDiscardResultPayload): Promise<void>;
+  agentRevoked(agentId: string): Promise<void>;
+}
+
 export interface AgentHubOptions {
   presence: AgentPresence;
   heartbeatIntervalSeconds: number;
@@ -134,6 +142,10 @@ interface Connection {
   restoreCapabilities: RestoreSyncPayload['capabilities'] | null;
   /** What `agent.execution_sync` said this connection's agent can launch. Older agents never send it. */
   executionCapabilities: ExecutionSyncPayload['capabilities'] | null;
+  /** Whether `agent.registration_sync` said this agent can create snapshots. */
+  snapshotCapable: boolean;
+  /** Whether `agent.restore_sync` listed working copies, which only agents that keep them do. */
+  workspacesSupported: boolean;
 }
 
 /** What `ws` calls a frame over its `maxPayload`. */
@@ -167,6 +179,7 @@ export class AgentHub {
   private operations: AgentOperationsHandler | null = null;
   private restores: AgentRestoresHandler | null = null;
   private execution: AgentExecutionHandler | null = null;
+  private workspaces: AgentWorkspacesHandler | null = null;
   /** What each agent last said about its screenshots. Stale once it is offline, and says when it spoke. */
   private readonly mediaStatuses = new Map<
     string,
@@ -195,6 +208,18 @@ export class AgentHub {
 
   setExecution(execution: AgentExecutionHandler): void {
     this.execution = execution;
+  }
+
+  setWorkspaces(workspaces: AgentWorkspacesHandler): void {
+    this.workspaces = workspaces;
+  }
+
+  isSnapshotCapable(agentId: string): boolean {
+    return this.active.get(agentId)?.snapshotCapable ?? false;
+  }
+
+  workspacesSupported(agentId: string): boolean {
+    return this.active.get(agentId)?.workspacesSupported ?? false;
   }
 
   executionCapabilities(agentId: string): ExecutionSyncPayload['capabilities'] | null {
@@ -255,6 +280,8 @@ export class AgentHub {
       registrationCapable: false,
       restoreCapabilities: null,
       executionCapabilities: null,
+      snapshotCapable: false,
+      workspacesSupported: false,
     };
     this.connections.add(connection);
     log.info({ agentId, connectionId: connection.id }, 'Agent connected');
@@ -490,6 +517,17 @@ export class AgentHub {
       case 'agent.vm_verify_result':
         await this.handleExecutionMessage(connection, message);
         break;
+      case 'agent.workspace_discard_result':
+        if (this.active.get(agentId) !== connection || !this.workspaces) {
+          connection.log.warn({ agentId }, 'Ignored a message from an inactive connection');
+          break;
+        }
+        try {
+          await this.workspaces.discardResult(agentId, message.payload);
+        } catch (error) {
+          connection.log.error({ agentId, err: error }, 'Cannot handle an agent report');
+        }
+        break;
     }
   }
 
@@ -522,6 +560,7 @@ export class AgentHub {
       switch (message.type) {
         case 'agent.registration_sync':
           connection.registrationCapable = true;
+          connection.snapshotCapable = message.payload.snapshots === true;
           await operations.synced(agentId, message.payload);
           break;
         case 'agent.registration_progress':
@@ -569,7 +608,11 @@ export class AgentHub {
       switch (message.type) {
         case 'agent.restore_sync':
           connection.restoreCapabilities = message.payload.capabilities;
+          connection.workspacesSupported = message.payload.workspaces !== undefined;
           await restores.synced(agentId, message.payload);
+          if (message.payload.workspaces && this.workspaces) {
+            await this.workspaces.synced(agentId, message.payload.workspaces);
+          }
           break;
         case 'agent.restore_progress':
           await restores.progress(agentId, message.payload);
@@ -644,6 +687,22 @@ export class AgentHub {
               connection.log.error(
                 { agentId, err: error },
                 'Cannot end a revoked agent’s restores',
+              );
+            }
+          }
+        })
+        .finally(() => this.pendingPresence.delete(ended));
+      this.pendingPresence.add(ended);
+    }
+    if (this.workspaces) {
+      const ended = this.workspaces
+        .agentRevoked(agentId)
+        .catch((error: unknown) => {
+          for (const connection of this.connections) {
+            if (connection.agentId === agentId) {
+              connection.log.error(
+                { agentId, err: error },
+                'Cannot end a revoked agent’s working copies',
               );
             }
           }

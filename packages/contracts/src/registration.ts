@@ -5,11 +5,15 @@ import { vmNameSchema } from './vm-name.js';
 
 /**
  * Copy keeps the local VM. Transfer removes it, only after a verified master is committed and every
- * local check has passed again. See decision 0015.
+ * local check has passed again. See decision 0015. Snapshot archives a registered VM again, as a new
+ * immutable version whose parent is the version its local files came from. See decision 0037.
  */
-export const REGISTRATION_MODES = ['copy', 'transfer'] as const;
+export const REGISTRATION_MODES = ['copy', 'transfer', 'snapshot'] as const;
 export const registrationModeSchema = z.enum(REGISTRATION_MODES);
 export type RegistrationMode = z.infer<typeof registrationModeSchema>;
+
+/** What a registration of an unregistered VM can be. Snapshots have their own request. */
+export const MASTER_REGISTRATION_MODES = ['copy', 'transfer'] as const;
 
 export const REGISTRATION_STATES = [
   'queued',
@@ -86,6 +90,10 @@ export const REGISTRATION_ERROR_CODES = [
   'duplicate_registration',
   'repository_not_authorized',
   'internal_error',
+  // From snapshots.
+  'snapshot_parent_mismatch',
+  'snapshot_parent_unknown',
+  'workspace_unavailable',
   // From local cleanup, after the master exists.
   'cleanup_identity_mismatch',
   'cleanup_content_changed',
@@ -141,6 +149,12 @@ const RECOVERY: Partial<Record<string, string>> = {
   invalid_result: 'Update the agent and the server to the same version.',
   duplicate_registration: 'This VM is already registered, with a different master.',
   repository_not_authorized: 'Associate this agent with the repository, and try again.',
+  snapshot_parent_mismatch:
+    'The local copy does not come from the version that was chosen as the parent. Reload the page, and choose the version the local copy came from.',
+  snapshot_parent_unknown:
+    'Nobody knows which version this local copy came from, so a snapshot could not say what it branches from. Restore a version, or verify the copy, first.',
+  workspace_unavailable:
+    'The working copy is not on the agent any more. Prepare a new one from the version you want.',
   cleanup_identity_mismatch:
     'The master is registered and safe. The directory is no longer the one that was archived, so it was kept. Decide what to do with it yourself.',
   cleanup_content_changed:
@@ -180,15 +194,28 @@ const errorMessageSchema = z.string().max(1024);
 // The protocol.
 
 /** A command, holding no path and no address. The agent refuses a request with any other field. */
-export const registrationRequestPayloadSchema = z.strictObject({
-  operationId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
-  vmName: vmNameSchema,
-  mode: registrationModeSchema,
-  repositoryId: z.uuid(),
-  versionId: z.uuid(),
-  archiveKey: z.string().min(1).max(512),
-});
+export const registrationRequestPayloadSchema = z
+  .strictObject({
+    operationId: z.uuid(),
+    emulatorType: emulatorTypeSchema,
+    vmName: vmNameSchema,
+    mode: registrationModeSchema,
+    repositoryId: z.uuid(),
+    versionId: z.uuid(),
+    archiveKey: z.string().min(1).max(512),
+    /** A snapshot's parent. The agent refuses one its own local state contradicts. */
+    parentVersionId: z.uuid().optional(),
+    /** A snapshot of a Remote Snapshot working copy, rather than of the persistent local VM. */
+    workspaceId: z.uuid().optional(),
+  })
+  .refine((request) => (request.mode === 'snapshot') === (request.parentVersionId !== undefined), {
+    message: 'A snapshot names its parent, and nothing else does',
+    path: ['parentVersionId'],
+  })
+  .refine((request) => request.workspaceId === undefined || request.mode === 'snapshot', {
+    message: 'Only a snapshot reads a working copy',
+    path: ['workspaceId'],
+  });
 export type RegistrationRequestPayload = z.infer<typeof registrationRequestPayloadSchema>;
 
 export const registrationCancelPayloadSchema = z.strictObject({ operationId: z.uuid() });
@@ -238,6 +265,8 @@ export const registrationSyncPayloadSchema = z.object({
   operations: z
     .array(z.object({ operationId: z.uuid(), phase: z.enum(REGISTRATION_SYNC_PHASES) }))
     .max(256),
+  /** Whether this agent can create snapshots. Older agents do not say, and are not asked to. */
+  snapshots: z.boolean().optional(),
 });
 export type RegistrationSyncPayload = z.infer<typeof registrationSyncPayloadSchema>;
 
@@ -389,7 +418,7 @@ export const createRegistrationRequestSchema = z
     repositoryId: z.uuid(),
     emulatorType: emulatorTypeSchema,
     vmName: vmNameSchema,
-    mode: registrationModeSchema,
+    mode: z.enum(MASTER_REGISTRATION_MODES),
     discoveryOperationId: z.uuid(),
     confirmDestructive: z.boolean().optional(),
   })
@@ -411,6 +440,11 @@ export const registrationOperationSchema = z.object({
   mode: registrationModeSchema,
   state: registrationStateSchema,
   versionId: z.uuid(),
+  /** A snapshot's parent and name. Both `null` for a master. */
+  parentVersionId: z.uuid().nullable(),
+  snapshotName: z.string().nullable(),
+  /** Set when a snapshot preserves a Remote Snapshot working copy. */
+  workspaceId: z.uuid().nullable(),
   archiveKey: z.string(),
   progress: z.object({
     doneBytes: safeSizeSchema.nullable(),

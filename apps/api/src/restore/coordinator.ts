@@ -39,6 +39,7 @@ interface OperationRow extends RowDataPacket {
   emulator_type: RestoreOperation['emulatorType'];
   vm_name: string;
   version_id: string;
+  workspace_id: string | null;
   state: RestoreState;
   archive_key: string;
   archive_sha256: string;
@@ -67,7 +68,7 @@ interface OperationRow extends RowDataPacket {
 const OPERATION_QUERY = `
   SELECT op.id, op.agent_id, a.name AS agent_name, op.repository_id, r.name AS repository_name,
          u.display_name AS requested_by_display_name,
-         op.emulator_type, op.vm_name, op.version_id, op.state,
+         op.emulator_type, op.vm_name, op.version_id, op.workspace_id, op.state,
          op.archive_key, op.archive_sha256, op.archive_size_bytes,
          op.expected_manifest_sha256, op.expected_uncompressed_bytes,
          op.progress_done_bytes, op.progress_total_bytes,
@@ -113,6 +114,7 @@ function toOperation(row: OperationRow, online: boolean): RestoreOperation {
     emulatorType: row.emulator_type,
     vmName: row.vm_name,
     versionId: row.version_id,
+    workspaceId: row.workspace_id,
     state: row.state,
     archive: { sizeBytes: Number(row.archive_size_bytes), sha256: row.archive_sha256 },
     progress: {
@@ -149,6 +151,29 @@ function isDuplicateEntry(error: unknown): boolean {
   return (error as { code?: string }).code === 'ER_DUP_ENTRY';
 }
 
+function requestFor(row: OperationRow): RestoreRequestPayload {
+  return {
+    operationId: row.id,
+    emulatorType: row.emulator_type,
+    vmName: row.vm_name,
+    repositoryId: row.repository_id,
+    versionId: row.version_id,
+    archiveKey: row.archive_key,
+    archiveSizeBytes: Number(row.archive_size_bytes),
+    archiveSha256: row.archive_sha256,
+    manifestSha256: row.expected_manifest_sha256,
+    expectedUncompressedBytes: toNumber(row.expected_uncompressed_bytes),
+    ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+  };
+}
+
+/** A restore that prepares a Remote Snapshot working copy, rather than the persistent local copy. */
+export interface WorkspaceTarget {
+  workspaceId: string;
+  requestId: string;
+  launchOnReady: boolean;
+}
+
 const FAILURE_TEXT: Record<string, string> = {
   agent_revoked: 'The agent was revoked before this finished.',
   agent_lost_operation: 'The agent no longer knows about this operation.',
@@ -183,6 +208,9 @@ interface EligibilityFacts {
  * until answered, so every handler is idempotent, as in decision 0015.
  */
 export class RestoreCoordinator {
+  /** Called after a working copy's restore has committed, so that it can be launched if asked. */
+  onWorkspaceReady: ((workspaceId: string) => void) | null = null;
+
   constructor(
     private readonly pool: Pool,
     private readonly link: RestoreLink,
@@ -195,6 +223,7 @@ export class RestoreCoordinator {
     emulatorType: VmIdentity['emulatorType'],
     repositoryId: string,
     facts: EligibilityFacts,
+    intoWorkspace = false,
   ): RestoreIneligibleReason | null {
     if (facts.revoked) return 'agent_revoked';
     if (!this.link.isOnline(agentId)) return 'agent_offline';
@@ -206,7 +235,10 @@ export class RestoreCoordinator {
     if (!facts.authorized) return 'repository_not_authorized';
     if (!capabilities.repositoryIds.includes(repositoryId)) return 'repository_not_configured';
     if (facts.running) return 'vm_running';
-    if (facts.localState !== null && facts.localState !== 'absent') return 'local_copy_exists';
+    // A working copy has its own directory: the persistent copy is neither in the way nor at risk.
+    if (!intoWorkspace && facts.localState !== null && facts.localState !== 'absent') {
+      return 'local_copy_exists';
+    }
     if (facts.busy) return 'operation_in_progress';
     return null;
   }
@@ -215,18 +247,32 @@ export class RestoreCoordinator {
 
   async options(vm: VmIdentity): Promise<RestoreOptionsResponse> {
     const [versions] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT version.id, version.vm_name, version.repository_id, version.archive_size_bytes,
+      `SELECT version.id, version.kind, version.parent_version_id, version.snapshot_name,
+              version.vm_name, version.repository_id, version.archive_size_bytes,
               version.archive_sha256, version.created_at, r.name AS repository_name,
               r.enabled AS repository_enabled,
               reg.manifest_sha256, reg.file_count, reg.total_uncompressed_bytes
        FROM vm_versions AS version
        JOIN repositories AS r ON r.id = version.repository_id
        LEFT JOIN registration_operations AS reg ON reg.version_id = version.id
-       WHERE version.emulator_type = ? AND version.vm_name = ? AND version.kind = 'master'`,
+       WHERE version.emulator_type = ? AND version.vm_name = ?
+       ORDER BY version.created_at, version.id`,
       [vm.emulatorType, vm.vmName],
     );
-    const version = versions[0];
-    if (!version) return { master: null, agents: [] };
+    const describe = (row: RowDataPacket) => ({
+      versionId: row.id as string,
+      repositoryId: row.repository_id as string,
+      repositoryName: row.repository_name as string,
+      repositoryEnabled: Boolean(row.repository_enabled),
+      archiveSizeBytes: Number(row.archive_size_bytes),
+      archiveSha256: row.archive_sha256 as string,
+      createdAt: (row.created_at as Date).toISOString(),
+      manifestSha256: (row.manifest_sha256 as string | null) ?? null,
+      fileCount: toNumber(row.file_count as number | string | null),
+      totalUncompressedBytes: toNumber(row.total_uncompressed_bytes as number | null),
+    });
+    const version = versions.find((row) => row.kind === 'master');
+    if (!version) return { master: null, versions: [], agents: [] };
     const repositoryId = version.repository_id as string;
     const canonicalName = version.vm_name as string;
 
@@ -287,23 +333,27 @@ export class RestoreCoordinator {
     });
 
     return {
-      master: {
-        versionId: version.id as string,
-        repositoryId,
-        repositoryName: version.repository_name as string,
-        repositoryEnabled: Boolean(version.repository_enabled),
-        archiveSizeBytes: Number(version.archive_size_bytes),
-        archiveSha256: version.archive_sha256 as string,
-        createdAt: (version.created_at as Date).toISOString(),
-        manifestSha256: (version.manifest_sha256 as string | null) ?? null,
-        fileCount: toNumber(version.file_count as number | string | null),
-        totalUncompressedBytes: toNumber(version.total_uncompressed_bytes as number | null),
-      },
+      master: describe(version),
+      versions: versions.map((row) => ({
+        ...describe(row),
+        kind: row.kind as 'master' | 'snapshot',
+        parentVersionId: (row.parent_version_id as string | null) ?? null,
+        snapshotName: (row.snapshot_name as string | null) ?? null,
+      })),
       agents,
     };
   }
 
-  async create(input: CreateRestoreRequest, userId: string): Promise<RestoreOperation> {
+  /**
+   * Restores any version of a VM: the master or a snapshot, from anywhere in the tree. With a working
+   * copy as the target, the same restore prepares a Remote Snapshot workspace instead, in one transaction
+   * with its row, and the persistent copy is neither checked nor touched. See decision 0038.
+   */
+  async create(
+    input: CreateRestoreRequest,
+    userId: string,
+    workspace: WorkspaceTarget | null = null,
+  ): Promise<RestoreOperation> {
     const { agentId, emulatorType, vmName, versionId } = input;
     const operationId = randomUUID();
     let request: RestoreRequestPayload;
@@ -336,9 +386,6 @@ export class RestoreCoordinator {
       );
       const version = versions[0];
       if (!version) throw new ApiError(404, 'version_not_found', 'Version not found');
-      if (version.kind !== 'master') {
-        throw new ApiError(409, 'version_not_master', 'Only a master can be restored for now.');
-      }
       if (!version.repository_enabled) {
         throw new ApiError(409, 'repository_disabled', 'This repository is disabled.');
       }
@@ -361,14 +408,51 @@ export class RestoreCoordinator {
          WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1`,
         [agentId, emulatorType, canonicalName],
       );
-      const reason = this.ineligible(agentId, emulatorType, repositoryId, {
-        revoked: agent.revoked_at !== null,
-        authorized: version.authorized !== null,
-        localState: (states[0]?.execution_state as string | undefined) ?? null,
-        running: sessions.length > 0,
-        busy: registrations.length > 0,
-      });
+      const reason = this.ineligible(
+        agentId,
+        emulatorType,
+        repositoryId,
+        {
+          revoked: agent.revoked_at !== null,
+          authorized: version.authorized !== null,
+          localState: (states[0]?.execution_state as string | undefined) ?? null,
+          running: sessions.length > 0,
+          busy: registrations.length > 0,
+        },
+        workspace !== null,
+      );
       if (reason) throw new ApiError(409, reason, INELIGIBLE_TEXT[reason]);
+
+      if (workspace) {
+        try {
+          await connection.execute(
+            `INSERT INTO vm_workspaces
+               (id, agent_id, requested_by_user_id, request_id, emulator_type, vm_name,
+                base_version_id, source_version_id, launch_on_ready)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              workspace.workspaceId,
+              agentId,
+              userId,
+              workspace.requestId,
+              emulatorType,
+              canonicalName,
+              versionId,
+              versionId,
+              workspace.launchOnReady,
+            ],
+          );
+        } catch (error) {
+          if (isDuplicateEntry(error)) {
+            throw new ApiError(
+              409,
+              'workspace_exists',
+              'This agent already has a working copy of this VM. Discard it first.',
+            );
+          }
+          throw error;
+        }
+      }
 
       request = {
         operationId,
@@ -381,14 +465,15 @@ export class RestoreCoordinator {
         archiveSha256: version.archive_sha256 as string,
         manifestSha256: (version.manifest_sha256 as string | null) ?? null,
         expectedUncompressedBytes: toNumber(version.total_uncompressed_bytes as number | null),
+        ...(workspace ? { workspaceId: workspace.workspaceId } : {}),
       };
       try {
         await connection.execute(
           `INSERT INTO restore_operations
              (id, agent_id, repository_id, requested_by_user_id, emulator_type, vm_name, version_id,
               archive_key, archive_sha256, archive_size_bytes, expected_manifest_sha256,
-              expected_uncompressed_bytes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              expected_uncompressed_bytes, workspace_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             operationId,
             agentId,
@@ -402,6 +487,7 @@ export class RestoreCoordinator {
             request.archiveSizeBytes,
             request.manifestSha256,
             request.expectedUncompressedBytes,
+            workspace?.workspaceId ?? null,
           ],
         );
       } catch (error) {
@@ -511,6 +597,7 @@ export class RestoreCoordinator {
     } finally {
       connection.release();
     }
+    await this.endWorkspaceOf(operationId);
     if (tell) this.link.send(tell, { type: 'server.restore_cancel', payload: { operationId } });
     return this.require(operationId);
   }
@@ -543,18 +630,7 @@ export class RestoreCoordinator {
     for (const row of active) {
       if (listed.has(row.id)) continue;
       if (row.state === 'queued') {
-        this.dispatch(agentId, {
-          operationId: row.id,
-          emulatorType: row.emulator_type,
-          vmName: row.vm_name,
-          repositoryId: row.repository_id,
-          versionId: row.version_id,
-          archiveKey: row.archive_key,
-          archiveSizeBytes: Number(row.archive_size_bytes),
-          archiveSha256: row.archive_sha256,
-          manifestSha256: row.expected_manifest_sha256,
-          expectedUncompressedBytes: toNumber(row.expected_uncompressed_bytes),
-        });
+        this.dispatch(agentId, requestFor(row));
       } else if (row.state === 'committing') {
         // The agent has been answered. What it reported is here, and only recording it is left.
         await this.commit(row.id);
@@ -729,9 +805,10 @@ export class RestoreCoordinator {
    */
   private async commit(operationId: string): Promise<void> {
     const connection = await this.pool.getConnection();
+    let readyWorkspace: string | null;
     try {
       await connection.beginTransaction();
-      await this.commitIn(connection, operationId);
+      readyWorkspace = await this.commitIn(connection, operationId);
       await connection.commit();
     } catch (error) {
       await connection.rollback();
@@ -739,22 +816,36 @@ export class RestoreCoordinator {
     } finally {
       connection.release();
     }
+    if (readyWorkspace) this.onWorkspaceReady?.(readyWorkspace);
   }
 
-  private async commitIn(connection: PoolConnection, operationId: string): Promise<void> {
+  /** Returns the working copy that became ready, if this restore prepared one. */
+  private async commitIn(connection: PoolConnection, operationId: string): Promise<string | null> {
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT agent_id, emulator_type, vm_name, version_id, state, manifest_sha256,
-              cancel_requested_at
+      `SELECT agent_id, emulator_type, vm_name, version_id, workspace_id, state, manifest_sha256,
+              local_directory, cancel_requested_at
        FROM restore_operations WHERE id = ? FOR UPDATE`,
       [operationId],
     );
     const row = rows[0];
-    if (!row || !row.manifest_sha256) return;
+    if (!row || !row.manifest_sha256) return null;
     const state = row.state as RestoreState;
-    if (state === 'succeeded' || state === 'partial_success') return;
+    if (state === 'succeeded' || state === 'partial_success') return null;
 
-    await connection.execute(
-      `INSERT INTO agent_vm_state
+    const workspaceId = (row.workspace_id as string | null) ?? null;
+    if (workspaceId) {
+      // The directory exists whatever was decided meanwhile, so the working copy is ready: discarding
+      // it is an administrator's decision, as for any other.
+      await connection.execute(
+        `UPDATE vm_workspaces
+         SET state = 'ready', local_directory = ?, finished_at = NULL, error_code = NULL,
+             error_message = NULL
+         WHERE id = ? AND state IN ('preparing', 'failed')`,
+        [row.local_directory, workspaceId],
+      );
+    } else
+      await connection.execute(
+        `INSERT INTO agent_vm_state
          (agent_id, emulator_type, vm_name, local_source_version_id, execution_state,
           content_status, last_verified_at, last_verified_sha256)
        VALUES (?, ?, ?, ?, 'idle', 'verified', UTC_TIMESTAMP(3), ?)
@@ -762,8 +853,8 @@ export class RestoreCoordinator {
          execution_state = 'idle', content_status = 'verified',
          last_verified_at = VALUES(last_verified_at),
          last_verified_sha256 = VALUES(last_verified_sha256)`,
-      [row.agent_id, row.emulator_type, row.vm_name, row.version_id, row.manifest_sha256],
-    );
+        [row.agent_id, row.emulator_type, row.vm_name, row.version_id, row.manifest_sha256],
+      );
     if (row.cancel_requested_at || isRestoreTerminal(state)) {
       await connection.execute(
         `UPDATE restore_operations
@@ -782,6 +873,19 @@ export class RestoreCoordinator {
         [operationId],
       );
     }
+    return workspaceId;
+  }
+
+  /** A restore that ended without publishing leaves its working copy with nothing on disk. */
+  private async endWorkspaceOf(operationId: string): Promise<void> {
+    await this.pool.execute(
+      `UPDATE vm_workspaces AS w
+       JOIN restore_operations AS op ON op.workspace_id = w.id
+       SET w.state = 'failed', w.finished_at = UTC_TIMESTAMP(3), w.error_code = op.error_code,
+           w.error_message = op.error_message
+       WHERE op.id = ? AND op.state IN ('failed', 'cancelled') AND w.state = 'preparing'`,
+      [operationId],
+    );
   }
 
   async failed(agentId: string, payload: RestoreErrorPayload): Promise<void> {
@@ -803,6 +907,7 @@ export class RestoreCoordinator {
        WHERE id = ? AND agent_id = ?`,
       [cancelled ? 'cancelled' : 'failed', code, message, operationId, agentId],
     );
+    await this.endWorkspaceOf(operationId);
     this.ack(agentId, operationId, 'closed');
   }
 
@@ -824,5 +929,6 @@ export class RestoreCoordinator {
        WHERE id = ? AND active_marker = 1`,
       [code, FAILURE_TEXT[code] ?? code, operationId],
     );
+    await this.endWorkspaceOf(operationId);
   }
 }

@@ -33,6 +33,8 @@ export interface ExecutionLink {
   isOnline(agentId: string): boolean;
   /** What `agent.execution_sync` said on this connection. `null` for an agent that cannot launch. */
   executionCapabilities(agentId: string): ExecutionSyncPayload['capabilities'] | null;
+  /** Whether the agent said which working copies it holds, which only agents that keep them do. */
+  workspacesSupported(agentId: string): boolean;
   send(agentId: string, message: Pick<ServerMessage, 'type' | 'payload'>): boolean;
 }
 
@@ -51,6 +53,7 @@ interface SessionRow extends RowDataPacket {
   emulator_type: VmSession['emulatorType'];
   vm_name: string;
   source_version_id: string | null;
+  workspace_id: string | null;
   mode: VmSession['mode'];
   execution_state: VmSessionState;
   pid: number | null;
@@ -69,7 +72,8 @@ interface SessionRow extends RowDataPacket {
 
 const SESSION_QUERY = `
   SELECT s.id, s.agent_id, a.name AS agent_name, u.display_name AS requested_by_display_name,
-         s.emulator_type, s.vm_name, s.source_version_id, s.mode, s.execution_state, s.pid,
+         s.emulator_type, s.vm_name, s.source_version_id, s.workspace_id, s.mode,
+         s.execution_state, s.pid,
          s.process_started_at, s.started_at, s.ended_at, s.exit_code, s.stop_requested_at,
          s.force_requested_at, s.graceful_stop_available, s.error_code, s.error_message,
          s.created_at, s.updated_at
@@ -136,6 +140,7 @@ function toSession(row: SessionRow, online: boolean): VmSession {
     mode: row.mode,
     state: row.execution_state,
     versionId: row.source_version_id,
+    workspaceId: row.workspace_id,
     pid: row.pid,
     processStartedAt: row.process_started_at?.toISOString() ?? null,
     requestedAt: row.created_at.toISOString(),
@@ -412,6 +417,15 @@ export class ExecutionCoordinator {
       );
     }
 
+    const workspaceId = input.workspaceId ?? null;
+    if (mode === 'remote_snapshot' && !this.canRunRemoteSnapshot(agentId)) {
+      throw new ApiError(
+        409,
+        'execution_mode_unavailable',
+        'This agent cannot run Remote Snapshot sessions. Update it. Nothing was launched.',
+      );
+    }
+
     const sessionId = randomUUID();
     let canonicalName: string;
     let versionId: string | null;
@@ -433,26 +447,67 @@ export class ExecutionCoordinator {
       canonicalName = vms[0].vm_name as string;
       const vm = { emulatorType, vmName: canonicalName };
       const facts = await this.facts(connection, agentId, vm);
+      let workspace: RowDataPacket | undefined;
+      if (workspaceId) {
+        // A working copy has its own directory: what matters is that it is ready, not the local copy.
+        const [workspaces] = await connection.execute<RowDataPacket[]>(
+          `SELECT state, source_version_id FROM vm_workspaces
+           WHERE id = ? AND agent_id = ? AND emulator_type = ? AND vm_name = ? FOR UPDATE`,
+          [workspaceId, agentId, emulatorType, canonicalName],
+        );
+        workspace = workspaces[0];
+        if (!workspace) throw new ApiError(404, 'workspace_not_found', 'Working copy not found');
+        if (workspace.state !== 'ready') {
+          throw new ApiError(
+            409,
+            'workspace_unavailable',
+            'This working copy is not ready. Nothing was launched.',
+          );
+        }
+      }
       const refused = this.launchIneligible(agentId, emulatorType, {
         revoked: agent.revoked_at !== null,
         ...facts,
+        localPresent: workspace ? true : facts.localPresent,
       });
       if (refused) {
         throw new ApiError(409, refused.reason, refused.problem ?? LAUNCH_TEXT[refused.reason]);
       }
-      const [states] = await connection.execute<RowDataPacket[]>(
-        `SELECT local_source_version_id FROM agent_vm_state
-         WHERE agent_id = ? AND emulator_type = ? AND vm_name = ?`,
-        [agentId, emulatorType, canonicalName],
-      );
-      versionId = (states[0]?.local_source_version_id as string | null | undefined) ?? null;
+      if (workspace) {
+        versionId = workspace.source_version_id as string;
+      } else {
+        const [states] = await connection.execute<RowDataPacket[]>(
+          `SELECT local_source_version_id FROM agent_vm_state
+           WHERE agent_id = ? AND emulator_type = ? AND vm_name = ?`,
+          [agentId, emulatorType, canonicalName],
+        );
+        versionId = (states[0]?.local_source_version_id as string | null | undefined) ?? null;
+      }
       try {
         await connection.execute(
           `INSERT INTO vm_sessions
-             (id, agent_id, user_id, request_id, emulator_type, vm_name, source_version_id, mode)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [sessionId, agentId, userId, requestId, emulatorType, canonicalName, versionId, mode],
+             (id, agent_id, user_id, request_id, emulator_type, vm_name, source_version_id,
+              workspace_id, mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            sessionId,
+            agentId,
+            userId,
+            requestId,
+            emulatorType,
+            canonicalName,
+            versionId,
+            workspaceId,
+            mode,
+          ],
         );
+        if (workspaceId) {
+          // Whatever happens next, the working copy may now differ from its source.
+          await connection.execute(
+            `UPDATE vm_workspaces SET may_have_changes = TRUE, launch_on_ready = FALSE WHERE id = ?`,
+            [workspaceId],
+          );
+        }
       } catch (error) {
         if (isDuplicateEntry(error)) {
           throw new ApiError(409, 'session_active', LAUNCH_TEXT.session_active);
@@ -477,9 +532,24 @@ export class ExecutionCoordinator {
 
     this.link.send(agentId, {
       type: 'server.vm_launch',
-      payload: { sessionId, emulatorType, vmName: canonicalName, mode, versionId },
+      payload: {
+        sessionId,
+        emulatorType,
+        vmName: canonicalName,
+        mode,
+        versionId,
+        ...(workspaceId ? { workspaceId } : {}),
+      },
     });
     return this.requireSession(sessionId);
+  }
+
+  /** Remote Snapshot needs the agent to say it runs the mode, and that it keeps working copies. */
+  canRunRemoteSnapshot(agentId: string): boolean {
+    return (
+      this.link.executionCapabilities(agentId)?.modes.includes('remote_snapshot') === true &&
+      this.link.workspacesSupported(agentId)
+    );
   }
 
   private sameRequest(row: SessionRow, input: LaunchRequest): VmSession {
@@ -487,7 +557,8 @@ export class ExecutionCoordinator {
       row.agent_id !== input.agentId ||
       row.emulator_type !== input.emulatorType ||
       vmNameKey(row.vm_name) !== vmNameKey(input.vmName) ||
-      row.mode !== input.mode
+      row.mode !== input.mode ||
+      row.workspace_id !== (input.workspaceId ?? null)
     ) {
       throw new ApiError(409, 'request_id_reused', 'This request ID belongs to another launch.');
     }
@@ -715,7 +786,8 @@ export class ExecutionCoordinator {
     }
     const listed = new Set(payload.sessions.map((session) => session.sessionId));
     const [active] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT id, emulator_type, vm_name, source_version_id, mode, execution_state, created_at
+      `SELECT id, emulator_type, vm_name, source_version_id, workspace_id, mode, execution_state,
+              created_at
        FROM vm_sessions WHERE agent_id = ? AND active_marker = 1`,
       [agentId],
     );
@@ -733,6 +805,7 @@ export class ExecutionCoordinator {
             vmName: row.vm_name as string,
             mode: row.mode as LaunchRequest['mode'],
             versionId: (row.source_version_id as string | null) ?? null,
+            ...(row.workspace_id ? { workspaceId: row.workspace_id as string } : {}),
           },
         });
       } else if (row.execution_state === 'requested') {

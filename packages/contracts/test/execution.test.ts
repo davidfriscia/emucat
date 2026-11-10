@@ -82,10 +82,10 @@ describe('sessions', () => {
     }
   });
 
-  it('only implements local execution, and says why the others are unavailable', () => {
-    expect(IMPLEMENTED_EXECUTION_MODES).toEqual(['local']);
+  it('implements local and Remote Snapshot execution, and says why Remote Volatile is unavailable', () => {
+    expect(IMPLEMENTED_EXECUTION_MODES).toEqual(['local', 'remote_snapshot']);
     expect(EXECUTION_MODE_UNAVAILABLE_REASONS.remote_volatile).toMatch(/remote/);
-    expect(EXECUTION_MODE_UNAVAILABLE_REASONS.remote_snapshot).toMatch(/Milestone 7/);
+    expect(EXECUTION_MODE_UNAVAILABLE_REASONS.remote_snapshot).toMatch(/working copy/);
   });
 
   it('has recovery advice for each code an administrator can act on', () => {

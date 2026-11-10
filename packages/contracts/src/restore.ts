@@ -165,6 +165,11 @@ export const restoreRequestPayloadSchema = z.strictObject({
   manifestSha256: sha256HexSchema.nullable(),
   /** For checking disk space before downloading. Never a limit, and never trusted as one. */
   expectedUncompressedBytes: safeSizeSchema.nullable(),
+  /**
+   * Restore into this Remote Snapshot working copy, under the agent's own workspaces directory, rather
+   * than under the emulator's base path. The persistent local copy is never touched. See decision 0038.
+   */
+  workspaceId: z.uuid().optional(),
 });
 export type RestoreRequestPayload = z.infer<typeof restoreRequestPayloadSchema>;
 
@@ -213,6 +218,8 @@ export const restoreSyncPayloadSchema = z.object({
       }),
     )
     .max(RESTORE_LOCAL_COPIES_MAX),
+  /** The Remote Snapshot working copies this agent holds. Older agents do not say. */
+  workspaces: z.array(z.uuid()).max(256).optional(),
 });
 export type RestoreSyncPayload = z.infer<typeof restoreSyncPayloadSchema>;
 
@@ -283,6 +290,8 @@ export const restoreOperationSchema = z.object({
   emulatorType: emulatorTypeSchema,
   vmName: z.string(),
   versionId: z.uuid(),
+  /** Set when this restore prepares a Remote Snapshot working copy. */
+  workspaceId: z.uuid().nullable(),
   state: restoreStateSchema,
   archive: z.object({ sizeBytes: safeSizeSchema, sha256: sha256HexSchema }),
   progress: z.object({
@@ -361,21 +370,30 @@ export const restoreAgentOptionSchema = z.object({
 });
 export type RestoreAgentOption = z.infer<typeof restoreAgentOptionSchema>;
 
+export const restorableVersionSchema = z.object({
+  versionId: z.uuid(),
+  repositoryId: z.uuid(),
+  repositoryName: z.string(),
+  repositoryEnabled: z.boolean(),
+  archiveSizeBytes: safeSizeSchema,
+  archiveSha256: sha256HexSchema,
+  createdAt: timestampSchema,
+  manifestSha256: sha256HexSchema.nullable(),
+  fileCount: safeSizeSchema.nullable(),
+  totalUncompressedBytes: safeSizeSchema.nullable(),
+});
+export type RestorableVersion = z.infer<typeof restorableVersionSchema>;
+
 export const restoreOptionsResponseSchema = z.object({
-  master: z
-    .object({
-      versionId: z.uuid(),
-      repositoryId: z.uuid(),
-      repositoryName: z.string(),
-      repositoryEnabled: z.boolean(),
-      archiveSizeBytes: safeSizeSchema,
-      archiveSha256: sha256HexSchema,
-      createdAt: timestampSchema,
-      manifestSha256: sha256HexSchema.nullable(),
-      fileCount: safeSizeSchema.nullable(),
-      totalUncompressedBytes: safeSizeSchema.nullable(),
-    })
-    .nullable(),
+  master: restorableVersionSchema.nullable(),
+  /** Every version, the master included, oldest first. Any of them can be restored. */
+  versions: z.array(
+    restorableVersionSchema.extend({
+      kind: z.enum(['master', 'snapshot']),
+      parentVersionId: z.uuid().nullable(),
+      snapshotName: z.string().nullable(),
+    }),
+  ),
   agents: z.array(restoreAgentOptionSchema),
 });
 export type RestoreOptionsResponse = z.infer<typeof restoreOptionsResponseSchema>;
