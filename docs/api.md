@@ -282,7 +282,7 @@ Administrators only, with the same-origin and CSRF rules as everything else here
 
 A snapshot's parent must be the version the agent's copy came from. Creating one answers 404 with `version_not_found` (also for a version of another VM), and 409 with `agent_offline`, `agent_cannot_snapshot`, `agent_revoked`, `local_copy_missing`, `local_copy_unsafe`, `snapshot_parent_unknown`, `snapshot_parent_mismatch`, `repository_disabled`, `repository_not_authorized`, `vm_running` (any active session, `unknown` included), `operation_in_progress` or `request_id_reused`. A repeated `requestId` returns the same operation. Its progress, cancellation and reconciliation are the registration routes'.
 
-Preparing a working copy answers 409 with `agent_offline`, `execution_mode_unavailable`, `workspace_exists` (one per VM and agent), or a restore's refusals. Preserving answers as creating a snapshot does, and 409 `workspace_unavailable` unless it is ready. Discarding answers 400 `confirmation_required`, and 409 with `vm_running`, `operation_in_progress` or `workspace_unavailable`.
+Preparing a working copy answers 409 with `agent_offline`, `execution_mode_unavailable`, `workspace_exists` (one per VM and agent), or a restore's refusals. Preserving answers as creating a snapshot does, and 409 `workspace_unavailable` unless it is ready. Discarding answers 400 `confirmation_required`, and 409 with `vm_running` (any active session of the VM on that agent, `unknown` included), `operation_in_progress` (any operation on that agent) or `workspace_unavailable`. Snapshots also answer 409 `snapshot_lineage_unverified` for a copy discovery saw disappear and come back, until a verification proves what it is.
 
 ## Repositories
 

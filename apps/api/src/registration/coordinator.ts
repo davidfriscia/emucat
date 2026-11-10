@@ -450,7 +450,8 @@ export class RegistrationCoordinator {
         if (state.execution_state === 'error') throw refuseSnapshot('local_copy_unsafe');
         // Discovery saw it disappear and come back: it may be another directory with the same name, so
         // what is recorded about it proves nothing until a verification says otherwise.
-        if (state.execution_state === 'unknown') throw refuseSnapshot('snapshot_lineage_unverified');
+        if (state.execution_state === 'unknown')
+          throw refuseSnapshot('snapshot_lineage_unverified');
         if (!state.local_source_version_id) throw refuseSnapshot('snapshot_parent_unknown');
         if (state.local_source_version_id !== parentVersionId) {
           throw refuseSnapshot('snapshot_parent_mismatch');

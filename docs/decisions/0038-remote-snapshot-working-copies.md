@@ -81,6 +81,17 @@ real child of `workspaces_dir`, not a link, and that nothing runs or works on th
 the next start. The result is reported once; `agent.restore_sync` lists the working copies the agent holds after each
 welcome, and the server reconciles from that, so a lost answer or a lost request is recovered on the next connection.
 
+**It cannot race a launch.** On the server, a discard is one transaction that locks the agent's row and then the
+working copy's, in the order a launch takes them, and refuses while any session of the VM (`unknown` included) or any
+operation on that agent is active. So either the launch's session exists when the discard looks, or the working copy
+is already `discarding` when the launch looks. On the agent, a removal claims the agent's one operation slot and marks
+the VM busy until it has finished, so no launch, snapshot or restore can begin during it, whatever the server sends.
+A workspaces directory that is a link or a junction is refused, by restores into it and by removals.
+
+**Nothing is abandoned.** A working copy recorded as `lost` that the agent lists again goes back to `ready`, for an
+administrator to keep or discard. A working copy the agent holds and the server does not know is reported in the
+server's log, and never removed on its own.
+
 ## Consequences
 
 - A working copy uses disk space until discarded. The interface lists them on the VM's page.

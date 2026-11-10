@@ -258,7 +258,9 @@ describe('upgrading a populated database to 0009', () => {
   it('keeps every existing VM, version, operation and session, and constrains only what is new', async () => {
     // What a Milestone 6 server holds: a registered VM, its master, the registration that made it, a
     // restore of it, the agent's copy, an ended session and one still active, and a verification.
-    const [repo, agent, master, registration, restore] = [1, 2, 3, 4, 5].map(() => randomUUID());
+    const [repo, agent, master, registration, restore] = [1, 2, 3, 4, 5].map(() =>
+      randomUUID(),
+    ) as [string, string, string, string, string];
     await upgrade.execute("INSERT INTO repositories (id, name, kind) VALUES (?, 'NAS', 'sftp')", [
       repo,
     ]);
