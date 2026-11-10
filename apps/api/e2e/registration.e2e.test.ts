@@ -565,6 +565,68 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
   });
 
   it(
+    'snapshots the copy as a child of its master, without changing the master or the copy',
+    async () => {
+      const [master] = await mastersOf('Copy Me');
+      const masterKey = `/srv/sftp/repo/archives/qemu/copy me/${master?.id as string}.zip`;
+      const masterSha = sftp.exec(`sha256sum '${masterKey}' | cut -d' ' -f1`);
+      const root = join(qemu, 'Copy Me');
+      await writeFile(join(root, 'nvram/state.bin'), randomBytes(4096));
+      const before = await fingerprint(root);
+
+      const requestId = randomUUID();
+      const request = () =>
+        admin.request({
+          method: 'POST',
+          url: '/admin/vms/qemu/Copy Me/snapshots',
+          payload: { agentId, parentVersionId: master?.id, requestId },
+        });
+      const response = await request();
+      expect(response.statusCode, response.body).toBe(202);
+      const operation = registrationOperationSchema.parse(response.json());
+      // A repeated click is the same snapshot.
+      expect(registrationOperationSchema.parse((await request()).json()).id).toBe(operation.id);
+
+      const done = await finished(operation.id);
+      expect(done, JSON.stringify(done)).toMatchObject({
+        state: 'succeeded',
+        mode: 'snapshot',
+        localCopy: 'preserved',
+        parentVersionId: master?.id,
+      });
+      expect(await fingerprint(root), 'the copy was only read').toEqual(before);
+      const path = `/srv/sftp/repo/${done.archiveKey}`;
+      expect(sftp.exec(`sha256sum '${path}' | cut -d' ' -f1`)).toBe(done.archive?.sha256);
+      expect(sftp.exec(`sha256sum '${masterKey}' | cut -d' ' -f1`), 'the master').toBe(masterSha);
+      expect(sftp.files().filter((file) => file.startsWith('archives/.staging'))).toEqual([]);
+
+      const [rows] = await context.pool.execute<RowDataPacket[]>(
+        'SELECT kind, parent_version_id FROM vm_versions WHERE id = ?',
+        [done.versionId],
+      );
+      expect(rows[0]).toMatchObject({ kind: 'snapshot', parent_version_id: master?.id });
+      const [state] = await context.pool.execute<RowDataPacket[]>(
+        'SELECT local_source_version_id, content_status FROM agent_vm_state WHERE vm_name = ?',
+        ['Copy Me'],
+      );
+      expect(state[0]).toMatchObject({
+        local_source_version_id: done.versionId,
+        content_status: 'verified',
+      });
+
+      // The copy now comes from the snapshot: naming the master as the parent again is refused.
+      const stale = await admin.request({
+        method: 'POST',
+        url: '/admin/vms/qemu/Copy Me/snapshots',
+        payload: { agentId, parentVersionId: master?.id, requestId: randomUUID() },
+      });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json<{ error: { code: string } }>().error.code).toBe('snapshot_parent_mismatch');
+    },
+    LONG,
+  );
+
+  it(
     'transfers a disposable VM, deleting it only after the verified commit',
     async () => {
       const root = await makeQemuVm('Transfer Me', 8);

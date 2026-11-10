@@ -519,6 +519,9 @@ impl RestoreManager {
                     if let Some(base) = self.target_base(&journal.request) {
                         remove_staged_directory(&staged_directory(&base, operation_id));
                     }
+                    if let Some(workspace_id) = journal.request.workspace_id {
+                        crate::workspaces::forget_unpublished(&self.config.state_dir, workspace_id);
+                    }
                     self.record_failure(
                         journal,
                         failure(
@@ -829,6 +832,7 @@ impl RestoreManager {
         }
 
         let target = self.target_base(&request);
+        let workspace = request.workspace_id;
         let journal = Journal {
             request,
             phase: RestorePhase::Running,
@@ -861,6 +865,9 @@ impl RestoreManager {
                 remove_staging_files(&this.config.staging_dir, operation_id);
                 if let Some(base) = &target {
                     remove_staged_directory(&staged_directory(base, operation_id));
+                }
+                if let Some(workspace_id) = workspace {
+                    crate::workspaces::forget_unpublished(&this.config.state_dir, workspace_id);
                 }
                 if let Some(journal) = this.journal(operation_id) {
                     this.record_failure(journal, failed);

@@ -45,7 +45,7 @@ the local copy as `preserved`, so `partial_success` cannot arise from a healthy 
 
 The administrator names the parent. The server refuses the request (`snapshot_parent_mismatch`) unless it equals
 the agent's recorded `local_source_version_id` for that VM, and refuses it (`snapshot_parent_unknown`) when there
-is none. The agent checks the same against its own local state file and refuses with the same code. So:
+is none. The agent checks the same against its own local state file and refuses with the same code. A copy the agent has no record of, from a version of the agent that kept none, is taken on the server's word, which checked its own; a record that disagrees is never overruled. So:
 
 - a snapshot always branches from **the version the local files came from**, never silently from the newest one;
 - after restoring an old version, the next snapshot is a child of that old version, which is how branches appear;

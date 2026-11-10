@@ -12,9 +12,8 @@ must be published without an explicit decision, and no mode may be quietly subst
 ## Decision
 
 **A working copy is its own thing.** A `vm_workspaces` row, and on the agent a directory
-`{workspaces_dir}/{workspace_id}/{vm_name}`. `workspaces_dir` defaults to `workspaces` under the state directory, and
-`check-config` refuses one inside an emulator's base path, so discovery never sees a working copy and it can never
-be mistaken for, or collide with, the persistent copy. The persistent copy's `agent_vm_state`, local manifest and
+`{workspaces_dir}/{workspace_id}/{vm_name}`. `workspaces_dir` is `workspaces` under the state directory, which `check-config` already refuses inside an emulator's base path, so discovery never sees a working copy and it can never be
+mistaken for, or collide with, the persistent copy. The persistent copy's `agent_vm_state`, local manifest and
 local state file are never touched by anything a working copy does.
 
 **Everything reuses an existing operation:**

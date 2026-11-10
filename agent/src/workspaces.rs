@@ -132,6 +132,18 @@ pub fn record_source(
     write_record(state_dir, &record)
 }
 
+/// Tidies after a restore into a working copy that published nothing: its record and its empty directory.
+/// A published VM, or anything else in the directory, keeps both, since it is not this function's to judge.
+pub fn forget_unpublished(state_dir: &Path, workspace_id: Uuid) {
+    let base = workspace_base(state_dir, workspace_id);
+    let holds_anything = fs::read_dir(&base).is_ok_and(|mut listing| listing.next().is_some());
+    if holds_anything {
+        return;
+    }
+    let _ = fs::remove_dir(&base);
+    let _ = fs::remove_file(record_path(state_dir, workspace_id));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscardError {
     pub code: &'static str,

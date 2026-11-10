@@ -173,14 +173,34 @@ copy that has been run is expected to report `modified`.
 
 ## Execution modes
 
-| Mode              | Status                                                              |
-| ----------------- | ------------------------------------------------------------------- |
-| `local`           | Implemented                                                         |
-| `remote_volatile` | Not available. Needs a remote display and a disposable working copy |
-| `remote_snapshot` | Not available. Needs snapshot publication, planned for Milestone 7  |
+| Mode              | Status                                                                                                |
+| ----------------- | ----------------------------------------------------------------------------------------------------- |
+| `local`           | Implemented. Runs the agent's persistent copy                                                         |
+| `remote_snapshot` | Implemented in Milestone 7. Runs a working copy of a chosen version, started from the version history |
+| `remote_volatile` | Not available. Needs a remote display and a disposable working copy                                   |
 
-A remote mode is refused by the API and by the agent with `execution_mode_unavailable`. It is never
-replaced by a local launch. See [decision 0033](decisions/0033-remote-execution-modes.md).
+A mode that cannot run is refused by the API and by the agent with `execution_mode_unavailable`. It is never
+replaced by another one. See decisions [0033](decisions/0033-remote-execution-modes.md) and [0038](decisions/0038-remote-snapshot-working-copies.md).
+
+## Snapshots and Remote Snapshot
+
+**A snapshot** is a new, immutable, standalone version of a registered VM: the agent archives its copy exactly as registration does, uploads it to staging, verifies it, publishes it under its own UUID without being able to overwrite anything, and the server records it only then. Its parent is **the version the copy came from**, which the administrator chooses and the server and the agent both check. So after restoring an older version, the next snapshot is a child of that older version, and the history branches. The copy is only read. See [decision 0037](decisions/0037-snapshots-as-registrations.md).
+
+A snapshot is refused while the VM runs on that agent, or may (an `unknown` session counts), and a launch is refused while one is being made. Stop the VM first.
+
+**Remote Snapshot** runs any version without touching the persistent copy:
+
+1. From the version history, choose **Launch in Remote Snapshot** on a version, and an agent.
+2. The agent restores that version into a working copy, `{state_dir}\workspaces\{id}\{VM name}`, outside every base path, through the same cache, checks and safe extraction as any restore.
+3. The emulator starts from there, exactly as a local launch would, with the same command-line rules, process tracking and stop behavior. It is a normal session: stop it from the Run section.
+4. Stopping publishes nothing. The working copy stays, through restarts and disconnections, until you choose:
+   - **Preserve as snapshot**: a new snapshot whose parent is the working copy's version. The working copy then counts as a copy of the new snapshot, so preserving it again later branches from there.
+   - **Launch again**, to keep working.
+   - **Discard**: the agent deletes the working copy. If it may hold changes no snapshot has, you type the VM's name.
+
+One working copy of a VM per agent, and one session of a VM per agent, whichever copy it runs. While a working copy runs, its VM counts as running on that agent for everything, including the persistent copy. See [decision 0038](decisions/0038-remote-snapshot-working-copies.md).
+
+Nothing deletes a version, and the master can never be deleted while anything descends from it.
 
 ## Configuration
 
@@ -208,3 +228,5 @@ start_grace_seconds = 3
 | `stop_timeout`                  | Shut the guest down from inside, or force a stop                    |
 | `graceful_stop_unavailable`     | The agent restarted while QEMU ran. Close it there, or force a stop |
 | `process_state_unknown`         | Check that computer, then dismiss the session                       |
+| `workspace_unavailable`         | The working copy is gone from the agent. Prepare a new one          |
+| `snapshot_parent_mismatch`      | The copy comes from another version. Reload, and choose that one    |

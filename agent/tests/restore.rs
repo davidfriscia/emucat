@@ -2515,11 +2515,9 @@ async fn a_working_copy_with_a_corrupt_archive_publishes_nothing() {
     start(&operations, &request);
     assert!(outcome(&operations).await.is_err());
     assert!(emucat_agent::workspaces::held(&harness.state).is_empty());
-    assert!(
-        !emucat_agent::workspaces::workspace_base(&harness.state, workspace)
-            .join("Win98")
-            .exists()
-    );
+    // Nothing is left of it: no directory, and no record.
+    assert!(!emucat_agent::workspaces::workspace_base(&harness.state, workspace).exists());
+    assert!(emucat_agent::workspaces::read_record(&harness.state, workspace).is_none());
 }
 
 #[tokio::test]
