@@ -37,6 +37,9 @@ import {
   vmSessionListResponseSchema,
   vmSessionSchema,
   vmVerificationSchema,
+  versionTreeResponseSchema,
+  vmWorkspaceSchema,
+  workspaceListResponseSchema,
   type AdminCatalogResponse,
   type AdminMediaListResponse,
   type AdminMediaSyncResponse,
@@ -48,6 +51,11 @@ import {
   type AuthenticatedSession,
   type CreateRegistrationRequest,
   type CreateRestoreRequest,
+  type CreateSnapshotRequest,
+  type CreateWorkspaceRequest,
+  type VersionTreeResponse,
+  type VmWorkspace,
+  type WorkspaceListResponse,
   type DiscoveryOperation,
   type DiscoveryStateResponse,
   type EmulatorType,
@@ -660,4 +668,80 @@ export function fetchUpdateOperation(
 
 export function fetchUpdateLog(operationId: string): Promise<UpdateLogResponse> {
   return requestJson(`/admin/system/updates/${operationId}/log`, updateLogResponseSchema);
+}
+
+// Versions, snapshots and Remote Snapshot working copies. Administrators only.
+
+export function fetchVersionTree(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<VersionTreeResponse> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/versions`, versionTreeResponseSchema, {
+    signal,
+  });
+}
+
+export function createSnapshot(
+  vm: VmIdentity,
+  request: CreateSnapshotRequest,
+): Promise<RegistrationOperation> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/snapshots`, registrationOperationSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function fetchRegistration(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<RegistrationOperation> {
+  return requestJson(`/admin/registrations/${operationId}`, registrationOperationSchema, {
+    signal,
+  });
+}
+
+export function fetchWorkspaces(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<WorkspaceListResponse> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/workspaces`, workspaceListResponseSchema, {
+    signal,
+  });
+}
+
+export function createWorkspace(
+  vm: VmIdentity,
+  request: CreateWorkspaceRequest,
+): Promise<VmWorkspace> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/workspaces`, vmWorkspaceSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function launchWorkspace(workspaceId: string, requestId: string): Promise<VmSession> {
+  return requestJson(`/admin/workspaces/${workspaceId}/launch`, vmSessionSchema, {
+    method: 'POST',
+    body: { requestId },
+  });
+}
+
+export function preserveWorkspace(
+  workspaceId: string,
+  requestId: string,
+): Promise<RegistrationOperation> {
+  return requestJson(`/admin/workspaces/${workspaceId}/snapshot`, registrationOperationSchema, {
+    method: 'POST',
+    body: { requestId },
+  });
+}
+
+export function discardWorkspace(
+  workspaceId: string,
+  confirmVmName: string | undefined,
+): Promise<VmWorkspace> {
+  return requestJson(`/admin/workspaces/${workspaceId}/discard`, vmWorkspaceSchema, {
+    method: 'POST',
+    body: confirmVmName === undefined ? {} : { confirmVmName },
+  });
 }

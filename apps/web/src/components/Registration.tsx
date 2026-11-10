@@ -162,7 +162,11 @@ export function RegistrationCard({
             {EMULATOR_NAMES[operation.emulatorType]}
           </span>
           <span className="badge text-bg-dark border">
-            {operation.mode === 'transfer' ? 'Transfer' : 'Copy'}
+            {operation.mode === 'transfer'
+              ? 'Transfer'
+              : operation.mode === 'snapshot'
+                ? 'Snapshot'
+                : 'Copy'}
           </span>
         </div>
         {terminal ? null : <RegistrationProgress operation={operation} />}
@@ -264,7 +268,7 @@ export function RegistrationDialog({
   onStarted,
 }: {
   target: RegistrationTarget;
-  mode: RegistrationMode;
+  mode: Exclude<RegistrationMode, 'snapshot'>;
   repository: RepositorySummary;
   onClose: () => void;
   onStarted: (operation: RegistrationOperation) => void;

@@ -9,7 +9,7 @@ import {
   type PublicVmDetail,
   type VmIdentity,
 } from '@emucat/contracts';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
 import { ApiRequestError, fetchPublicVm } from '../api';
 import { useAuth } from '../auth';
@@ -24,6 +24,7 @@ import {
   type GalleryItem,
 } from '../components/Gallery';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
+import { VmVersionHistory } from '../components/Versions';
 import { useAsync } from '../useAsync';
 
 function MissingVm() {
@@ -187,6 +188,76 @@ function ScreenshotGallery({
   );
 }
 
+type DetailTab = 'screenshots' | 'versions';
+
+/**
+ * The third part of the page. Everyone sees the gallery. Administrators also get a tab for the version
+ * history, which is never public (decision 0039); the gallery stays the default, so the page reads the
+ * same for them until they choose otherwise.
+ */
+function DetailTabs({
+  vm,
+  isAdmin,
+  gallery,
+}: {
+  vm: VmIdentity;
+  isAdmin: boolean;
+  gallery: React.ReactNode;
+}) {
+  const [tab, setTab] = useState<DetailTab>('screenshots');
+  const tabs = useRef<Record<DetailTab, HTMLButtonElement | null>>({
+    screenshots: null,
+    versions: null,
+  });
+  if (!isAdmin) return <>{gallery}</>;
+  const order: DetailTab[] = ['screenshots', 'versions'];
+  const onKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const index = order.indexOf(tab);
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? order.length - 1
+          : (index + (event.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length;
+    const chosen = order[next] as DetailTab;
+    setTab(chosen);
+    tabs.current[chosen]?.focus();
+  };
+  const label: Record<DetailTab, string> = {
+    screenshots: 'Screenshots',
+    versions: 'Version history',
+  };
+  return (
+    <div>
+      <div role="tablist" aria-label="VM details" className="nav nav-tabs mb-3" onKeyDown={onKey}>
+        {order.map((item) => (
+          <button
+            key={item}
+            ref={(element) => {
+              tabs.current[item] = element;
+            }}
+            type="button"
+            role="tab"
+            id={`vm-tab-${item}`}
+            aria-controls={`vm-panel-${item}`}
+            aria-selected={tab === item}
+            tabIndex={tab === item ? 0 : -1}
+            className={`nav-link${tab === item ? ' active' : ''}`}
+            onClick={() => setTab(item)}
+          >
+            {label[item]}
+          </button>
+        ))}
+      </div>
+      <div role="tabpanel" id={`vm-panel-${tab}`} aria-labelledby={`vm-tab-${tab}`} tabIndex={0}>
+        {tab === 'screenshots' ? gallery : <VmVersionHistory vm={vm} />}
+      </div>
+    </div>
+  );
+}
+
 function galleryItems(
   title: string,
   gallery: readonly PublicMedia[],
@@ -241,11 +312,17 @@ function VmDetailContent({ vm, isAdmin }: { vm: PublicVmDetail; isAdmin: boolean
         </div>
       </header>
       <GeneralInformation vm={vm} main={main} onOpen={open} />
-      <ScreenshotGallery
-        items={items}
-        onOpen={open}
-        registerThumbnail={registerThumbnail}
-        openId={openId}
+      <DetailTabs
+        vm={vm}
+        isAdmin={isAdmin}
+        gallery={
+          <ScreenshotGallery
+            items={items}
+            onOpen={open}
+            registerThumbnail={registerThumbnail}
+            openId={openId}
+          />
+        }
       />
       {viewer}
     </article>

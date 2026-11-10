@@ -232,27 +232,46 @@ function localText(option: RestoreAgentOption): string {
   return 'Has a local copy, not verified since the agent last connected';
 }
 
-/** The confirmation. It explains what will and will not happen, and offers no way to choose a path. */
-function RestoreDialog({
+/** How a version is named for people: the master, or a snapshot's label and when it was made. */
+export function versionLabel(version: {
+  kind: 'master' | 'snapshot';
+  snapshotName: string | null;
+}): string {
+  return version.kind === 'master' ? 'Master' : (version.snapshotName ?? 'Snapshot');
+}
+
+/**
+ * The confirmation. It explains what will and will not happen, and offers no way to choose a path. Any
+ * version can be restored: the master, or any snapshot in the tree.
+ */
+export function RestoreDialog({
   vm,
   options,
+  initialVersionId,
   onClose,
   onStarted,
 }: {
   vm: VmIdentity;
   options: RestoreOptionsResponse;
+  initialVersionId?: string | undefined;
   onClose: () => void;
   onStarted: () => void;
 }) {
   const eligible = options.agents.filter((agent) => agent.eligible);
   const [agentId, setAgentId] = useState(eligible[0]?.agentId ?? '');
+  const [versionId, setVersionId] = useState(
+    initialVersionId ?? options.master?.versionId ?? options.versions[0]?.versionId ?? '',
+  );
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLDivElement>(null);
   const select = useRef<HTMLSelectElement>(null);
   useModalDialog(dialog, select, onClose);
 
-  const { master } = options;
+  const versions = options.versions.length > 0 ? options.versions : [];
+  const master =
+    versions.find((version) => version.versionId === versionId) ??
+    (options.master ? { ...options.master, kind: 'master' as const, snapshotName: null } : null);
   const chosen = options.agents.find((agent) => agent.agentId === agentId);
   if (!master) return null;
 
@@ -294,10 +313,35 @@ function RestoreDialog({
             Restore {vm.vmName}
           </h2>
           <p className="small">
-            This creates a local copy of the immutable master on the agent you choose. The master is
-            not changed, an existing directory is never overwritten, and the VM is not started.
+            This creates a local copy of the immutable version you choose on the agent you choose.
+            The version is not changed, an existing directory is never overwritten, and the VM is
+            not started. A snapshot made from the restored copy afterwards branches from this
+            version.
           </p>
           <FormError error={error} />
+          {versions.length > 1 ? (
+            <div className="mb-3">
+              <label htmlFor="restore-version" className="form-label">
+                Version
+              </label>
+              <select
+                id="restore-version"
+                className="form-select"
+                value={versionId}
+                onChange={(event) => setVersionId(event.target.value)}
+              >
+                {versions.map((version) => (
+                  <option
+                    key={version.versionId}
+                    value={version.versionId}
+                    disabled={!version.repositoryEnabled}
+                  >
+                    {versionLabel(version)}, {formatTime(version.createdAt)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
           <div className="mb-3">
             <label htmlFor="restore-agent" className="form-label">
               Target agent
@@ -322,8 +366,10 @@ function RestoreDialog({
             <dd className="vm-identity">{vm.vmName}</dd>
             <dt>Emulator</dt>
             <dd>{EMULATOR_LABELS[vm.emulatorType]}</dd>
-            <dt>Master version</dt>
-            <dd className="vm-identity">{master.versionId}</dd>
+            <dt>Version</dt>
+            <dd>
+              {versionLabel(master)} <span className="vm-identity">{master.versionId}</span>
+            </dd>
             <dt>Archive size</dt>
             <dd>{formatBytes(master.archiveSizeBytes)}</dd>
             <dt>Repository</dt>

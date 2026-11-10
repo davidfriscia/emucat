@@ -20,6 +20,7 @@ import {
 import { EmulatorBadge, VisibilityBadge } from '../../components/Catalog';
 import { VmExecutionSection } from '../../components/Execution';
 import { VmRestoreSection } from '../../components/Restore';
+import { VmVersionsSection } from '../../components/Versions';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
 import { VmMediaGrid } from '../../components/VmMediaGrid';
 import { useAsync } from '../../useAsync';
@@ -276,6 +277,9 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
             </div>
           </section>
         </div>
+      </div>
+      <div className="mt-4">
+        <VmVersionsSection vm={identity} />
       </div>
       <section className="mt-4" aria-labelledby="vm-screenshots-heading">
         <h2 id="vm-screenshots-heading" className="h5">

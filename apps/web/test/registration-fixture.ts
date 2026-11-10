@@ -14,6 +14,9 @@ export function registrationOperation(): RegistrationOperation {
     mode: 'transfer',
     state: 'partial_success',
     versionId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101',
+    parentVersionId: null,
+    snapshotName: null,
+    workspaceId: null,
     archiveKey: 'archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101.zip',
     progress: { doneBytes: null, totalBytes: null },
     archive: {

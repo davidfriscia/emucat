@@ -541,3 +541,50 @@ h2,
 .card-title {
   overflow-wrap: anywhere;
 }
+
+/* Version history: a tree, with a guide line for each level so that branches stay visible. */
+.version-tree,
+.version-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.version-children {
+  margin-left: 0.75rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--bs-border-color);
+}
+
+.version-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  margin: 0.35rem 0 0;
+}
+
+.version-facts div {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.version-facts dt {
+  font-weight: 500;
+  color: var(--bs-secondary-color);
+}
+
+.version-facts dd {
+  margin: 0;
+}
+
+.version-toggle {
+  min-width: 1.5rem;
+  text-decoration: none;
+}
+
+@media (max-width: 575.98px) {
+  .version-children {
+    margin-left: 0.25rem;
+    padding-left: 0.5rem;
+  }
+}
