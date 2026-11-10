@@ -1,6 +1,6 @@
 # 0038: Remote Snapshot runs a disposable working copy, and keeps changes only when asked
 
-**Status:** Accepted. Milestone 7. Implements `remote_snapshot` from [0033](0033-remote-execution-modes.md).
+**Status:** Superseded in part by [0040](0040-temporary-remote-sessions.md): Remote Snapshot now publishes on its own when the emulator exits, and new working copies cannot be prepared by hand. The working copy, its isolation and its safety rules stand, and the working copies this created keep the lifecycle described here. Milestone 7. Implements `remote_snapshot` from [0033](0033-remote-execution-modes.md).
 
 ## Context
 

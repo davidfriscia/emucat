@@ -295,16 +295,17 @@ Running a VM, and verifying a local copy. Commands name identities only; the age
 4. A terminal status is repeated on each heartbeat until `server.vm_execution_ack`. The same acknowledgement for an `unknown` session is an administrator's dismissal.
 5. `server.vm_verify` names a master: version, repository, archive key, size and SHA-256, and the manifest's SHA-256. The agent answers with `agent.vm_verify_result`, repeated until `server.vm_verify_ack`.
 
-`remote_snapshot` launches carry `workspaceId` and run only that working copy; `remote_volatile`, or a mode and working copy that do not go together, is refused with `execution_mode_unavailable`, and never started locally. An agent advertises `remote_snapshot` in `capabilities.modes`.
+Remote launches carry `workspaceId` and run only that working copy, and only in the mode its purpose names: anything else is refused (`workspace_purpose_mismatch`, or `execution_mode_unavailable` for a mode the agent does not run), and never started locally. An agent advertises `remote_volatile` and `remote_snapshot` in `capabilities.modes`.
 
 ## Snapshots and working copies
 
-Milestone 7, decisions [0037](decisions/0037-snapshots-as-registrations.md) and [0038](decisions/0038-remote-snapshot-working-copies.md). Nothing here is a new pipeline: a snapshot is a registration with `mode: "snapshot"`, and a working copy is prepared by a restore and run by a session.
+Milestone 7, decisions [0037](decisions/0037-snapshots-as-registrations.md), [0038](decisions/0038-remote-snapshot-working-copies.md) and [0040](decisions/0040-temporary-remote-sessions.md). Nothing here is a new pipeline: a snapshot is a registration with `mode: "snapshot"`, and a working copy is prepared by a restore and run by a session.
 
 1. `agent.registration_sync` says `snapshots: true` on an agent that can create them; the server sends snapshot requests to no other. `agent.restore_sync` lists the working copies the agent holds as `workspaces`; saying so is also what marks it as able to keep them.
 2. A snapshot request names its `parentVersionId`, and only a snapshot does: a request whose mode and parent disagree fails to decode, and is answered as invalid. The agent refuses a parent its own record of the local copy contradicts, with `snapshot_parent_mismatch`. Everything after that is a copy registration's, and the answer to its result never has `removeLocal` for a snapshot. Even if it did, the agent would not remove anything.
-3. A `workspaceId` on a restore puts the VM under `{state_dir}/workspaces/{workspaceId}`, and on a snapshot reads it from there. Neither touches the persistent copy or its state.
+3. A `workspaceId` on a restore puts the VM under `{state_dir}/workspaces/{workspaceId}`, with the `workspacePurpose` the agent records beside it, and on a snapshot reads it from there. Neither touches the persistent copy or its state. The agent refuses to snapshot a `remote_volatile` working copy.
 4. `server.workspace_discard` asks for a working copy's removal. The agent refuses while anything runs or works on the VM, and answers once; a lost request or answer is reconciled from the next `agent.restore_sync`.
+5. A restore with `replace` replaces the persistent copy: the agent advertises `replaceLocal` in its restore capabilities, checks that nothing runs, that the directory is the one its lineage record names and is that `expectedVersionId`, and, unless `discardLocalChanges`, that it matches that version's manifest. It then publishes with a journaled, no-replace swap (`.emucat-replaced-{operation}` beside the VM) that a restart completes or rolls back.
 
 ## Screenshots
 
@@ -351,4 +352,4 @@ session cookie, and a user's session cannot open this endpoint.
 
 - Credential rotation over the authenticated channel.
 - More control commands, each validated by the agent against local rules, such as `VmName`, whatever the server
-  sends: Remote Volatile execution, and deleting versions.
+  sends: deleting versions.

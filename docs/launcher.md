@@ -173,32 +173,38 @@ copy that has been run is expected to report `modified`.
 
 ## Execution modes
 
-| Mode              | Status                                                                                                |
-| ----------------- | ----------------------------------------------------------------------------------------------------- |
-| `local`           | Implemented. Runs the agent's persistent copy                                                         |
-| `remote_snapshot` | Implemented in Milestone 7. Runs a working copy of a chosen version, started from the version history |
-| `remote_volatile` | Not available. Needs a remote display and a disposable working copy                                   |
+| Mode              | What runs, and what happens to its changes                                                                           |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `local`           | The agent's persistent copy. Changes stay in it                                                                      |
+| `remote_volatile` | A temporary copy of a version you choose. Every change is deleted when the emulator exits                            |
+| `remote_snapshot` | A temporary copy of a version you choose. When the emulator exits, it becomes a new snapshot of exactly that version |
 
 A mode that cannot run is refused by the API and by the agent with `execution_mode_unavailable`. It is never
-replaced by another one. See decisions [0033](decisions/0033-remote-execution-modes.md) and [0038](decisions/0038-remote-snapshot-working-copies.md).
+replaced by another one. All three are chosen in the same **Run and verify** panel. See decisions [0033](decisions/0033-remote-execution-modes.md) and [0040](decisions/0040-temporary-remote-sessions.md).
 
-## Snapshots and Remote Snapshot
+## Snapshots
 
 **A snapshot** is a new, immutable, standalone version of a registered VM: the agent archives its copy exactly as registration does, uploads it to staging, verifies it, publishes it under its own UUID without being able to overwrite anything, and the server records it only then. Its parent is **the version the copy came from**, which the administrator chooses and the server and the agent both check. So after restoring an older version, the next snapshot is a child of that older version, and the history branches. The copy is only read. See [decision 0037](decisions/0037-snapshots-as-registrations.md).
 
 A snapshot is refused while the VM runs on that agent, or may (an `unknown` session counts), and a launch is refused while one is being made. Stop the VM first.
 
-**Remote Snapshot** runs any version without touching the persistent copy:
+## Remote modes
 
-1. From the version history, choose **Launch in Remote Snapshot** on a version, and an agent.
-2. The agent restores that version into a working copy, `{state_dir}\workspaces\{id}\{VM name}`, outside every base path, through the same cache, checks and safe extraction as any restore.
-3. The emulator starts from there, exactly as a local launch would, with the same command-line rules, process tracking and stop behavior. It is a normal session: stop it from the Run section.
-4. Stopping publishes nothing. The working copy stays, through restarts and disconnections, until you choose:
-   - **Preserve as snapshot**: a new snapshot whose parent is the working copy's version. The working copy then counts as a copy of the new snapshot, so preserving it again later branches from there.
-   - **Launch again**, to keep working.
-   - **Discard**: the agent deletes the working copy. If it may hold changes no snapshot has, you type the VM's name.
+**Remote Volatile** and **Remote Snapshot** run any version without needing, or touching, the persistent copy. In **Run and verify**, choose the mode, the version and the agent, then **Start**; or choose **Run volatile** or **Run and snapshot** on a version in the version history, which selects them in that panel. From there the server drives everything:
 
-One working copy of a VM per agent, and one session of a VM per agent, whichever copy it runs. While a working copy runs, its VM counts as running on that agent for everything, including the persistent copy. See [decision 0038](decisions/0038-remote-snapshot-working-copies.md).
+1. The agent obtains the version (from its cache, or over SFTP), verifies it and extracts it into a temporary copy, `{state_dir}\workspaces\{id}\{VM name}`, outside every base path, exactly as a restore would.
+2. The emulator starts from there, with the same command-line rules, process tracking and stop behavior as a local launch. Stop it as any session.
+3. When the emulator exits:
+   - **Remote Volatile**: the temporary copy is deleted, with every change.
+   - **Remote Snapshot**: the temporary copy is archived, uploaded, verified and recorded as a new, immutable snapshot whose parent is exactly the version you chose, even if nothing changed; then it is deleted.
+4. If publication fails, the temporary copy is kept and nothing is recorded. It is retried automatically a few times when the error may heal (an unreachable repository, a file still in use), and **Retry publication** retries it at any time. A retry never creates a second version. **Abandon snapshot** deletes the copy after you type the VM's name: it is the only way a Remote Snapshot's changes are lost.
+5. If the session ends without the agent accounting for the emulator (the agent lost track of it, or was revoked), the session is **held**: nothing is published or deleted until you check that computer and **Resume**, typing the VM's name.
+
+One remote session of a VM per agent at a time, a failed publication included, and one session of a VM per agent, whichever copy it runs. While a temporary copy runs, its VM counts as running on that agent for everything, including the persistent copy. Working copies prepared by hand in Milestone 7 are listed as **manual working copies** in the version history, and keep their own Preserve and Discard actions. See [decision 0040](decisions/0040-temporary-remote-sessions.md).
+
+## Replacing a persistent copy
+
+Restoring onto an agent that already holds the VM replaces its persistent copy, after a confirmation that shows the version installed now and the one replacing it, and asks for the VM's name. A copy known to differ from its version is replaced only when you tick **Discard any changes**, and the dialog offers to **snapshot it first**; without that tick, the agent verifies the copy against its version first and refuses if anything differs. The new version is extracted beside the old one first, the old one is moved aside, the new one moved into place, and only then is the old one deleted; a crash at any point is resolved on the next start, and a failure before the swap leaves the old copy as it was. A replacement is refused while the VM runs. Restore history marks replacements.
 
 Nothing deletes a version, and the master can never be deleted while anything descends from it.
 
@@ -228,5 +234,8 @@ start_grace_seconds = 3
 | `stop_timeout`                  | Shut the guest down from inside, or force a stop                    |
 | `graceful_stop_unavailable`     | The agent restarted while QEMU ran. Close it there, or force a stop |
 | `process_state_unknown`         | Check that computer, then dismiss the session                       |
-| `workspace_unavailable`         | The working copy is gone from the agent. Prepare a new one          |
+| `workspace_unavailable`         | The session is not in a state that allows this. Reload              |
+| `remote_session_pending`        | Finish, publish or abandon the remote session still on that agent   |
+| `local_copy_modified`           | Snapshot the copy first, or tick Discard any changes                |
+| `local_copy_changed`            | The copy is not the version the page showed. Reload                 |
 | `snapshot_parent_mismatch`      | The copy comes from another version. Reload, and choose that one    |

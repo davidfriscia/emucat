@@ -1,6 +1,6 @@
 # 0033: Remote modes exist in the contract, and are refused
 
-**Status:** Accepted. Milestone 6. `remote_snapshot` implemented by [0038](0038-remote-snapshot-working-copies.md) in Milestone 7; the rule that a mode is refused, never replaced, stands.
+**Status:** Accepted. Milestone 6. Both remote modes are implemented by [0040](0040-temporary-remote-sessions.md) (`remote_snapshot` first by [0038](0038-remote-snapshot-working-copies.md)); the rule that a mode is refused, never replaced, stands.
 
 ## Context
 

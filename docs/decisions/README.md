@@ -37,10 +37,11 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0030](0030-session-durability.md)                | Sessions are durable on both sides, and the agent's word wins                 |
 | [0031](0031-graceful-and-forced-shutdown.md)      | Graceful by default, forced only when an administrator confirms               |
 | [0032](0032-local-verification.md)                | Verifying a local copy hashes every file on the agent                         |
-| [0033](0033-remote-execution-modes.md)            | Remote modes exist in the contract, and are refused                           |
+| [0033](0033-remote-execution-modes.md)            | Remote modes exist in the contract, and a mode is refused, never replaced     |
 | [0034](0034-deployment-and-admin-updates.md)      | Images built on the server, updated on demand by a separate service           |
 | [0035](0035-self-contained-opt-emucat.md)         | Everything a server keeps lives under /opt/emucat                             |
 | [0036](0036-vm-level-publication.md)              | Publication is decided by the VM alone                                        |
 | [0037](0037-snapshots-as-registrations.md)        | A snapshot is a further registration of a registered VM                       |
 | [0038](0038-remote-snapshot-working-copies.md)    | Remote Snapshot runs a disposable working copy, and keeps changes when asked  |
 | [0039](0039-version-history-is-administrative.md) | Version history is for administrators only                                    |
+| [0040](0040-temporary-remote-sessions.md)         | Remote modes run a temporary copy, and finish on their own                    |

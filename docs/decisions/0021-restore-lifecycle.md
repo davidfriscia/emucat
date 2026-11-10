@@ -1,6 +1,6 @@
 # 0021: Restoring as a durable operation, with nothing to undo
 
-**Status:** Accepted. Since Milestone 7 any version can be restored, and a restore can target a Remote Snapshot working copy ([0038](0038-remote-snapshot-working-copies.md)); everything else here is unchanged.
+**Status:** Accepted. Since Milestone 7 any version can be restored, a restore can prepare a remote session's temporary copy ([0038](0038-remote-snapshot-working-copies.md), [0040](0040-temporary-remote-sessions.md)), and a restore can explicitly replace a persistent copy ([0040](0040-temporary-remote-sessions.md#replacing-a-persistent-local-copy)); everything else here is unchanged.
 
 The rule that shapes this: **a failed restore must never damage or overwrite an existing VM**, and a VM must not appear
 half-finished. Everything before the last step happens where nothing else looks, and the last step is one rename that refuses to

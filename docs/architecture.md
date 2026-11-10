@@ -57,6 +57,7 @@ WebSocket endpoint.
 | `src/routes/admin-registrations.ts` | Registrations and repositories, for administrators              |
 | `src/registration/coordinator.ts`   | The registration state machine and all its SQL                  |
 | `src/registration/repositories.ts`  | SQL for repositories and which agents may use them              |
+| `src/workspaces/coordinator.ts`     | Drives remote sessions: prepare, run, publish, clean up         |
 | `src/routes/admin-system.ts`        | Version, and application updates relayed to the deployer        |
 | `src/deployment/client.ts`          | The deployment service client, over its Unix socket             |
 | `src/db/`                           | Connection pool and migration runner                            |
@@ -165,8 +166,10 @@ Browser ─► API ─► MariaDB          who may restore what, operation state
                 base path/{vm_name}
 ```
 
+A restore onto an agent that already holds the VM is an explicit replacement. The new version is extracted exactly as above; then the current directory is renamed to `base path/.emucat-replaced-{id}`, the new one renamed into place, and only then is the old one removed. Every rename refuses to replace anything, and each step is journaled, so a restart finishes the swap or puts the old copy back.
+
 Screenshots are not in archives, and are not restored: they stay on the server, and keep arriving through the API from a VM once it is held locally.
-See decisions [0021](decisions/0021-restore-lifecycle.md) to [0024](decisions/0024-local-archive-cache.md).
+See decisions [0021](decisions/0021-restore-lifecycle.md) to [0024](decisions/0024-local-archive-cache.md), and [0040](decisions/0040-temporary-remote-sessions.md#replacing-a-persistent-local-copy).
 
 ## Running VMs
 
@@ -182,6 +185,24 @@ Browser ─► API ─► MariaDB          vm_sessions, vm_verifications: names,
 ```
 
 The API never executes anything, and the browser never supplies a command or a path. Conflicts are checked by the API, so it can explain, and again by the agent, whose check counts. See [the launcher guide](launcher.md) and decisions [0028](decisions/0028-launcher-architecture.md) to [0033](decisions/0033-remote-execution-modes.md).
+
+### Remote sessions
+
+Remote Volatile and Remote Snapshot reuse the pieces above rather than adding new ones. A `vm_workspaces` row ties them together, and the workspace coordinator advances it whenever one of them changes, and on a periodic sweep:
+
+```
+request ─► restore into state dir/workspaces/{id}   same cache, checks and safe extraction
+           │ restore committed
+           ▼
+          session of that copy                    same launcher, journal and stop rules
+           │ emulator ended, accounted for
+           ├─ volatile ─────────────────────────► workspace discard (repeated until confirmed)
+           └─ snapshot ─► snapshot registration ─► workspace discard
+                          parent = chosen version
+                          request ID derived from (workspace, attempt), so a retry never duplicates
+```
+
+Each step is guarded by the row's state and serialized per working copy, so a repeated report, a lost answer or a restart of either side advances it once. Nothing is removed while the emulator may run, and a failed publication keeps the copy. See [decision 0040](decisions/0040-temporary-remote-sessions.md).
 
 ## Reliability behavior
 

@@ -176,7 +176,7 @@ A snapshot is a `registration_operations` row with `mode = 'snapshot'`, naming i
 
 ## Working copies
 
-A `vm_workspaces` row is a Remote Snapshot working copy of one VM on one agent: `preparing`, `ready`, `discarding`, and then `discarded`, `failed` or `lost`. It records the version first restored into it and the version it is a copy of now, and whether a session may have changed it since its last snapshot. Restores, snapshots and sessions that concern it name it. See [decision 0038](decisions/0038-remote-snapshot-working-copies.md).
+A `vm_workspaces` row is a working copy of one VM on one agent, with a `purpose`: `remote_volatile` or `remote_snapshot` for a remote session, or `manual` for one prepared by hand in Milestone 7. A remote session moves through `preparing`, `ready`, `running`, then `held` when its emulator was not accounted for, `publishing` and `publish_failed` for Remote Snapshot, `discarding`, and ends `discarded`, `failed` or `lost`; manual ones keep their old lifecycle. It records the version chosen (`base_version_id`, a Remote Snapshot's parent), its session, its current publication attempt and their count, the version it published, and when an administrator abandoned it. Restores, snapshots and sessions that concern it name it. A restore that replaced a persistent copy records `replace_existing`, the version replaced and whether local changes were discarded. See decisions [0038](decisions/0038-remote-snapshot-working-copies.md) and [0040](decisions/0040-temporary-remote-sessions.md).
 
 ## Database tables
 
@@ -195,7 +195,7 @@ A `vm_workspaces` row is a Remote Snapshot working copy of one VM on one agent: 
 | `agent_repositories`      | Which agents may use which repository    | `(agent_id, repository_id)`          |
 | `registration_operations` | Registrations, kept after they end       | `id`                                 |
 | `restore_operations`      | Restores, kept after they end            | `id`                                 |
-| `vm_workspaces`           | Remote Snapshot working copies           | `id`                                 |
+| `vm_workspaces`           | Remote sessions and working copies       | `id`                                 |
 | `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                       |
 | `schema_migrations`       | Migration history, managed by the runner | `version`                            |
 
