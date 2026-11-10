@@ -67,6 +67,7 @@ function holderText(holder: VersionNode['holders'][number]): string {
 function VersionItem({
   entry,
   vm,
+  nameOf,
   restoreOptions,
   onRestore,
   onSnapshot,
@@ -74,6 +75,8 @@ function VersionItem({
 }: {
   entry: VersionTreeEntry;
   vm: VmIdentity;
+  /** The version's name for assistive technology: unique in the tree, even when labels repeat. */
+  nameOf: (node: VersionNode) => string;
   restoreOptions: RestoreOptionsResponse | null;
   onRestore: (versionId: string) => void;
   onSnapshot: (node: VersionNode, agentId: string, agentName: string) => void;
@@ -99,9 +102,7 @@ function VersionItem({
               <button
                 type="button"
                 className="btn btn-sm btn-link p-0 version-toggle"
-                aria-label={
-                  expanded ? `Collapse ${versionLabel(node)}` : `Expand ${versionLabel(node)}`
-                }
+                aria-label={expanded ? `Collapse ${nameOf(node)}` : `Expand ${nameOf(node)}`}
                 onClick={() => setExpanded((value) => !value)}
               >
                 <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
@@ -170,7 +171,7 @@ function VersionItem({
               type="button"
               className="btn btn-sm btn-outline-primary"
               disabled={!node.available}
-              aria-label={`Run ${versionLabel(node)} in Remote Volatile`}
+              aria-label={`Run ${nameOf(node)} in Remote Volatile`}
               onClick={() => onRun(node, 'remote_volatile')}
             >
               Run volatile…
@@ -179,7 +180,7 @@ function VersionItem({
               type="button"
               className="btn btn-sm btn-outline-primary"
               disabled={!node.available}
-              aria-label={`Run ${versionLabel(node)} in Remote Snapshot`}
+              aria-label={`Run ${nameOf(node)} in Remote Snapshot`}
               onClick={() => onRun(node, 'remote_snapshot')}
             >
               Run and snapshot…
@@ -204,6 +205,7 @@ function VersionItem({
               key={child.node.id}
               entry={child}
               vm={vm}
+              nameOf={nameOf}
               restoreOptions={restoreOptions}
               onRestore={onRestore}
               onSnapshot={onSnapshot}
@@ -411,6 +413,16 @@ export function VmVersionHistory({
   if (!tree.data) return <p className="small text-body-secondary">Loading the version history…</p>;
 
   const built = buildVersionTree(tree.data.versions);
+  // Snapshot labels are minutes, so two can be the same. Their controls must still be told apart.
+  const labelCounts = new Map<string, number>();
+  for (const version of tree.data.versions) {
+    const label = versionLabel(version);
+    labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  }
+  const nameOf = (node: VersionNode) => {
+    const label = versionLabel(node);
+    return (labelCounts.get(label) ?? 0) > 1 ? `${label} (${node.id.slice(-8)})` : label;
+  };
   const activeManual = manual.filter((item) =>
     ['preparing', 'ready', 'running', 'discarding'].includes(item.state),
   );
@@ -452,6 +464,7 @@ export function VmVersionHistory({
             <VersionItem
               entry={built.root}
               vm={identity}
+              nameOf={nameOf}
               restoreOptions={options.data}
               onRestore={setRestoring}
               onSnapshot={(node, agentId, agentName) =>

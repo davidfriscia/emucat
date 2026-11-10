@@ -208,6 +208,24 @@ describe('the version tree', () => {
     expect(within(b).getByTitle(SNAP_B)).toBeTruthy();
   });
 
+  it('tells apart versions whose labels are the same, by their identity', async () => {
+    const twins = branchingTree();
+    // Snapshot labels are minutes: two snapshots in one minute share one.
+    twins.versions[3] = {
+      ...(twins.versions[3] as VersionNode),
+      snapshotName: 'Win98_202601010001',
+    };
+    base({ [`GET ${VM_PATH}/versions`]: twins });
+    const tree = await history();
+    const buttons = within(tree).getAllByRole('button', { name: /in Remote Snapshot$/ });
+    const names = buttons.map((button) => button.getAttribute('aria-label'));
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toContain(`Run Win98_202601010001 (${SNAP_A.slice(-8)}) in Remote Snapshot`);
+    expect(names).toContain(`Run Win98_202601010001 (${SNAP_C.slice(-8)}) in Remote Snapshot`);
+    // A label that is unique stays as it is.
+    expect(names).toContain('Run Win98_202601010002 in Remote Snapshot');
+  });
+
   it('collapses and expands a branch', async () => {
     base();
     const tree = await history();

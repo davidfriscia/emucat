@@ -645,3 +645,11 @@ main.container:has(> .page-wide) {
 .restore-history td {
   overflow-wrap: anywhere;
 }
+
+/*
+ * A scrolling table's visually hidden caption and headers are absolutely positioned. Without a
+ * positioned scroller they escape it, and widen the whole page on a phone.
+ */
+.table-responsive {
+  position: relative;
+}
