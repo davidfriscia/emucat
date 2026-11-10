@@ -23,15 +23,16 @@ import {
   executionOptionsResponseSchema,
   pairingRequestReviewSchema,
   registrationOperationSchema,
+  remoteSessionSchema,
   repositorySummarySchema,
+  restoreOperationSchema,
   versionTreeResponseSchema,
   vmSessionSchema,
   vmVerificationSchema,
-  vmWorkspaceSchema,
   type RegistrationOperation,
+  type RemoteSession,
   type VmSession,
   type VmVerification,
-  type VmWorkspace,
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
 import { chromium, type Browser, type Page } from 'playwright-core';
@@ -548,36 +549,34 @@ describe('running and verifying VMs, end to end', () => {
       await register(VM, 'qemu');
     }, LONG);
 
-    it('offers local and Remote Snapshot execution, and says why Remote Volatile is not available', async () => {
+    it('offers all three modes, and refuses a remote launch that names no remote session', async () => {
       const result = await options(VM);
-      expect(result.modes.map((mode) => [mode.mode, mode.available])).toEqual([
-        ['local', true],
-        ['remote_volatile', false],
-        ['remote_snapshot', true],
+      expect(result.modes.map((mode) => [mode.mode, mode.available, mode.reason])).toEqual([
+        ['local', true, null],
+        ['remote_volatile', true, null],
+        ['remote_snapshot', true, null],
       ]);
-      expect(result.modes[0]?.reason).toBeNull();
-      expect(result.modes[1]?.reason).toMatch(/remote display/);
-      // Available, but only through a working copy prepared from the version history.
-      expect(result.modes[2]?.reason).toMatch(/working copy/);
       expect(result.agents[0]).toMatchObject({
         agentId,
         launch: { eligible: true },
         verify: { eligible: true },
+        remote: {
+          remote_volatile: { eligible: true, reason: null },
+          remote_snapshot: { eligible: true, reason: null },
+        },
         local: { present: true, contentStatus: 'verified' },
       });
 
-      // Each refusal is a refusal: nothing is launched, locally or otherwise.
-      const volatile = await launch(VM, 'qemu', 'remote_volatile');
-      expect(volatile.statusCode, volatile.body).toBe(409);
-      expect(errorCode(volatile)).toBe('execution_mode_unavailable');
-      // Remote Snapshot names its working copy; without one it is invalid, never a local launch.
-      const unnamed = await launch(VM, 'qemu', 'remote_snapshot');
-      expect(unnamed.statusCode, unnamed.body).toBe(400);
-      expect(errorCode(unnamed)).toBe('validation_failed');
-      // This agent can run the mode, so what is refused is a working copy that does not exist.
-      const unknown = await launch(VM, 'qemu', 'remote_snapshot', randomUUID());
-      expect(unknown.statusCode, unknown.body).toBe(404);
-      expect(errorCode(unknown)).toBe('workspace_not_found');
+      // Each refusal is a refusal: nothing is launched, locally or otherwise. A remote mode runs a
+      // temporary copy the server prepared; without one it is invalid, never a local launch.
+      for (const mode of ['remote_volatile', 'remote_snapshot']) {
+        const unnamed = await launch(VM, 'qemu', mode);
+        expect(unnamed.statusCode, unnamed.body).toBe(400);
+        expect(errorCode(unnamed)).toBe('validation_failed');
+        const unknown = await launch(VM, 'qemu', mode, randomUUID());
+        expect(unknown.statusCode, unknown.body).toBe(404);
+        expect(errorCode(unknown)).toBe('workspace_not_found');
+      }
       // A local session runs the persistent copy, and cannot be pointed at a working copy.
       const local = await launch(VM, 'qemu', 'local', randomUUID());
       expect(local.statusCode, local.body).toBe(400);
@@ -628,18 +627,10 @@ describe('running and verifying VMs, end to end', () => {
         const localMode = section.getByRole('radio', { name: 'Local', exact: true });
         await localMode.waitFor();
         expect(await localMode.isChecked()).toBe(true);
-        // Remote Volatile cannot be chosen at all, and Remote Snapshot only from the version history,
-        // since it runs a working copy that has to be prepared first.
-        expect(
-          await section
-            .getByRole('radio', { name: 'Remote volatile (not available)' })
-            .isDisabled(),
-        ).toBe(true);
-        expect(
-          await section
-            .getByRole('radio', { name: 'Remote snapshot (from the version history)' })
-            .isDisabled(),
-        ).toBe(true);
+        // Every mode can be chosen in the same panel.
+        for (const name of ['Remote Volatile', 'Remote Snapshot']) {
+          expect(await section.getByRole('radio', { name, exact: true }).isDisabled()).toBe(false);
+        }
         await section.getByRole('button', { name: 'Launch' }).click();
         await section.getByText('Running', { exact: true }).first().waitFor({ timeout: 60_000 });
         await shot(page, 'execution-qemu-running');
@@ -777,27 +768,37 @@ describe('running and verifying VMs, end to end', () => {
   });
 
   /**
-   * Milestone 7 with nothing simulated: a snapshot of the verified local copy, a working copy of the
-   * older master beside it, real QEMU in that working copy, an agent restart while it runs, a stop that
-   * publishes nothing, a preservation that branches from the master, and a discard.
+   * Milestone 7's corrected semantics with nothing simulated: Remote Volatile and Remote Snapshot of the
+   * master and of a historical snapshot, run by real QEMU from a temporary copy of exactly that version;
+   * changes discarded, or published automatically as a child of that version; a publication interrupted
+   * by an unreachable repository and recovered without a duplicate; and the persistent copy replaced in
+   * both directions, refused while it runs. The persistent copy is never touched by a remote session.
+   *
+   * QEMU runs with no disk, so what a guest would write is written into the temporary copy while QEMU
+   * runs: the agent cannot tell the difference, and it is the files that matter.
    */
-  describe.skipIf(!HAVE_QEMU)('snapshots and Remote Snapshot', () => {
-    const VM = 'E2E Snapshot';
+  describe.skipIf(!HAVE_QEMU)('remote sessions and replacement', () => {
+    const VM = 'E2E Remote';
     let root: string;
     let masterId: string;
     let snapshotId: string;
-    let workspace: VmWorkspace;
-    let session: VmSession | undefined;
-    /** The persistent copy as it is once the snapshot is taken. Nothing after that may change it. */
+    /** The persistent copy once the snapshot is taken. No remote session may change it. */
     let persistent: Record<string, string>;
 
-    const workspaceUrl = (suffix = '') => `/admin/workspaces/${workspace.id}${suffix}`;
-    const readWorkspace = async () =>
-      vmWorkspaceSchema.parse((await admin.get(workspaceUrl())).json());
-    const tree = async () =>
-      versionTreeResponseSchema.parse(
-        (await admin.get(`/admin/vms/qemu/${encodeURIComponent(VM)}/versions`)).json(),
+    const vmPath = `/admin/vms/qemu/${encodeURIComponent(VM)}`;
+    const readWorkspace = async (id: string): Promise<RemoteSession> =>
+      remoteSessionSchema.parse((await admin.get(`/admin/workspaces/${id}`)).json());
+    const workspaceIn = (id: string, states: string[], timeout = 120_000) =>
+      waitFor(
+        async () => {
+          const current = await readWorkspace(id);
+          return states.includes(current.state) ? current : null;
+        },
+        `the remote session to be ${states.join(' or ')}`,
+        timeout,
       );
+    const tree = async () =>
+      versionTreeResponseSchema.parse((await admin.get(`${vmPath}/versions`)).json());
     const finishedOperation = (id: string) =>
       waitFor(
         async () => {
@@ -811,14 +812,80 @@ describe('running and verifying VMs, end to end', () => {
         'the snapshot to finish',
         120_000,
       );
+    const finishedRestore = (id: string) =>
+      waitFor(
+        async () => {
+          const operation = restoreOperationSchema.parse(
+            (await admin.get(`/admin/restores/${id}`)).json(),
+          );
+          return ['succeeded', 'failed', 'cancelled', 'partial_success'].includes(operation.state)
+            ? operation
+            : null;
+        },
+        'the restore to finish',
+        120_000,
+      );
     const repositoryArchives = () =>
       docker('exec', container, 'sh', '-c', 'cd /srv/sftp/repo && find archives -type f | sort')
         .split('\n')
         .filter(Boolean);
-    function requireSession(): VmSession {
-      if (!session)
-        throw new Error('No working-copy session: the launch earlier in this group failed');
-      return session;
+    /** Nothing a replacement or a remote session leaves behind may stay next to the VMs. */
+    const leftovers = async () =>
+      (await readdir(qemu)).filter((name) => name !== VM && !name.startsWith('E2E QEMU'));
+
+    async function startRemote(mode: 'remote_volatile' | 'remote_snapshot', versionId: string) {
+      const response = await admin.request({
+        method: 'POST',
+        url: `${vmPath}/workspaces`,
+        payload: { agentId, versionId, mode, requestId: randomUUID() },
+      });
+      expect(response.statusCode, response.body).toBe(202);
+      return remoteSessionSchema.parse(response.json());
+    }
+
+    /** Waits for the emulator of a remote session to run, and returns both. */
+    async function running(id: string) {
+      const workspace = await workspaceIn(id, ['running', 'failed', 'discarding', 'discarded']);
+      expect(workspace.state, JSON.stringify(workspace)).toBe('running');
+      const session = await sessionIn(workspace.sessionId as string, ['running', 'failed'], 60_000);
+      started.add(session.id);
+      expect(session, JSON.stringify(session)).toMatchObject({
+        state: 'running',
+        mode: workspace.purpose,
+        workspaceId: id,
+        versionId: workspace.baseVersionId,
+      });
+      expect(session.pid).toBeGreaterThan(0);
+      return { workspace: await readWorkspace(id), session };
+    }
+
+    /** QEMU without an OS ignores a graceful stop, so the emulator is ended, as an administrator would. */
+    async function forceStop(session: VmSession): Promise<void> {
+      const response = await admin.request({
+        method: 'POST',
+        url: `/admin/sessions/${session.id}/stop`,
+        payload: { force: true, confirmVmName: VM },
+      });
+      expect(response.statusCode, response.body).toBe(202);
+      await sessionIn(session.id, ['stopped'], 30_000);
+    }
+
+    async function replace(
+      versionId: string,
+      expectedVersionId: string | null,
+      discardLocalChanges = false,
+    ) {
+      return admin.request({
+        method: 'POST',
+        url: '/admin/restores',
+        payload: {
+          agentId,
+          emulatorType: 'qemu',
+          vmName: VM,
+          versionId,
+          replace: { expectedVersionId, discardLocalChanges, confirmVmName: VM },
+        },
+      });
     }
 
     beforeAll(async () => {
@@ -841,26 +908,23 @@ describe('running and verifying VMs, end to end', () => {
         await writeFile(join(root, 'nested', 'notes.txt'), 'snapshot\n');
         const response = await admin.request({
           method: 'POST',
-          url: `/admin/vms/qemu/${encodeURIComponent(VM)}/snapshots`,
+          url: `${vmPath}/snapshots`,
           payload: { agentId, parentVersionId: masterId, requestId: randomUUID() },
         });
         expect(response.statusCode, response.body).toBe(202);
         const done = await finishedOperation(registrationOperationSchema.parse(response.json()).id);
         expect(done, JSON.stringify(done)).toMatchObject({
           state: 'succeeded',
-          mode: 'snapshot',
           parentVersionId: masterId,
           localCopy: 'preserved',
         });
         snapshotId = done.versionId;
-        const versions = (await tree()).versions;
-        expect(versions.map((node) => [node.id, node.kind, node.parentVersionId])).toEqual([
-          [masterId, 'master', null],
-          [snapshotId, 'snapshot', masterId],
-        ]);
-        expect((await options(VM)).agents[0]?.local).toMatchObject({
-          sourceVersionId: snapshotId,
-          contentStatus: 'verified',
+        expect((await options(VM)).agents[0]).toMatchObject({
+          local: { sourceVersionId: snapshotId, contentStatus: 'verified' },
+          remote: {
+            remote_volatile: { eligible: true, reason: null },
+            remote_snapshot: { eligible: true, reason: null },
+          },
         });
         persistent = await fingerprint(root);
       },
@@ -868,220 +932,384 @@ describe('running and verifying VMs, end to end', () => {
     );
 
     it(
-      'prepares a working copy of the older master, beside the persistent copy',
+      '1, 3, 4. runs the master in Remote Volatile, then discards every change it made',
       async () => {
-        const response = await admin.request({
-          method: 'POST',
-          url: `/admin/vms/qemu/${encodeURIComponent(VM)}/workspaces`,
-          payload: { agentId, versionId: masterId, requestId: randomUUID(), launch: false },
+        const archivesBefore = repositoryArchives();
+        const versionsBefore = (await tree()).versions.length;
+        const requested = await startRemote('remote_volatile', masterId);
+        expect(requested).toMatchObject({ purpose: 'remote_volatile', baseVersionId: masterId });
+        const { workspace, session } = await running(requested.id);
+        const temporary = workspace.localDirectory as string;
+        expect(temporary).toBe(join(stateDirectory(), 'workspaces', workspace.id, VM));
+        // The master's files, not the persistent copy's, which holds the snapshot.
+        expect(await readFile(join(temporary, 'nested', 'notes.txt'), 'utf8')).toBe('master\n');
+        expect(await fingerprint(root)).toEqual(persistent);
+
+        await writeFile(join(temporary, 'nested', 'notes.txt'), 'changed by the guest\n');
+        await writeFile(join(temporary, 'guest.log'), 'written while it ran\n');
+        await forceStop(session);
+        const done = await workspaceIn(workspace.id, ['discarded', 'lost'], 60_000);
+        expect(done, JSON.stringify(done)).toMatchObject({
+          state: 'discarded',
+          snapshotVersionId: null,
+          error: null,
         });
-        expect(response.statusCode, response.body).toBe(202);
-        workspace = vmWorkspaceSchema.parse(response.json());
-        workspace = await waitFor(
-          async () => {
-            const current = await readWorkspace();
-            return current.state === 'preparing' ? null : current;
-          },
-          'the working copy to be prepared',
-          120_000,
+        expect(existsSync(temporary)).toBe(false);
+        expect(existsSync(join(stateDirectory(), 'workspaces', workspace.id))).toBe(false);
+        expect(repositoryArchives(), 'nothing was published').toEqual(archivesBefore);
+        expect((await tree()).versions).toHaveLength(versionsBefore);
+        expect(await fingerprint(root)).toEqual(persistent);
+        expect((await verify(VM)).status).toBe('verified');
+        expect(await leftovers()).toEqual([]);
+      },
+      LONG,
+    );
+
+    it(
+      '2. runs a snapshot in Remote Volatile, chosen in the browser',
+      async () => {
+        const page = await (await browser.newContext()).newPage();
+        await signIn(page);
+        await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
+        const section = page.getByRole('region', { name: 'Run and verify' });
+        await section.getByRole('radio', { name: 'Remote Volatile', exact: true }).check();
+        const versions = (await tree()).versions;
+        const label = versions.find((node) => node.id === snapshotId)?.snapshotName as string;
+        await section.getByLabel('Version').selectOption({ value: snapshotId });
+        expect(await section.getByLabel('Version').inputValue()).toBe(snapshotId);
+        await section.getByRole('button', { name: 'Start Remote Volatile' }).click();
+        const card = section.getByRole('article', {
+          name: 'Remote Volatile session on E2E execution',
+        });
+        await card.getByText('Running', { exact: true }).first().waitFor({ timeout: 120_000 });
+        await card.getByText(label).first().waitFor();
+        await shot(page, 'remote-volatile-running');
+
+        const list = (await admin.get(`${vmPath}/workspaces`)).json<{
+          workspaces: RemoteSession[];
+        }>().workspaces;
+        const current = list.find(
+          (item) => item.purpose === 'remote_volatile' && item.state === 'running',
+        ) as RemoteSession;
+        expect(current.baseVersionId).toBe(snapshotId);
+        const { workspace, session } = await running(current.id);
+        const temporary = workspace.localDirectory as string;
+        expect(await readFile(join(temporary, 'nested', 'notes.txt'), 'utf8')).toBe('snapshot\n');
+        await writeFile(join(temporary, 'guest.log'), 'written while it ran\n');
+        await forceStop(session);
+        await workspaceIn(workspace.id, ['discarded'], 60_000);
+        expect(existsSync(temporary)).toBe(false);
+        await page
+          .getByRole('heading', { name: 'Recent remote sessions' })
+          .waitFor({ timeout: 30_000 });
+        await shot(page, 'remote-volatile-finished');
+        await page.context().close();
+        expect(await fingerprint(root)).toEqual(persistent);
+      },
+      LONG,
+    );
+
+    let published: string;
+
+    it(
+      '5, 6, 7. runs the master in Remote Snapshot, and publishes a child of the master on exit',
+      async () => {
+        const requested = await startRemote('remote_snapshot', masterId);
+        const { workspace, session } = await running(requested.id);
+        const temporary = workspace.localDirectory as string;
+        expect(await readFile(join(temporary, 'nested', 'notes.txt'), 'utf8')).toBe('master\n');
+        await writeFile(join(temporary, 'nested', 'notes.txt'), 'changed by the guest\n');
+        await writeFile(join(temporary, 'guest.log'), 'kept\n');
+        // Nothing is published while it runs.
+        const versionsWhileRunning = (await tree()).versions.length;
+        await forceStop(session);
+        const done = await workspaceIn(
+          workspace.id,
+          ['discarded', 'publish_failed', 'lost'],
+          180_000,
         );
-        expect(workspace, JSON.stringify(workspace)).toMatchObject({
-          state: 'ready',
-          baseVersionId: masterId,
-          sourceVersionId: masterId,
-          mayHaveChanges: false,
+        expect(done, JSON.stringify(done)).toMatchObject({
+          state: 'discarded',
+          abandonedAt: null,
+          publishAttempts: 1,
         });
-        const directory = workspace.localDirectory as string;
-        expect(directory).toBe(join(stateDirectory(), 'workspaces', workspace.id, VM));
-        // The master's content, not the persistent copy's.
-        expect(await readFile(join(directory, 'nested', 'notes.txt'), 'utf8')).toBe('master\n');
+        published = done.snapshotVersionId as string;
+        expect(published).toBeTruthy();
+        const versions = (await tree()).versions;
+        expect(versions).toHaveLength(versionsWhileRunning + 1);
+        const node = versions.find((item) => item.id === published);
+        // Exactly the version that ran, not the newest, and not the persistent copy's.
+        expect(node, JSON.stringify(versions)).toMatchObject({
+          kind: 'snapshot',
+          parentVersionId: masterId,
+        });
+        expect(node?.manifest?.fileCount).toBe(4);
+        expect(existsSync(temporary)).toBe(false);
+        expect(await fingerprint(root)).toEqual(persistent);
+        expect((await options(VM)).agents[0]?.local.sourceVersionId).toBe(snapshotId);
+        expect(await leftovers()).toEqual([]);
+      },
+      LONG,
+    );
+
+    it(
+      '8. runs a historical snapshot in Remote Snapshot from the version history, and branches from it',
+      async () => {
+        const page = await (await browser.newContext()).newPage();
+        await signIn(page);
+        await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
+        // Labels are minutes and can repeat, so the version is found by its identity.
+        await page
+          .locator('.version-card')
+          .filter({ has: page.getByTitle(snapshotId, { exact: true }) })
+          .getByRole('button', { name: /in Remote Snapshot$/ })
+          .click();
+        const section = page.getByRole('region', { name: 'Run and verify' });
+        expect(
+          await section.getByRole('radio', { name: 'Remote Snapshot', exact: true }).isChecked(),
+        ).toBe(true);
+        expect(await section.getByLabel('Version').inputValue()).toBe(snapshotId);
+        await section.getByRole('button', { name: 'Start Remote Snapshot' }).click();
+        const card = section.getByRole('article', {
+          name: 'Remote Snapshot session on E2E execution',
+        });
+        await card.getByText('Running', { exact: true }).first().waitFor({ timeout: 120_000 });
+        await shot(page, 'remote-snapshot-running');
+
+        const current = (await admin.get(`${vmPath}/workspaces`))
+          .json<{ workspaces: RemoteSession[] }>()
+          .workspaces.find(
+            (item) => item.purpose === 'remote_snapshot' && item.state === 'running',
+          ) as RemoteSession;
+        const { workspace, session } = await running(current.id);
+        await writeFile(join(workspace.localDirectory as string, 'guest.log'), 'from S1\n');
+        await forceStop(session);
+        const done = await workspaceIn(workspace.id, ['discarded', 'publish_failed'], 180_000);
+        expect(done.state, JSON.stringify(done)).toBe('discarded');
+        const node = (await tree()).versions.find((item) => item.id === done.snapshotVersionId);
+        expect(node?.parentVersionId).toBe(snapshotId);
+        await page
+          .getByText(/Published as/)
+          .first()
+          .waitFor({ timeout: 30_000 });
+        await shot(page, 'remote-snapshot-published');
+        await page.context().close();
         expect(await fingerprint(root)).toEqual(persistent);
       },
       LONG,
     );
 
     it(
-      'runs real QEMU from the working copy, never from the persistent copy',
+      '9. keeps the copy when the repository is unreachable, and publishes it once on retry',
       async () => {
-        const response = await admin.request({
-          method: 'POST',
-          url: workspaceUrl('/launch'),
-          payload: { requestId: randomUUID() },
-        });
+        const requested = await startRemote('remote_snapshot', masterId);
+        const { workspace, session } = await running(requested.id);
+        const temporary = workspace.localDirectory as string;
+        await writeFile(join(temporary, 'guest.log'), 'must survive the failure\n');
+        const versionsBefore = (await tree()).versions.length;
+        docker('pause', container);
+        let failed: RemoteSession;
+        try {
+          await forceStop(session);
+          failed = await workspaceIn(workspace.id, ['publish_failed', 'discarded'], 180_000);
+        } finally {
+          docker('unpause', container);
+        }
+        expect(failed.state, JSON.stringify(failed)).toBe('publish_failed');
+        expect(failed.error).not.toBeNull();
+        expect(failed.snapshotVersionId).toBeNull();
+        // The changes are still there, and nothing was recorded.
+        expect(await readFile(join(temporary, 'guest.log'), 'utf8')).toBe(
+          'must survive the failure\n',
+        );
+        expect((await tree()).versions).toHaveLength(versionsBefore);
+
+        const page = await (await browser.newContext()).newPage();
+        await signIn(page);
+        await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
+        const card = page
+          .getByRole('region', { name: 'Run and verify' })
+          .getByRole('article', { name: 'Remote Snapshot session on E2E execution' });
+        await card.getByText('Publication failed').first().waitFor({ timeout: 30_000 });
+        await shot(page, 'remote-snapshot-publish-failed');
+        await card.getByRole('button', { name: 'Retry publication' }).click();
+        const done = await workspaceIn(workspace.id, ['discarded'], 180_000);
+        await page.context().close();
+        expect(done.snapshotVersionId).toBeTruthy();
+        const versions = (await tree()).versions;
+        // One version for one session, however many attempts it took.
+        expect(versions).toHaveLength(versionsBefore + 1);
+        expect(versions.find((item) => item.id === done.snapshotVersionId)?.parentVersionId).toBe(
+          masterId,
+        );
+        expect(done.publishAttempts).toBeGreaterThanOrEqual(2);
+        expect(existsSync(temporary)).toBe(false);
+        expect(await fingerprint(root)).toEqual(persistent);
+      },
+      LONG,
+    );
+
+    it(
+      '12. refuses to replace the persistent copy while it runs, and changes nothing',
+      async () => {
+        const response = await launch(VM);
         expect(response.statusCode, response.body).toBe(202);
         const requested = vmSessionSchema.parse(response.json());
         started.add(requested.id);
-        const live = await sessionIn(requested.id, ['running', 'failed', 'exited'], 60_000);
-        expect(live, JSON.stringify(live)).toMatchObject({
-          state: 'running',
-          mode: 'remote_snapshot',
-          workspaceId: workspace.id,
-          versionId: masterId,
-        });
-        expect(live.pid).toBeGreaterThan(0);
-        session = live;
-        expect((await readWorkspace()).mayHaveChanges).toBe(true);
-        expect(await fingerprint(root)).toEqual(persistent);
-        // A working copy's session is the VM's session on this agent, for every purpose.
-        const local = await launch(VM);
-        expect(errorCode(local)).toBe('session_active');
-      },
-      LONG,
-    );
-
-    it('refuses to discard or snapshot while the working copy runs', async () => {
-      requireSession();
-      const discard = await admin.request({
-        method: 'POST',
-        url: workspaceUrl('/discard'),
-        payload: { confirmVmName: VM },
-      });
-      expect(discard.statusCode, discard.body).toBe(409);
-      expect(errorCode(discard)).toBe('vm_running');
-      const preserve = await admin.request({
-        method: 'POST',
-        url: workspaceUrl('/snapshot'),
-        payload: { requestId: randomUUID() },
-      });
-      expect(preserve.statusCode, preserve.body).toBe(409);
-      expect((await readWorkspace()).state).toBe('ready');
-    });
-
-    it(
-      'keeps the working copy and its session through an agent restart, refusing a discard meanwhile',
-      async () => {
-        const running = requireSession();
-        await killAgent();
+        const live = await sessionIn(requested.id, ['running', 'failed'], 60_000);
+        expect(live.state).toBe('running');
         try {
-          expect(await readSession(running.id)).toMatchObject({
-            state: 'running',
-            agentOnline: false,
-          });
-          // Whether it still runs cannot be known while the agent is away, so nothing is removed.
-          const discard = await admin.request({
-            method: 'POST',
-            url: workspaceUrl('/discard'),
-            payload: { confirmVmName: VM },
-          });
-          expect(discard.statusCode, discard.body).toBe(409);
-          expect(errorCode(discard)).toBe('vm_running');
+          const refused = await replace(masterId, snapshotId);
+          expect(refused.statusCode, refused.body).toBe(409);
+          expect(errorCode(refused)).toBe('vm_running');
         } finally {
-          await startDaemon();
+          await forceStop(live);
         }
-        const found = await waitFor(
-          async () => {
-            const current = await readSession(running.id);
-            return current.agentOnline && current.error?.code === 'graceful_stop_unavailable'
-              ? current
-              : null;
-          },
-          'the agent to find QEMU again',
-          30_000,
-        );
-        expect(found).toMatchObject({
-          state: 'running',
-          pid: running.pid,
-          workspaceId: workspace.id,
-        });
-        expect(await readWorkspace()).toMatchObject({ state: 'ready', mayHaveChanges: true });
-        expect(existsSync(workspace.localDirectory as string)).toBe(true);
+        expect(await fingerprint(root)).toEqual(persistent);
+        expect(await leftovers()).toEqual([]);
       },
       LONG,
     );
 
     it(
-      'stops without publishing anything, and asks for the name before discarding changes',
+      '10. replaces the local snapshot with the master, only when asked to',
       async () => {
-        const running = requireSession();
-        const archivesBefore = repositoryArchives();
-        const versionsBefore = (await tree()).versions.length;
-        const response = await admin.request({
+        // A plain restore never replaces anything.
+        const plain = await admin.request({
           method: 'POST',
-          url: `/admin/sessions/${running.id}/stop`,
-          payload: { force: true, confirmVmName: VM },
+          url: '/admin/restores',
+          payload: { agentId, emulatorType: 'qemu', vmName: VM, versionId: masterId },
         });
-        expect(response.statusCode, response.body).toBe(202);
-        expect((await sessionIn(running.id, ['stopped'], 30_000)).forceRequested).toBe(true);
-        expect(repositoryArchives(), 'a stop uploads nothing').toEqual(archivesBefore);
-        expect((await tree()).versions).toHaveLength(versionsBefore);
-        expect(await readWorkspace()).toMatchObject({ state: 'ready', mayHaveChanges: true });
+        expect(plain.statusCode, plain.body).toBe(409);
+        expect(errorCode(plain)).toBe('local_copy_exists');
+        // A stale page, naming a version the copy is not, cannot replace it.
+        const stale = await replace(masterId, masterId);
+        expect(stale.statusCode, stale.body).toBe(409);
+        expect(errorCode(stale)).toBe('local_copy_changed');
+        expect(await fingerprint(root)).toEqual(persistent);
 
-        const unconfirmed = await admin.request({
-          method: 'POST',
-          url: workspaceUrl('/discard'),
-          payload: {},
-        });
-        expect(unconfirmed.statusCode, unconfirmed.body).toBe(400);
-        expect(errorCode(unconfirmed)).toBe('confirmation_required');
-        expect(existsSync(workspace.localDirectory as string)).toBe(true);
-      },
-      LONG,
-    );
-
-    it(
-      'preserves the working copy as a new snapshot, branching from the master',
-      async () => {
-        requireSession();
-        // What the guest would have written.
-        await writeFile(
-          join(workspace.localDirectory as string, 'nested', 'notes.txt'),
-          'working copy\n',
-        );
-        const response = await admin.request({
-          method: 'POST',
-          url: workspaceUrl('/snapshot'),
-          payload: { requestId: randomUUID() },
-        });
+        const response = await replace(masterId, snapshotId);
         expect(response.statusCode, response.body).toBe(202);
-        const done = await finishedOperation(registrationOperationSchema.parse(response.json()).id);
+        const done = await finishedRestore(restoreOperationSchema.parse(response.json()).id);
         expect(done, JSON.stringify(done)).toMatchObject({
           state: 'succeeded',
-          mode: 'snapshot',
-          parentVersionId: masterId,
+          versionId: masterId,
+          replacement: { replacedVersionId: snapshotId, discardLocalChanges: false },
         });
-        const branch = done.versionId;
-        const versions = (await tree()).versions;
-        expect(versions.find((node) => node.id === masterId)?.childVersionIds.sort()).toEqual(
-          [snapshotId, branch].sort(),
-        );
-        expect(versions.find((node) => node.id === branch)?.parentVersionId).toBe(masterId);
-        expect(await readWorkspace()).toMatchObject({
-          state: 'ready',
-          sourceVersionId: branch,
-          mayHaveChanges: false,
-        });
-        // The persistent copy still comes from the first snapshot, untouched.
-        expect(await fingerprint(root)).toEqual(persistent);
-        expect((await options(VM)).agents[0]?.local.sourceVersionId).toBe(snapshotId);
+        expect(await readFile(join(root, 'nested', 'notes.txt'), 'utf8')).toBe('master\n');
+        expect((await options(VM)).agents[0]?.local).toMatchObject({ sourceVersionId: masterId });
+        expect((await verify(VM)).status).toBe('verified');
+        expect(await leftovers()).toEqual([]);
       },
       LONG,
     );
 
     it(
-      'discards the stopped working copy, and leaves the persistent copy verified',
+      '11. replaces the local master with a snapshot, discarding local changes only when told to',
       async () => {
-        requireSession();
-        const directory = workspace.localDirectory as string;
-        // Everything is preserved, so no confirmation is needed.
-        const response = await admin.request({
-          method: 'POST',
-          url: workspaceUrl('/discard'),
-          payload: {},
-        });
-        expect(response.statusCode, response.body).toBe(200);
-        const discarded = await waitFor(
-          async () => {
-            const current = await readWorkspace();
-            return current.state === 'discarded' ? current : null;
-          },
-          'the working copy to be discarded',
-          30_000,
+        await appendFile(join(root, 'nested', 'notes.txt'), 'local change\n');
+        expect((await verify(VM)).status).toBe('modified');
+        const refused = await replace(snapshotId, masterId);
+        expect(refused.statusCode, refused.body).toBe(409);
+        expect(errorCode(refused)).toBe('local_copy_modified');
+        expect(await readFile(join(root, 'nested', 'notes.txt'), 'utf8')).toBe(
+          'master\nlocal change\n',
         );
-        expect(discarded.error).toBeNull();
-        expect(existsSync(directory)).toBe(false);
-        expect(existsSync(join(stateDirectory(), 'workspaces', workspace.id))).toBe(false);
-        expect(await fingerprint(root)).toEqual(persistent);
+
+        const response = await replace(snapshotId, masterId, true);
+        expect(response.statusCode, response.body).toBe(202);
+        const done = await finishedRestore(restoreOperationSchema.parse(response.json()).id);
+        expect(done, JSON.stringify(done)).toMatchObject({
+          state: 'succeeded',
+          versionId: snapshotId,
+          replacement: { replacedVersionId: masterId, discardLocalChanges: true },
+        });
+        expect(await readFile(join(root, 'nested', 'notes.txt'), 'utf8')).toBe('snapshot\n');
+        expect((await options(VM)).agents[0]?.local.sourceVersionId).toBe(snapshotId);
         expect((await verify(VM)).status).toBe('verified');
+        expect(await leftovers()).toEqual([]);
+      },
+      LONG,
+    );
+
+    it(
+      '13. shows the restore history as a table with an accessible details dialog, at any width',
+      async () => {
+        const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
+        const page = await context.newPage();
+        await signIn(page);
+        await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
+        await page.getByRole('heading', { level: 1 }).waitFor();
+        // Full width: the page is wider than Bootstrap's widest container.
+        const mainWidth = await page.locator('main').evaluate((node) => node.clientWidth);
+        expect(mainWidth).toBeGreaterThan(1400);
+        expect(
+          await page
+            .getByRole('group', { name: 'VM actions' })
+            .getByRole('link', {
+              name: 'Manage media',
+            })
+            .isVisible(),
+        ).toBe(true);
+        const headings = await page.getByRole('heading', { level: 2 }).allTextContents();
+        expect(headings.slice(0, 5)).toEqual([
+          'Metadata',
+          'Details',
+          'Run and verify',
+          'Local copies and restores',
+          'Version history',
+        ]);
+
+        const history = page.getByRole('table', { name: 'Restore history, newest first' });
+        await history.waitFor();
+        expect(await history.getByText('Replacement').count()).toBeGreaterThanOrEqual(2);
+        await shot(page, 'restore-history-wide');
+        const details = history.getByRole('button', { name: /Details of the restore/ }).first();
+        await details.click();
+        const dialog = page.getByRole('dialog', { name: 'Restore details' });
+        await dialog.waitFor();
+        expect(await dialog.getByText(/its local changes discarded on request/).count()).toBe(1);
+        expect(await dialog.textContent()).not.toMatch(/private_key|password|BEGIN OPENSSH/i);
+        await shot(page, 'restore-details');
+        // Focus stays inside, Escape closes it, and focus returns to the row it came from.
+        expect(
+          await dialog.evaluate((node) => node.contains(node.ownerDocument.activeElement)),
+        ).toBe(true);
+        await page.keyboard.press('Tab');
+        await page.keyboard.press('Tab');
+        expect(
+          await dialog.evaluate((node) => node.contains(node.ownerDocument.activeElement)),
+        ).toBe(true);
+        await page.keyboard.press('Escape');
+        await dialog.waitFor({ state: 'detached' });
+        expect(await details.evaluate((node) => node === node.ownerDocument.activeElement)).toBe(
+          true,
+        );
+
+        // A phone: nothing scrolls sideways, in either theme.
+        await page.setViewportSize({ width: 375, height: 812 });
+        for (const colorScheme of ['light', 'dark'] as const) {
+          await page.emulateMedia({ colorScheme });
+          await page.waitForTimeout(200);
+          const overflow = await page.evaluate<number>(
+            'document.documentElement.scrollWidth - window.innerWidth',
+          );
+          const culprits = await page.evaluate<string[]>(`[...document.querySelectorAll('body *')]
+            .filter((node) => node.getBoundingClientRect().right > window.innerWidth + 0.5)
+            // Inside a scroller only what escapes it counts: an absolutely positioned element does.
+            .filter((node) => !node.parentElement?.closest('.table-responsive')
+              || getComputedStyle(node).position === 'absolute')
+            .sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)
+            .slice(0, 8)
+            .map((node) => node.tagName + '.' + [...node.classList].join('.') + ': ' +
+              (node.textContent ?? '').trim().slice(0, 60))`);
+          expect(
+            overflow,
+            `horizontal overflow in ${colorScheme}: ${culprits.join(' | ')}`,
+          ).toBeLessThanOrEqual(0);
+          await shot(page, `vm-admin-phone-${colorScheme}`);
+        }
+        await context.close();
       },
       LONG,
     );

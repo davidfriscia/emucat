@@ -1227,8 +1227,8 @@ describe('restore, public cover and VM details, end to end', () => {
           const page = await adminContext.newPage();
           await signIn(page);
           await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VIA)}`));
-          // The master's restore, in its own section. The version history offers one per version too.
-          const copies = page.getByRole('region', { name: 'Master and local copies' });
+          // The restore, in the section of local copies. The version history offers one per version too.
+          const copies = page.getByRole('region', { name: 'Local copies and restores' });
           await copies.getByRole('button', { name: 'Restore…' }).click();
           const dialog = page.getByRole('dialog', { name: 'Restore Via Browser' });
           await dialog.waitFor();
@@ -1241,12 +1241,17 @@ describe('restore, public cover and VM details, end to end', () => {
           await dialog.getByText(viaVersion, { exact: true }).waitFor();
           await dialog.getByRole('button', { name: 'Restore' }).click();
           await dialog.waitFor({ state: 'detached' });
-          const card = page.getByRole('article', { name: /Restore on/ });
-          await card.getByText('Restored', { exact: true }).waitFor({ timeout: 120_000 });
-          await card.getByText(join(qemu, 'Via Browser')).waitFor();
-          await card.getByText(/files were verified by the agent/).waitFor();
-          await card.getByText(/The VM was not started/).waitFor();
+          // While it runs it is a card with its progress; once finished, a row of the history.
+          const history = copies.getByRole('table', { name: 'Restore history, newest first' });
+          await history.getByText('Restored', { exact: true }).waitFor({ timeout: 120_000 });
+          await history.getByRole('button', { name: /Details of the restore/ }).click();
+          const details = page.getByRole('dialog', { name: 'Restore details' });
+          await details.getByText(join(qemu, 'Via Browser')).waitFor();
+          await details.getByText(/files were verified by the agent/).waitFor();
+          await details.getByText(/The VM was not started/).waitFor();
           await shot(page, '8-restored');
+          await page.keyboard.press('Escape');
+          await details.waitFor({ state: 'detached' });
           await adminContext.close();
           expect(await fingerprint(destination2())).toEqual(expected);
         },
