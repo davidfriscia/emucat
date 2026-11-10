@@ -1238,6 +1238,8 @@ impl Harness {
             manifest_sha256: Some(self.manifest_sha256.clone()),
             expected_uncompressed_bytes: Some(self.manifest.total_uncompressed_bytes),
             workspace_id: None,
+            workspace_purpose: None,
+            replace: None,
         }
     }
 
@@ -2648,4 +2650,518 @@ async fn a_verification_of_an_unchanged_copy_establishes_lineage_and_a_changed_o
         VerifyResultStatus::Verified
     );
     assert_eq!(lineage(), Ok(()));
+}
+
+// Replacing a persistent copy (decision 0040).
+
+/// A second version of the harness's VM, different from the first, in the same repository.
+struct OtherVersion {
+    version: Uuid,
+    archive: Vec<u8>,
+    manifest_sha256: String,
+    total_uncompressed_bytes: u64,
+}
+
+impl Harness {
+    fn add_version(&self, run_bat: &[u8]) -> OtherVersion {
+        let source = self.source.join("other").join("Win98");
+        let _ = fs::remove_dir_all(&source);
+        fs::create_dir_all(source.join("a/b")).unwrap();
+        fs::write(source.join("run.bat"), run_bat).unwrap();
+        fs::write(source.join("disk.qcow2"), vec![7u8; 100 * 1024]).unwrap();
+        fs::write(source.join("a/b/c.bin"), b"other").unwrap();
+        let built = build_archive(
+            &BuildRequest {
+                emulator: EmulatorType::Qemu,
+                vm_name: &self.vm_name,
+                root: &source,
+                staging_dir: &self.source.join("build-other"),
+                operation_id: Uuid::new_v4(),
+            },
+            &mut |_| {},
+            &CancelFlag::new(),
+        )
+        .unwrap();
+        let archive = fs::read(&built.path).unwrap();
+        let version = Uuid::new_v4();
+        self.repository
+            .store
+            .lock()
+            .unwrap()
+            .objects
+            .insert(archive_key(&self.vm_name, version), archive.clone());
+        OtherVersion {
+            version,
+            archive,
+            manifest_sha256: built.manifest_sha256,
+            total_uncompressed_bytes: built.manifest.total_uncompressed_bytes,
+        }
+    }
+
+    fn replace_request(
+        &self,
+        other: &OtherVersion,
+        expected: Option<Uuid>,
+        discard_local_changes: bool,
+    ) -> RestoreRequest {
+        RestoreRequest {
+            version_id: other.version,
+            archive_key: archive_key(&self.vm_name, other.version),
+            archive_size_bytes: other.archive.len() as u64,
+            archive_sha256: sha256(&other.archive),
+            manifest_sha256: Some(other.manifest_sha256.clone()),
+            expected_uncompressed_bytes: Some(other.total_uncompressed_bytes),
+            replace: Some(emucat_agent::protocol::RestoreReplace {
+                expected_version_id: expected,
+                discard_local_changes,
+            }),
+            ..self.request()
+        }
+    }
+
+    /// Restores the harness's own version as the persistent copy, and closes that restore.
+    async fn restored(&self, operations: &AgentOperations) {
+        let request = self.request();
+        start(operations, &request);
+        outcome(operations)
+            .await
+            .expect("the first restore succeeds");
+        close(operations, request.operation_id);
+    }
+
+    fn downloads(&self) -> u32 {
+        self.repository.store.lock().unwrap().downloads
+    }
+}
+
+#[tokio::test]
+async fn a_persistent_copy_is_replaced_by_another_version_and_records_it() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    let other = harness.add_version(b"@echo the other version\n");
+
+    let request = harness.replace_request(&other, Some(harness.version), false);
+    start(&operations, &request);
+    let result = outcome(&operations)
+        .await
+        .expect("the replacement succeeds");
+    assert_eq!(result.version_id, other.version);
+    assert_eq!(result.manifest_sha256, other.manifest_sha256);
+    assert_eq!(
+        fs::read(harness.destination().join("run.bat")).unwrap(),
+        b"@echo the other version\n"
+    );
+    assert!(!harness.destination().join("empty").exists());
+    harness.assert_nothing_left_behind();
+
+    // The new directory is recorded as the other version, for this very directory, so that it can be
+    // snapshotted or replaced again; and its manifest is the one it was restored with.
+    let identity = directory_identity(&harness.destination()).unwrap();
+    assert_eq!(
+        emucat_agent::state::proven_lineage(
+            &harness.state,
+            EmulatorType::Qemu,
+            &harness.vm_name,
+            identity,
+            other.version
+        ),
+        Ok(())
+    );
+    let state = read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).unwrap();
+    assert_eq!(
+        state.last_verified_sha256.as_deref(),
+        Some(other.manifest_sha256.as_str())
+    );
+    let kept: Manifest = serde_json::from_slice(
+        &fs::read(
+            harness
+                .state
+                .join("local-manifests")
+                .join("qemu-win98.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept.sha256(), other.manifest_sha256);
+    close(&operations, request.operation_id);
+
+    // And back again, the other way.
+    let back = RestoreRequest {
+        replace: Some(emucat_agent::protocol::RestoreReplace {
+            expected_version_id: Some(other.version),
+            discard_local_changes: false,
+        }),
+        ..harness.request()
+    };
+    start(&operations, &back);
+    outcome(&operations).await.expect("replacing back succeeds");
+    harness.assert_matches_source();
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn a_modified_copy_is_kept_unless_its_changes_may_be_discarded() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    fs::write(
+        harness.destination().join("a/b/c.bin"),
+        b"changed by the guest",
+    )
+    .unwrap();
+    let other = harness.add_version(b"other");
+    let downloads = harness.downloads();
+
+    let request = harness.replace_request(&other, Some(harness.version), false);
+    start(&operations, &request);
+    let (code, message) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "local_copy_modified", "{message}");
+    assert_eq!(
+        fs::read(harness.destination().join("a/b/c.bin")).unwrap(),
+        b"changed by the guest"
+    );
+    harness.assert_nothing_left_behind();
+    assert_eq!(harness.downloads(), downloads, "nothing was downloaded");
+    close(&operations, request.operation_id);
+
+    let request = harness.replace_request(&other, Some(harness.version), true);
+    start(&operations, &request);
+    outcome(&operations)
+        .await
+        .expect("acknowledged, it is replaced");
+    assert_eq!(
+        fs::read(harness.destination().join("a/b/c.bin")).unwrap(),
+        b"other"
+    );
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn a_copy_whose_lineage_cannot_be_proven_counts_as_changed() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    // Put there by hand: nothing records where it came from.
+    fs::create_dir(harness.destination()).unwrap();
+    fs::write(harness.destination().join("run.bat"), b"by hand").unwrap();
+    let other = harness.add_version(b"other");
+
+    for expected in [None, Some(harness.version)] {
+        let request = harness.replace_request(&other, expected, false);
+        start(&operations, &request);
+        let (code, _) = outcome(&operations).await.unwrap_err();
+        assert_eq!(code, "local_copy_unverified");
+        close(&operations, request.operation_id);
+    }
+    assert_eq!(
+        fs::read(harness.destination().join("run.bat")).unwrap(),
+        b"by hand"
+    );
+
+    let request = harness.replace_request(&other, None, true);
+    start(&operations, &request);
+    outcome(&operations)
+        .await
+        .expect("acknowledged, it is replaced");
+    assert_eq!(
+        fs::read(harness.destination().join("run.bat")).unwrap(),
+        b"other"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_page_never_replaces_a_copy_it_did_not_show() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    let other = harness.add_version(b"other");
+    // The page believed another version was installed. Discarding changes does not change that.
+    let request = harness.replace_request(&other, Some(Uuid::new_v4()), true);
+    start(&operations, &request);
+    let (code, _) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "local_copy_changed");
+    harness.assert_matches_source();
+}
+
+#[tokio::test]
+async fn replacing_needs_a_copy_and_never_a_file_in_its_place() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let other = harness.add_version(b"other");
+    let request = harness.replace_request(&other, None, true);
+    start(&operations, &request);
+    let (code, _) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "local_copy_missing");
+    assert!(!harness.destination().exists());
+    close(&operations, request.operation_id);
+
+    // A file where the VM should be is not a copy to replace.
+    fs::write(harness.destination(), b"not a directory").unwrap();
+    let request = harness.replace_request(&other, None, true);
+    start(&operations, &request);
+    let (code, _) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "restore_destination_unsafe");
+    assert_eq!(fs::read(harness.destination()).unwrap(), b"not a directory");
+}
+
+#[tokio::test]
+async fn a_corrupt_replacement_leaves_the_current_copy_alone() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    let other = harness.add_version(b"other");
+    let request = RestoreRequest {
+        archive_sha256: "0".repeat(64),
+        ..harness.replace_request(&other, Some(harness.version), false)
+    };
+    start(&operations, &request);
+    assert!(outcome(&operations).await.is_err());
+    harness.assert_matches_source();
+    harness.assert_nothing_left_behind();
+    // The old copy's lineage and manifest are still its own.
+    let state = read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).unwrap();
+    assert_eq!(
+        state.local_source_version_id,
+        Some(VersionId(harness.version))
+    );
+    let kept: Manifest = serde_json::from_slice(
+        &fs::read(
+            harness
+                .state
+                .join("local-manifests")
+                .join("qemu-win98.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept.sha256(), harness.manifest_sha256);
+}
+
+#[tokio::test]
+async fn nothing_replaces_a_copy_that_may_be_running() {
+    let harness = Harness::new();
+    {
+        let operations = harness.operations();
+        harness.restored(&operations).await;
+    }
+    harness.leave_unknown_session();
+    let operations = harness.operations();
+    let other = harness.add_version(b"other");
+    let request = harness.replace_request(&other, Some(harness.version), true);
+    start(&operations, &request);
+    let (code, _) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "vm_running");
+    harness.assert_matches_source();
+}
+
+#[tokio::test]
+async fn a_replacement_and_a_working_copy_are_never_one_request() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    let other = harness.add_version(b"other");
+    let request = RestoreRequest {
+        workspace_id: Some(Uuid::new_v4()),
+        ..harness.replace_request(&other, Some(harness.version), true)
+    };
+    start(&operations, &request);
+    let (code, _) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "invalid_request");
+    harness.assert_matches_source();
+}
+
+/// What a crash in the middle of a replacement leaves: a journal in `publishing`, naming the old copy.
+fn replacing_journal(
+    harness: &Harness,
+    request: &RestoreRequest,
+    staged: emucat_agent::packaging::DirectoryIdentity,
+    old: emucat_agent::packaging::DirectoryIdentity,
+) -> serde_json::Value {
+    let mut journal = publishing_journal(harness, request, staged);
+    journal["replaced"] = serde_json::json!({
+        "path": harness.destination(),
+        "identity": old,
+    });
+    journal
+}
+
+/// The persistent copy as a crash leaves it: restored, then a staged directory beside it.
+async fn crashed_replacement(
+    harness: &Harness,
+) -> (
+    RestoreRequest,
+    OtherVersion,
+    emucat_agent::packaging::DirectoryIdentity,
+    emucat_agent::packaging::DirectoryIdentity,
+    PathBuf,
+) {
+    {
+        let operations = harness.operations();
+        harness.restored(&operations).await;
+    }
+    let other = harness.add_version(b"other");
+    let request = harness.replace_request(&other, Some(harness.version), false);
+    let old = directory_identity(&harness.destination()).unwrap();
+    let staged = staged_directory(&harness.base, request.operation_id);
+    fs::create_dir(&staged).unwrap();
+    fs::write(staged.join("run.bat"), b"new").unwrap();
+    let staged_identity = directory_identity(&staged).unwrap();
+    (request, other, old, staged_identity, staged)
+}
+
+#[tokio::test]
+async fn a_crash_after_moving_the_old_copy_aside_puts_it_back() {
+    let harness = Harness::new();
+    let (request, _, old, staged_identity, _) = crashed_replacement(&harness).await;
+    let aside = emucat_agent::extraction::replaced_directory(&harness.base, request.operation_id);
+    rename_no_replace(&harness.destination(), &aside).unwrap();
+    harness.write_journal(&replacing_journal(&harness, &request, staged_identity, old));
+
+    let operations = harness.operations();
+    assert!(matches!(
+        operations.pending_reports().as_slice(),
+        [Message::AgentRestoreError(error)] if error.code == "agent_restarted"
+            && error.message.contains("put back")
+    ));
+    harness.assert_matches_source();
+    assert_eq!(directory_identity(&harness.destination()).unwrap(), old);
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn a_crash_after_the_new_copy_moved_in_finishes_and_removes_the_old_one() {
+    let harness = Harness::new();
+    let (request, other, old, staged_identity, staged) = crashed_replacement(&harness).await;
+    let aside = emucat_agent::extraction::replaced_directory(&harness.base, request.operation_id);
+    rename_no_replace(&harness.destination(), &aside).unwrap();
+    rename_no_replace(&staged, &harness.destination()).unwrap();
+    harness.write_journal(&replacing_journal(&harness, &request, staged_identity, old));
+
+    let operations = harness.operations();
+    assert!(matches!(
+        operations.pending_reports().as_slice(),
+        [Message::AgentRestoreResult(result)] if result.operation_id == request.operation_id
+    ));
+    assert_eq!(
+        fs::read(harness.destination().join("run.bat")).unwrap(),
+        b"new"
+    );
+    assert!(
+        !aside.exists(),
+        "the old copy goes once the new one is recorded"
+    );
+    let state = read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).unwrap();
+    assert_eq!(
+        state.local_source_version_id,
+        Some(VersionId(other.version))
+    );
+}
+
+#[tokio::test]
+async fn a_crash_before_anything_moved_changes_nothing() {
+    let harness = Harness::new();
+    let (request, _, old, staged_identity, _) = crashed_replacement(&harness).await;
+    harness.write_journal(&replacing_journal(&harness, &request, staged_identity, old));
+
+    let operations = harness.operations();
+    assert!(matches!(
+        operations.pending_reports().as_slice(),
+        [Message::AgentRestoreError(error)] if error.code == "agent_restarted"
+    ));
+    harness.assert_matches_source();
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn an_unrecognizable_disk_after_a_crash_is_left_alone() {
+    let harness = Harness::new();
+    let (request, _, old, staged_identity, _) = crashed_replacement(&harness).await;
+    // Someone replaced the VM's directory by hand meanwhile.
+    fs::rename(harness.destination(), harness.base.join("moved-by-hand")).unwrap();
+    fs::create_dir(harness.destination()).unwrap();
+    fs::write(harness.destination().join("mine.txt"), b"keep").unwrap();
+    harness.write_journal(&replacing_journal(&harness, &request, staged_identity, old));
+
+    let operations = harness.operations();
+    assert!(matches!(
+        operations.pending_reports().as_slice(),
+        [Message::AgentRestoreError(error)] if error.code == "restore_ambiguous_directory"
+    ));
+    assert_eq!(
+        fs::read(harness.destination().join("mine.txt")).unwrap(),
+        b"keep"
+    );
+    assert!(harness.base.join("moved-by-hand").join("run.bat").exists());
+}
+
+#[test]
+fn replacing_a_directory_checks_every_identity_and_keeps_the_old_one_beside_it() {
+    use emucat_agent::extraction::{
+        Replacement, check_base_path, remove_replaced_directory, replace_directory,
+        replaced_directory,
+    };
+    let directory = TempDir::new().unwrap();
+    let base = directory.path();
+    let name = VmName::new("Win98").unwrap();
+    let current = base.join("Win98");
+    fs::create_dir(&current).unwrap();
+    fs::write(current.join("old.txt"), b"old").unwrap();
+    let operation = Uuid::new_v4();
+    let staged = staged_fixture(base, operation);
+    let staged_identity = directory_identity(&staged).unwrap();
+    let aside = replaced_directory(base, operation);
+    let replacement = Replacement {
+        current: &current,
+        current_identity: directory_identity(&current).unwrap(),
+        aside: &aside,
+    };
+    let base_identity = check_base_path(base).unwrap();
+
+    // A substituted staged directory stops it before anything moves.
+    let wrong = Publication {
+        base_path: base,
+        base_identity,
+        vm_name: &name,
+        staged: &staged,
+        staged_identity: directory_identity(&current).unwrap(),
+    };
+    let error = replace_directory(&wrong, &replacement).unwrap_err();
+    assert_eq!(error.kind, ArchiveErrorKind::DestinationUnsafe);
+    assert_eq!(fs::read(current.join("old.txt")).unwrap(), b"old");
+    assert!(!aside.exists());
+
+    // So does a substituted current copy.
+    let other_current = Replacement {
+        current_identity: staged_identity,
+        ..replacement
+    };
+    let publication = Publication {
+        base_path: base,
+        base_identity,
+        vm_name: &name,
+        staged: &staged,
+        staged_identity,
+    };
+    let error = replace_directory(&publication, &other_current).unwrap_err();
+    assert_eq!(error.kind, ArchiveErrorKind::DestinationUnsafe);
+    assert!(!aside.exists());
+
+    // The real one works, keeping the old copy beside it for the caller to remove.
+    let replacement = Replacement {
+        current: &current,
+        current_identity: directory_identity(&current).unwrap(),
+        aside: &aside,
+    };
+    let published = replace_directory(&publication, &replacement).unwrap();
+    assert_eq!(published, current);
+    assert_eq!(directory_identity(&current).unwrap(), staged_identity);
+    assert_eq!(fs::read(aside.join("old.txt")).unwrap(), b"old");
+    // Only the very directory that was moved aside is ever removed.
+    assert!(!remove_replaced_directory(&aside, staged_identity));
+    assert!(aside.exists());
+    assert!(remove_replaced_directory(
+        &aside,
+        replacement.current_identity
+    ));
+    assert!(!aside.exists());
 }

@@ -1810,6 +1810,7 @@ fn working_copy(world: &World, name: &str, source: Uuid) -> (Uuid, PathBuf) {
             vm_name: VmName::new(name).unwrap(),
             source_version_id: source,
             manifest_sha256: None,
+            purpose: None,
         },
     )
     .unwrap();
@@ -2336,4 +2337,29 @@ async fn a_snapshot_rejected_after_publication_removes_only_its_own_archive() {
     assert_eq!(world.repository.keys(), vec![other]);
     assert_eq!(local_source(&world, "Win98"), Some(master));
     assert!(operations.open_operations().is_empty());
+}
+
+#[tokio::test]
+async fn a_remote_volatile_working_copy_is_never_snapshotted() {
+    let world = World::new();
+    let master = Uuid::new_v4();
+    let (workspace, root) = working_copy(&world, "Win98", master);
+    let mut record = emucat_agent::workspaces::read_record(&world.state, workspace).unwrap();
+    record.purpose = Some(emucat_agent::protocol::WorkspacePurpose::RemoteVolatile);
+    emucat_agent::workspaces::write_record(&world.state, &record).unwrap();
+    let operations = world.start();
+    let request = snapshot("Win98", master, Some(workspace));
+    start(&operations, &request);
+    let (code, _) = failure_of(&operations).await;
+    assert_eq!(code, "workspace_purpose_mismatch");
+    assert!(world.repository.keys().is_empty());
+    assert!(root.join("changed-in-session.txt").exists());
+
+    // A Remote Snapshot one is, as a Milestone 7 one always was.
+    record.purpose = Some(emucat_agent::protocol::WorkspacePurpose::RemoteSnapshot);
+    emucat_agent::workspaces::write_record(&world.state, &record).unwrap();
+    let request = snapshot("Win98", master, Some(workspace));
+    start(&operations, &request);
+    let result = result_of(&operations).await;
+    assert_eq!(result.version_id, request.version_id);
 }

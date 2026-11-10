@@ -479,10 +479,34 @@ pub struct RestoreRequest {
     pub manifest_sha256: Option<String>,
     /// For checking disk space before downloading. Never treated as a limit.
     pub expected_uncompressed_bytes: Option<u64>,
-    /// Restore into this Remote Snapshot working copy, under the agent's own workspaces directory,
-    /// rather than under the emulator's base path. See decision 0038.
+    /// Restore into this working copy, under the agent's own workspaces directory, rather than under the
+    /// emulator's base path. See decisions 0038 and 0040.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<Uuid>,
+    /// What the working copy is for. Recorded with it, so that it is never run or snapshotted differently.
+    /// Absent for a Milestone 7 working copy, which is `manual`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_purpose: Option<WorkspacePurpose>,
+    /// Replace the persistent local copy, which must exist (decision 0040). Never with `workspace_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<RestoreReplace>,
+}
+
+/// What a remote session's working copy is for (decision 0040).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspacePurpose {
+    RemoteVolatile,
+    RemoteSnapshot,
+}
+
+/// Replacing an existing persistent copy. The agent checks that the copy is the one of
+/// `expected_version_id`, in this very directory, and, unless `discard_local_changes`, that it is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreReplace {
+    pub expected_version_id: Option<Uuid>,
+    pub discard_local_changes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,6 +561,9 @@ pub struct RestoreCapabilities {
     pub repository_ids: Vec<Uuid>,
     pub cache_max_bytes: u64,
     pub cache_used_bytes: u64,
+    /// This agent can replace a persistent copy safely (decision 0040).
+    #[serde(default)]
+    pub replace_local: bool,
 }
 
 /// What can honestly be said about a local copy without reading it. A difference proves a change, and no
@@ -719,8 +746,8 @@ fn is_known_type(message_type: &str) -> bool {
     )
 }
 
-/// Where a VM runs from. `local` runs the persistent copy, `remote_snapshot` a working copy (decision
-/// 0038). `remote_volatile` is refused, never treated as another mode.
+/// Where a VM runs from. `local` runs the persistent copy; both remote modes run a working copy prepared
+/// for that mode (decision 0040). A mode is refused, never treated as another one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
@@ -740,7 +767,7 @@ pub struct VmLaunchRequest {
     pub mode: ExecutionMode,
     /// The version the local copy is believed to come from, for the record. Never used to find files.
     pub version_id: Option<Uuid>,
-    /// For `remote_snapshot` only: which working copy to run. The agent finds its directory itself.
+    /// For the remote modes only: which working copy to run. The agent finds its directory itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<Uuid>,
 }

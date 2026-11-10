@@ -379,7 +379,11 @@ impl ExecutionManager {
                     },
                 )
                 .collect(),
-            modes: vec![ExecutionMode::Local, ExecutionMode::RemoteSnapshot],
+            modes: vec![
+                ExecutionMode::Local,
+                ExecutionMode::RemoteVolatile,
+                ExecutionMode::RemoteSnapshot,
+            ],
         }
     }
 
@@ -516,7 +520,7 @@ impl ExecutionManager {
         // Each mode runs from exactly one place, and never from another one instead.
         let workspace_base = match (request.mode, request.workspace_id) {
             (ExecutionMode::Local, None) => None,
-            (ExecutionMode::RemoteSnapshot, Some(workspace_id)) => {
+            (ExecutionMode::RemoteVolatile | ExecutionMode::RemoteSnapshot, Some(workspace_id)) => {
                 if crate::workspaces::existing_vm_root(
                     &self.config.state_dir,
                     workspace_id,
@@ -531,23 +535,27 @@ impl ExecutionManager {
                         "The working copy is not on this agent. Nothing was launched".to_owned(),
                     );
                 }
+                // A working copy prepared for one mode is never run in another.
+                let allowed = crate::workspaces::read_record(&self.config.state_dir, workspace_id)
+                    .is_some_and(|record| crate::workspaces::allows_mode(&record, request.mode));
+                if !allowed {
+                    return self.fail_new(
+                        request,
+                        "workspace_purpose_mismatch",
+                        "This working copy was prepared for another mode. Nothing was launched"
+                            .to_owned(),
+                    );
+                }
                 Some(crate::workspaces::workspace_base(
                     &self.config.state_dir,
                     workspace_id,
                 ))
             }
-            (ExecutionMode::RemoteVolatile, _) => {
-                return self.fail_new(
-                    request,
-                    "execution_mode_unavailable",
-                    "Remote volatile execution is not available in this version".to_owned(),
-                );
-            }
             _ => {
                 return self.fail_new(
                     request,
                     "execution_mode_unavailable",
-                    "A Remote Snapshot session runs a working copy, and only it names one"
+                    "A remote session runs a working copy, and only a remote session names one"
                         .to_owned(),
                 );
             }

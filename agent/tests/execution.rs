@@ -568,3 +568,133 @@ async fn a_recorded_pid_that_another_process_now_has_is_never_touched() {
         other => panic!("the emulator should still run: {other:?}"),
     }
 }
+
+impl Machine {
+    /// A working copy as a restore into it leaves one: its record, and the VM under its own directory.
+    fn working_copy(
+        &self,
+        name: &str,
+        purpose: Option<emucat_agent::protocol::WorkspacePurpose>,
+    ) -> (Uuid, PathBuf) {
+        let workspace = Uuid::new_v4();
+        emucat_agent::workspaces::write_record(
+            &self.state_dir(),
+            &emucat_agent::workspaces::WorkspaceRecord {
+                workspace_id: workspace,
+                emulator_type: EmulatorType::Box86,
+                vm_name: VmName::new(name).unwrap(),
+                source_version_id: Uuid::new_v4(),
+                manifest_sha256: None,
+                purpose,
+            },
+        )
+        .unwrap();
+        let root =
+            emucat_agent::workspaces::workspace_base(&self.state_dir(), workspace).join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("86box.cfg"), "[General]\n").unwrap();
+        fs::write(root.join("fake-behavior.txt"), "").unwrap();
+        (workspace, root)
+    }
+}
+
+#[tokio::test]
+async fn a_working_copy_runs_only_in_the_mode_it_was_prepared_for() {
+    use emucat_agent::protocol::WorkspacePurpose;
+    let machine = Machine::new();
+    // The persistent copy has the same name, and must never be the one that runs.
+    let persistent = machine.box86_vm("dos", "");
+    let (volatile, volatile_root) =
+        machine.working_copy("dos", Some(WorkspacePurpose::RemoteVolatile));
+    let mut agent = machine.manager(quick());
+    assert!(
+        agent
+            .manager
+            .capabilities()
+            .modes
+            .contains(&ExecutionMode::RemoteVolatile)
+    );
+
+    // Run as Remote Snapshot, a volatile working copy is refused: its changes would be published.
+    let wrong = VmLaunchRequest {
+        mode: ExecutionMode::RemoteSnapshot,
+        workspace_id: Some(volatile),
+        ..launch(EmulatorType::Box86, "dos")
+    };
+    agent.manager.handle(Message::ServerVmLaunch(wrong.clone()));
+    let refused = agent
+        .wait_state(wrong.session_id, AgentExecutionState::Failed)
+        .await;
+    assert_eq!(refused.code.as_deref(), Some("workspace_purpose_mismatch"));
+    assert!(refused.pid.is_none());
+
+    // In its own mode it runs, from its own directory.
+    let request = VmLaunchRequest {
+        mode: ExecutionMode::RemoteVolatile,
+        workspace_id: Some(volatile),
+        ..launch(EmulatorType::Box86, "dos")
+    };
+    agent
+        .manager
+        .handle(Message::ServerVmLaunch(request.clone()));
+    agent
+        .wait_state(request.session_id, AgentExecutionState::Running)
+        .await;
+    let record: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            emucat_agent::workspaces::workspace_base(&machine.state_dir(), volatile)
+                .join("dos.launch.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        record["workingDirectory"].as_str().unwrap(),
+        volatile_root.to_string_lossy()
+    );
+    assert!(
+        !machine
+            .base(EmulatorType::Box86)
+            .join("dos.launch.json")
+            .exists()
+    );
+    // While it runs, the VM is running on this agent for every purpose.
+    let vm = VmIdentity {
+        emulator_type: EmulatorType::Box86,
+        vm_name: VmName::new("dos").unwrap(),
+    };
+    assert!(agent.manager.activity(&vm).is_some());
+    agent.manager.handle(stop(&request, false));
+    agent
+        .wait_state(request.session_id, AgentExecutionState::Stopped)
+        .await;
+    assert!(persistent.join("86box.cfg").is_file());
+
+    // A Milestone 7 working copy runs as it always did, and never as a volatile one.
+    let (manual, _) = machine.working_copy("dos", None);
+    let wrong = VmLaunchRequest {
+        mode: ExecutionMode::RemoteVolatile,
+        workspace_id: Some(manual),
+        ..launch(EmulatorType::Box86, "dos")
+    };
+    agent.manager.handle(Message::ServerVmLaunch(wrong.clone()));
+    let refused = agent
+        .wait_state(wrong.session_id, AgentExecutionState::Failed)
+        .await;
+    assert_eq!(refused.code.as_deref(), Some("workspace_purpose_mismatch"));
+    let request = VmLaunchRequest {
+        mode: ExecutionMode::RemoteSnapshot,
+        workspace_id: Some(manual),
+        ..launch(EmulatorType::Box86, "dos")
+    };
+    agent
+        .manager
+        .handle(Message::ServerVmLaunch(request.clone()));
+    agent
+        .wait_state(request.session_id, AgentExecutionState::Running)
+        .await;
+    agent.manager.handle(stop(&request, true));
+    agent
+        .wait_state(request.session_id, AgentExecutionState::Stopped)
+        .await;
+}

@@ -1,4 +1,4 @@
-//! Remote Snapshot working copies (decision 0038).
+//! Working copies: the temporary copies remote sessions run (decisions 0038 and 0040).
 //!
 //! A working copy is `{state_dir}/workspaces/{workspace_id}/{vm_name}`, with a small record next to it
 //! saying which VM it holds and which version it is a copy of. The state directory is refused inside every
@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::discovery::is_link_like;
 use crate::emulators::{EmulatorType, VmName};
+use crate::protocol::{ExecutionMode, WorkspacePurpose};
 
 const RECORD_SUFFIX: &str = ".workspace.json";
 const REMOVING_PREFIX: &str = ".removing-";
@@ -55,6 +56,30 @@ pub struct WorkspaceRecord {
     pub source_version_id: Uuid,
     /// The manifest that version was verified against, when it is known.
     pub manifest_sha256: Option<String>,
+    /// What it is for (decision 0040). `None` for a Milestone 7 working copy, which is run in
+    /// `remote_snapshot` mode and preserved by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<WorkspacePurpose>,
+}
+
+/// Whether a working copy may be run in a mode: a remote session only in its own mode, and a Milestone 7
+/// working copy only as it always was, in `remote_snapshot` mode.
+pub fn allows_mode(record: &WorkspaceRecord, mode: ExecutionMode) -> bool {
+    matches!(
+        (record.purpose, mode),
+        (
+            None | Some(WorkspacePurpose::RemoteSnapshot),
+            ExecutionMode::RemoteSnapshot
+        ) | (
+            Some(WorkspacePurpose::RemoteVolatile),
+            ExecutionMode::RemoteVolatile
+        )
+    )
+}
+
+/// Whether a working copy's state may ever become a snapshot. A Remote Volatile session's never does.
+pub fn allows_snapshot(record: &WorkspaceRecord) -> bool {
+    record.purpose != Some(WorkspacePurpose::RemoteVolatile)
 }
 
 /// Writes the record atomically and durably. Written before a working copy's restore is published, so a

@@ -59,6 +59,8 @@ pub enum ArchiveErrorKind {
     DestinationUnsafe,
     /// The agent cannot tell what a directory is, and leaves it alone.
     Ambiguous,
+    /// Replacing a persistent copy failed, and the previous copy was put back.
+    ReplacementFailed,
 }
 
 impl ArchiveErrorKind {
@@ -75,6 +77,7 @@ impl ArchiveErrorKind {
             Self::DestinationExists => "restore_destination_exists",
             Self::DestinationUnsafe => "restore_destination_unsafe",
             Self::Ambiguous => "restore_ambiguous_directory",
+            Self::ReplacementFailed => "restore_replacement_failed",
         }
     }
 }
@@ -962,6 +965,219 @@ pub fn publish_directory(publication: &Publication<'_>) -> Result<PathBuf, Archi
             Err(error) => {
                 return Err(local_failure("moving the VM into place", &error));
             }
+        }
+    }
+}
+
+/// Where a replaced persistent copy waits, beside the new one, until the new one is in place. Like a staged
+/// directory, its leading dot keeps discovery from ever taking it for a VM.
+pub fn replaced_directory(base_path: &Path, operation_id: Uuid) -> PathBuf {
+    base_path.join(format!(".emucat-replaced-{operation_id}"))
+}
+
+/// The one entry of the base path that is this VM, in whatever capitalization, if it is a plain
+/// directory. `Ok(None)` when there is none; an error when there is more than one, or it is a link.
+pub fn existing_vm_directory(
+    base_path: &Path,
+    vm_name: &VmName,
+) -> Result<Option<PathBuf>, ArchiveError> {
+    let unreadable = |error: io::Error| {
+        archive_error(
+            ArchiveErrorKind::DestinationUnsafe,
+            format!("Cannot read the base path: {error}"),
+        )
+    };
+    let mut found = Vec::new();
+    for item in fs::read_dir(base_path).map_err(unreadable)? {
+        let item = item.map_err(unreadable)?;
+        if item
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(vm_name.as_str())
+        {
+            found.push(item.path());
+        }
+    }
+    match found.as_slice() {
+        [] => Ok(None),
+        [path] => {
+            let metadata = fs::symlink_metadata(path).map_err(|error| {
+                archive_error(
+                    ArchiveErrorKind::DestinationUnsafe,
+                    format!("Cannot examine the local copy: {error}"),
+                )
+            })?;
+            if is_link_like(&metadata) || !metadata.is_dir() {
+                return Err(archive_error(
+                    ArchiveErrorKind::DestinationUnsafe,
+                    "The local copy is a link, a junction or not a directory, and is never replaced",
+                ));
+            }
+            Ok(Some(path.clone()))
+        }
+        _ => Err(archive_error(
+            ArchiveErrorKind::Ambiguous,
+            format!(
+                "{vm_name} exists more than once in the base path, in different capitalizations"
+            ),
+        )),
+    }
+}
+
+fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match rename_no_replace(from, to) {
+            Err(error) if is_transiently_locked(&error) && attempts < 20 => {
+                drop(error);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            other => return other,
+        }
+    }
+}
+
+fn plain_directory_identity(path: &Path, what: &str) -> Result<DirectoryIdentity, ArchiveError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        archive_error(
+            ArchiveErrorKind::DestinationUnsafe,
+            format!("{what} cannot be found: {error}"),
+        )
+    })?;
+    if is_link_like(&metadata) || !metadata.is_dir() {
+        return Err(archive_error(
+            ArchiveErrorKind::DestinationUnsafe,
+            format!("{what} is a link or not a directory"),
+        ));
+    }
+    directory_identity(path).map_err(|error| {
+        archive_error(
+            ArchiveErrorKind::DestinationUnsafe,
+            format!("Cannot identify {what}: {error}"),
+        )
+    })
+}
+
+/// Replacing a persistent copy: which directory it is now, and where it waits while the new one moves in.
+#[derive(Debug)]
+pub struct Replacement<'a> {
+    pub current: &'a Path,
+    pub current_identity: DirectoryIdentity,
+    pub aside: &'a Path,
+}
+
+/// Puts a verified VM in place of an existing copy, with no-replace renames on one volume only: the
+/// current copy moves aside, then the new one moves in. If the second rename fails, the first is undone,
+/// so either the new copy is in place with the old one beside it, or the old one is where it was. The old
+/// copy is never deleted here: the caller removes it once the new one is recorded.
+pub fn replace_directory(
+    publication: &Publication<'_>,
+    replacement: &Replacement<'_>,
+) -> Result<PathBuf, ArchiveError> {
+    let Publication {
+        base_path,
+        base_identity,
+        vm_name,
+        staged,
+        staged_identity,
+    } = *publication;
+    if check_base_path(base_path)? != base_identity {
+        return Err(archive_error(
+            ArchiveErrorKind::DestinationUnsafe,
+            "The base path was replaced during the restore",
+        ));
+    }
+    if plain_directory_identity(staged, "The extracted VM")? != staged_identity {
+        return Err(archive_error(
+            ArchiveErrorKind::DestinationUnsafe,
+            "The extracted VM was replaced during the restore",
+        ));
+    }
+    if plain_directory_identity(replacement.current, "The local copy")?
+        != replacement.current_identity
+    {
+        return Err(archive_error(
+            ArchiveErrorKind::DestinationUnsafe,
+            "The local copy was replaced by another directory during the restore, and was left alone",
+        ));
+    }
+    if existing_vm_directory(base_path, vm_name)?.as_deref() != Some(replacement.current) {
+        return Err(archive_error(
+            ArchiveErrorKind::Ambiguous,
+            "The local copy is no longer the only directory with this VM's name",
+        ));
+    }
+
+    rename_retrying(replacement.current, replacement.aside).map_err(|error| {
+        archive_error(
+            ArchiveErrorKind::ReplacementFailed,
+            format!(
+                "The local copy could not be moved aside, so nothing changed. Is the VM in use? {error}"
+            ),
+        )
+    })?;
+    if directory_identity(replacement.aside).ok() != Some(replacement.current_identity) {
+        return Err(archive_error(
+            ArchiveErrorKind::Ambiguous,
+            format!(
+                "{} is not the local copy that was moved aside, so everything was left alone",
+                replacement.aside.display()
+            ),
+        ));
+    }
+    let put_back = |why: String| -> ArchiveError {
+        match rename_retrying(replacement.aside, replacement.current) {
+            Ok(()) => archive_error(
+                ArchiveErrorKind::ReplacementFailed,
+                format!("{why}. The previous local copy was put back unchanged"),
+            ),
+            Err(error) => archive_error(
+                ArchiveErrorKind::Ambiguous,
+                format!(
+                    "{why}, and the previous local copy could not be put back: it is in {}. {error}",
+                    replacement.aside.display()
+                ),
+            ),
+        }
+    };
+    if let Err(error) = check_destination_free(base_path, vm_name) {
+        return Err(put_back(error.message));
+    }
+    let destination = crate::filesystem::vm_directory(base_path, vm_name);
+    match rename_retrying(staged, &destination) {
+        Ok(()) => Ok(destination),
+        Err(error) => Err(put_back(format!(
+            "The new version could not be moved into place: {error}"
+        ))),
+    }
+}
+
+/// Removes a replaced copy once its replacement is recorded: only the directory moved aside by this
+/// operation, identified as the one that was moved, and never a link. Returns whether it is gone.
+pub fn remove_replaced_directory(aside: &Path, identity: DirectoryIdentity) -> bool {
+    match fs::symlink_metadata(aside) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Ok(metadata) if !is_link_like(&metadata) && metadata.is_dir() => {
+            if directory_identity(aside).ok() != Some(identity) {
+                tracing::error!(path = %aside.display(), "A replaced copy is not the one moved aside; left alone");
+                return false;
+            }
+            match fs::remove_dir_all(aside) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, path = %aside.display(), "Cannot remove a replaced copy yet");
+                    false
+                }
+            }
+        }
+        Ok(_) => {
+            tracing::error!(path = %aside.display(), "A replaced copy is not a plain directory; left alone");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %aside.display(), "Cannot examine a replaced copy");
+            false
         }
     }
 }

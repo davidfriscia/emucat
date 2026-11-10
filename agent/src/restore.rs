@@ -28,8 +28,10 @@ use crate::emulators::{EmulatorType, VmIdentity, VmName};
 use crate::execution::ActivityProbe;
 use crate::extraction::{
     ArchiveError, ArchiveErrorKind, ArchiveExpectation, ExtractionLimits, InspectedArchive,
-    Publication, archive_error, check_base_path, check_destination_free, extract_archive,
-    inspect_archive, publish_directory, remove_staged_directory, staged_directory,
+    Publication, Replacement, archive_error, check_base_path, check_destination_free,
+    existing_vm_directory, extract_archive, inspect_archive, publish_directory,
+    remove_replaced_directory, remove_staged_directory, rename_no_replace, replace_directory,
+    replaced_directory, staged_directory,
 };
 use crate::media_sync::MediaPreservation;
 use crate::packaging::{
@@ -46,7 +48,7 @@ use crate::registration::RepositoryProvider;
 use crate::repository::{
     ArchiveRepository, CancelFlag, ProgressFn, RepositoryError, RepositoryErrorKind, RepositoryKey,
 };
-use crate::state::{local_source_entries, record_local_source};
+use crate::state::{local_source_entries, read_local_state, record_local_source};
 use crate::verification::{PathList, VerifyStatus, verify_local_copy};
 
 /// Progress is informational, so it is thinned out to well below the server's message limit.
@@ -105,6 +107,21 @@ struct Journal {
     /// What will be reported once the rename has happened.
     result: Option<RestoreResult>,
     report: Option<Report>,
+    /// Replacing a persistent copy: the directory that was there, recorded before anything moves, so
+    /// that after a crash it can be recognized and put back, or removed once the new copy is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replaced: Option<ReplacedCopy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplacedCopy {
+    /// Where it was: the VM's directory, in the capitalization it had.
+    path: PathBuf,
+    identity: DirectoryIdentity,
+    /// Whether it has been removed, after the new copy was recorded.
+    #[serde(default)]
+    removed: bool,
 }
 
 #[derive(Debug)]
@@ -216,6 +233,103 @@ fn remove_staging_files(staging_dir: &Path, operation_id: Uuid) {
             let _ = fs::remove_file(item.path());
         }
     }
+}
+
+/// Whether the persistent copy may be replaced, decided from the disk and this agent's own records alone.
+/// It must be a plain directory in the base path; its recorded lineage must name the version the
+/// administrator saw, for this very directory; and, unless its changes may be discarded, a verification
+/// against that version's manifest must find it unchanged. A lineage that cannot be proven counts as
+/// possible changes. See decision 0040.
+fn check_replaceable(
+    state_dir: &Path,
+    base_path: &Path,
+    emulator: EmulatorType,
+    vm_name: &VmName,
+    replace: &crate::protocol::RestoreReplace,
+    cancel: &CancelFlag,
+) -> Result<ReplacedCopy, JobFailure> {
+    let path = existing_vm_directory(base_path, vm_name)?.ok_or_else(|| {
+        failure(
+            "local_copy_missing",
+            "There is no local copy of this VM to replace, so nothing was changed",
+        )
+    })?;
+    let identity = directory_identity(&path).map_err(|error| {
+        failure(
+            "restore_destination_unsafe",
+            format!("Cannot identify the local copy: {error}"),
+        )
+    })?;
+    let lineage = match replace.expected_version_id {
+        Some(expected) => {
+            crate::state::proven_lineage(state_dir, emulator, vm_name, identity, expected)
+        }
+        None => Err(crate::state::LineageProblem::Unrecorded),
+    };
+    match lineage {
+        // The page showed one version, and this copy is recorded as another: it is stale, whatever the
+        // administrator agreed to discard.
+        Err(crate::state::LineageProblem::OtherVersion(found)) => Err(failure(
+            "local_copy_changed",
+            format!(
+                "The local copy is recorded as version {found}, not the one that was shown. Nothing \
+                 was changed"
+            ),
+        )),
+        _ if replace.discard_local_changes => Ok(()),
+        Err(_) => Err(failure(
+            "local_copy_unverified",
+            "The agent cannot prove which version this local copy comes from, so its changes cannot \
+             be ruled out. Nothing was changed",
+        )),
+        Ok(()) => {
+            // The manifest it was restored with, trusted only if it is the one recorded with the copy.
+            let recorded = read_local_state(state_dir, emulator, vm_name)
+                .and_then(|state| state.last_verified_sha256);
+            let manifest = recorded.and_then(|expected| {
+                fs::read(local_manifest_path(state_dir, emulator, vm_name))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+                    .filter(|manifest| manifest.sha256() == expected)
+            });
+            let Some(manifest) = manifest else {
+                return Err(failure(
+                    "local_copy_unverified",
+                    "The agent has no trusted manifest to compare the local copy with, so its changes \
+                     cannot be ruled out. Nothing was changed",
+                ));
+            };
+            let outcome = verify_local_copy(&path, emulator, &manifest, cancel);
+            match outcome.status {
+                VerifyStatus::Verified => Ok(()),
+                VerifyStatus::Modified | VerifyStatus::Missing => Err(failure(
+                    "local_copy_modified",
+                    format!(
+                        "The local copy differs from its version ({} modified, {} missing, {} \
+                         unexpected). Nothing was changed",
+                        outcome.modified.count, outcome.missing.count, outcome.unexpected.count
+                    ),
+                )),
+                VerifyStatus::VerificationFailed => {
+                    if cancel.is_cancelled() {
+                        return Err(RepositoryError::cancelled().into());
+                    }
+                    Err(failure(
+                        "local_copy_unverified",
+                        format!(
+                            "The local copy could not be compared reliably: {}. Nothing was changed",
+                            outcome.message.unwrap_or_default()
+                        ),
+                    ))
+                }
+            }
+        }
+    }?;
+    Ok(ReplacedCopy {
+        path,
+        identity,
+        removed: false,
+    })
 }
 
 /// An archive opened so that nobody can write to it, hashed through that handle, and used through that
@@ -516,6 +630,8 @@ impl RestoreManager {
             remove_staging_files(&self.config.staging_dir, operation_id);
             match journal.phase {
                 RestorePhase::Running => {
+                    // Nothing moves before publication, so a replaced copy is still where it was.
+                    self.remove_pending_manifest(&journal.request);
                     if let Some(base) = self.target_base(&journal.request) {
                         remove_staged_directory(&staged_directory(&base, operation_id));
                     }
@@ -531,8 +647,127 @@ impl RestoreManager {
                         ),
                     );
                 }
+                RestorePhase::Publishing if journal.replaced.is_some() => {
+                    self.resolve_replacing(journal);
+                }
                 RestorePhase::Publishing => self.resolve_publishing(journal),
-                RestorePhase::Published | RestorePhase::Reported => {}
+                RestorePhase::Published | RestorePhase::Reported => {
+                    let mut journal = journal;
+                    self.remove_replaced(&mut journal);
+                }
+            }
+        }
+    }
+
+    /// Where a replacement keeps the new version's manifest until the new copy is in place, so that the
+    /// old copy's manifest stays true of it if the replacement does not happen.
+    fn pending_manifest_path(&self, request: &RestoreRequest) -> PathBuf {
+        local_manifest_path(
+            &self.config.state_dir,
+            request.emulator_type,
+            &request.vm_name,
+        )
+        .with_extension(format!("{}.pending", request.operation_id))
+    }
+
+    fn remove_pending_manifest(&self, request: &RestoreRequest) {
+        if request.replace.is_some() {
+            let _ = fs::remove_file(self.pending_manifest_path(request));
+        }
+    }
+
+    /// Removes the copy a replacement moved aside, once the new one is recorded. Repeated at each start
+    /// until it succeeds; a directory that is not the one moved aside is never touched.
+    fn remove_replaced(&self, journal: &mut Journal) {
+        let Some(replaced) = journal.replaced.clone() else {
+            return;
+        };
+        if replaced.removed {
+            return;
+        }
+        let Some(base) = self.target_base(&journal.request) else {
+            return;
+        };
+        let aside = replaced_directory(&base, journal.request.operation_id);
+        if remove_replaced_directory(&aside, replaced.identity) {
+            journal.replaced = Some(ReplacedCopy {
+                removed: true,
+                ..replaced
+            });
+            if let Err(error) = self.persist(journal.clone()) {
+                tracing::warn!(%error, "Cannot record that a replaced copy was removed");
+            }
+        }
+    }
+
+    /// The agent stopped while replacing a persistent copy. The disk says how far it got: the new copy in
+    /// place means it finishes; the old copy moved aside and nothing in its place means the old copy goes
+    /// back; the old copy still in place means nothing happened. Anything else is left alone, and said.
+    fn resolve_replacing(&self, journal: Journal) {
+        let operation_id = journal.request.operation_id;
+        let Some(replaced) = journal.replaced.clone() else {
+            return self.resolve_publishing(journal);
+        };
+        let Some(base) = self.target_base(&journal.request) else {
+            self.record_failure(
+                journal,
+                failure(
+                    "restore_emulator_not_configured",
+                    "This emulator is no longer configured, so the agent cannot tell how far the \
+                     replacement got. The previous copy may be beside the VM's directory",
+                ),
+            );
+            return;
+        };
+        let staged = staged_directory(&base, operation_id);
+        let aside = replaced_directory(&base, operation_id);
+        let destination = crate::filesystem::vm_directory(&base, &journal.request.vm_name);
+        let identity_of = |path: &Path| directory_identity(path).ok();
+        let recorded = journal.staged_identity;
+
+        if recorded.is_some() && identity_of(&destination) == recorded {
+            tracing::info!(%operation_id, "A replacement finished before the agent stopped");
+            let mut journal = journal;
+            self.finish_published(&mut journal);
+            return;
+        }
+        let outcome = if fs::symlink_metadata(&destination).is_err()
+            && identity_of(&aside) == Some(replaced.identity)
+        {
+            match rename_no_replace(&aside, &replaced.path) {
+                Ok(()) => Ok(
+                    "The agent restarted while replacing the local copy. The previous copy was put \
+                     back unchanged, and it is safe to try again",
+                ),
+                Err(error) => Err(format!(
+                    "The agent restarted while replacing the local copy, and the previous copy could \
+                     not be put back: it is in {}. {error}",
+                    aside.display()
+                )),
+            }
+        } else if identity_of(&replaced.path) == Some(replaced.identity) {
+            Ok(
+                "The agent restarted before replacing the local copy. Nothing changed, and it is safe \
+                to try again",
+            )
+        } else {
+            Err(format!(
+                "The agent restarted while replacing the local copy, and cannot tell what {} and {} \
+                 are, so it left everything alone",
+                destination.display(),
+                aside.display()
+            ))
+        };
+        self.remove_pending_manifest(&journal.request);
+        match outcome {
+            Ok(message) => {
+                if recorded.is_some() && identity_of(&staged) == recorded {
+                    remove_staged_directory(&staged);
+                }
+                self.record_failure(journal, failure("agent_restarted", message));
+            }
+            Err(message) => {
+                self.record_failure(journal, failure("restore_ambiguous_directory", message));
             }
         }
     }
@@ -620,6 +855,20 @@ impl RestoreManager {
             self.send(Message::AgentRestoreResult(result));
             return;
         }
+        // A replacement's manifest waited beside the old one; the new copy is in place now.
+        if journal.replaced.is_some() {
+            let pending = self.pending_manifest_path(&journal.request);
+            let path = local_manifest_path(
+                &self.config.state_dir,
+                journal.request.emulator_type,
+                &journal.request.vm_name,
+            );
+            if pending.exists()
+                && let Err(error) = fs::rename(&pending, &path)
+            {
+                tracing::warn!(%error, "Cannot keep the restored manifest");
+            }
+        }
         // Local bookkeeping. If it fails, the server still knows, and the next report says so.
         if let Err(error) = record_local_source(
             &self.config.state_dir,
@@ -633,6 +882,8 @@ impl RestoreManager {
         ) {
             tracing::warn!(%error, "Cannot record the local source version");
         }
+        // Only now, with the new copy recorded, is the old one let go of.
+        self.remove_replaced(journal);
         self.send(Message::AgentRestoreResult(result));
     }
 
@@ -676,6 +927,7 @@ impl RestoreManager {
             repository_ids: self.config.repositories.repository_ids(),
             cache_max_bytes: self.cache.max_bytes(),
             cache_used_bytes: self.cache.usage().total_bytes,
+            replace_local: true,
         }
     }
 
@@ -844,6 +1096,7 @@ impl RestoreManager {
             staged_identity: None,
             result: None,
             report: None,
+            replaced: None,
         };
         if let Err(error) = self.persist(journal) {
             tracing::error!(%error, %operation_id, "Cannot create a journal");
@@ -875,6 +1128,7 @@ impl RestoreManager {
                     crate::workspaces::forget_unpublished(&this.config.state_dir, workspace_id);
                 }
                 if let Some(journal) = this.journal(operation_id) {
+                    this.remove_pending_manifest(&journal.request);
                     this.record_failure(journal, failed);
                 }
             }
@@ -1047,6 +1301,18 @@ impl RestoreManager {
                 format!("{} is not configured on this agent", request.emulator_type),
             )
         })?;
+        if request.replace.is_some() && request.workspace_id.is_some() {
+            return Err(failure(
+                "invalid_request",
+                "A working copy is never a replacement of the persistent copy",
+            ));
+        }
+        if request.workspace_purpose.is_some() && request.workspace_id.is_none() {
+            return Err(failure(
+                "invalid_request",
+                "Only a working copy has a purpose",
+            ));
+        }
         // A working copy's directory is created here, empty, the first time. Its parent is under the
         // state directory, which is never inside a base path.
         if request.workspace_id.is_some() {
@@ -1065,12 +1331,36 @@ impl RestoreManager {
         }
         let repository = self.config.repositories.open(request.repository_id)?;
 
+        // Replacing: the copy that is there is examined before anything is downloaded, and refused unless
+        // it is provably the one the administrator saw, unchanged, or its changes may be discarded.
+        if let Some(replace) = request.replace.clone() {
+            let (state_dir, base, emulator, name, cancel) = (
+                self.config.state_dir.clone(),
+                base_path.clone(),
+                request.emulator_type,
+                request.vm_name.clone(),
+                cancel.clone(),
+            );
+            let replaced = blocking(move || {
+                check_replaceable(&state_dir, &base, emulator, &name, &replace, &cancel)
+            })
+            .await??;
+            journal.replaced = Some(replaced);
+            self.persist(journal.clone()).map_err(|error| {
+                failure(
+                    "restore_staging_failed",
+                    format!("Cannot write the journal: {error}"),
+                )
+            })?;
+        }
+
         let base_identity = {
-            let (base, name, staging_dir, cache_dir) = (
+            let (base, name, staging_dir, cache_dir, replacing) = (
                 base_path.clone(),
                 request.vm_name.clone(),
                 self.config.staging_dir.clone(),
                 self.config.settings.cache_dir.clone(),
+                request.replace.is_some(),
             );
             let (download_bytes, extract_bytes) = (
                 request.archive_size_bytes,
@@ -1078,7 +1368,10 @@ impl RestoreManager {
             );
             blocking(move || -> Result<DirectoryIdentity, JobFailure> {
                 let identity = check_base_path(&base)?;
-                check_destination_free(&base, &name)?;
+                // A replacement checked what is there already; anything else needs the name free.
+                if !replacing {
+                    check_destination_free(&base, &name)?;
+                }
                 fs::create_dir_all(&staging_dir).map_err(|error| {
                     failure(
                         "restore_staging_failed",
@@ -1200,6 +1493,7 @@ impl RestoreManager {
                     vm_name: request.vm_name.clone(),
                     source_version_id: request.version_id,
                     manifest_sha256: Some(inspected.manifest_sha256.clone()),
+                    purpose: request.workspace_purpose,
                 },
             )
             .map_err(|error| {
@@ -1209,11 +1503,16 @@ impl RestoreManager {
                 )
             })?;
         } else {
-            let path = local_manifest_path(
-                &self.config.state_dir,
-                request.emulator_type,
-                &request.vm_name,
-            );
+            // A replacement keeps the old copy's manifest true of it until the new copy is in place.
+            let path = if request.replace.is_some() {
+                self.pending_manifest_path(&request)
+            } else {
+                local_manifest_path(
+                    &self.config.state_dir,
+                    request.emulator_type,
+                    &request.vm_name,
+                )
+            };
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
@@ -1249,20 +1548,37 @@ impl RestoreManager {
         })?;
 
         let published = {
-            let (base, name, staged) = (base_path.clone(), request.vm_name.clone(), staged.clone());
+            let (base, name, staged, replaced) = (
+                base_path.clone(),
+                request.vm_name.clone(),
+                staged.clone(),
+                journal.replaced.clone(),
+            );
             blocking(move || {
-                publish_directory(&Publication {
+                let publication = Publication {
                     base_path: &base,
                     base_identity,
                     vm_name: &name,
                     staged: &staged,
                     staged_identity,
-                })
+                };
+                match replaced {
+                    None => publish_directory(&publication),
+                    Some(replaced) => replace_directory(
+                        &publication,
+                        &Replacement {
+                            current: &replaced.path,
+                            current_identity: replaced.identity,
+                            aside: &replaced_directory(&base, operation_id),
+                        },
+                    ),
+                }
             })
             .await?
         };
         if let Err(error) = published {
-            // The rename did not happen, or the error says it cannot have.
+            // The rename did not happen, or was undone, or the error says it cannot have. When a previous
+            // copy could not be put back, the message says where it is, and nothing removes it.
             journal.phase = RestorePhase::Running;
             journal.result = None;
             journal.staged_identity = None;
@@ -1744,6 +2060,8 @@ impl RestoreManager {
             manifest_sha256: request.manifest_sha256.clone(),
             expected_uncompressed_bytes: None,
             workspace_id: None,
+            workspace_purpose: None,
+            replace: None,
         };
         let obtained = self
             .obtain_archive(&as_restore, &*repository, &key, cancel)

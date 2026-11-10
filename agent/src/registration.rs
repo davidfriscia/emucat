@@ -1121,6 +1121,13 @@ impl Inner {
         }
         let record = crate::workspaces::read_record(state_dir, workspace_id)
             .ok_or_else(|| failure("workspace_unavailable", "This working copy has no record"))?;
+        // A Remote Volatile session's changes are thrown away, whatever the server asks.
+        if !crate::workspaces::allows_snapshot(&record) {
+            return Err(failure(
+                "workspace_purpose_mismatch",
+                "This working copy belongs to a Remote Volatile session, whose changes are never published",
+            ));
+        }
         if Some(record.source_version_id) != request.parent_version_id {
             return Err(failure(
                 "snapshot_parent_mismatch",
