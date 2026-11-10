@@ -26,6 +26,15 @@ pub fn workspaces_dir(state_dir: &Path) -> PathBuf {
     state_dir.join("workspaces")
 }
 
+/// Whether the workspaces directory is a real directory, not a link or junction that could put working
+/// copies, and their removal, somewhere else. A directory that does not exist yet is fine.
+pub fn workspaces_dir_is_safe(state_dir: &Path) -> bool {
+    match fs::symlink_metadata(workspaces_dir(state_dir)) {
+        Ok(metadata) => !is_link_like(&metadata) && metadata.is_dir(),
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
+}
+
 /// The directory that plays the part of a base path for one working copy.
 pub fn workspace_base(state_dir: &Path, workspace_id: Uuid) -> PathBuf {
     workspaces_dir(state_dir).join(workspace_id.to_string())
@@ -162,6 +171,14 @@ pub fn discard(
     let directory = workspaces_dir(state_dir);
     let base = workspace_base(state_dir, workspace_id);
     let removing = directory.join(format!("{REMOVING_PREFIX}{workspace_id}"));
+    if !workspaces_dir_is_safe(state_dir) {
+        return Err(DiscardError {
+            code: "workspace_unsafe",
+            message:
+                "The workspaces directory is a link or not a directory, so nothing was removed"
+                    .to_owned(),
+        });
+    }
     if let Some(record) = read_record(state_dir, workspace_id)
         && (record.emulator_type != emulator_type || record.vm_name.key() != vm_name.key())
     {

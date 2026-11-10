@@ -994,6 +994,67 @@ describe('Remote Snapshot', () => {
     });
   });
 
+  it('makes a discard wait for a launch holding the agent, and then see its session', async () => {
+    const w = await world();
+    const { workspace, status } = await readyAndRunning(w);
+    await stop(w, status);
+    // A launch in flight: it holds the agent's row, as the real one does, and creates its session.
+    const launch = await w.context.pool.getConnection();
+    await launch.beginTransaction();
+    await launch.execute('SELECT id FROM agents WHERE id = ? FOR UPDATE', [w.paired.agentId]);
+    await launch.execute(
+      `INSERT INTO vm_sessions (id, agent_id, emulator_type, vm_name, mode, workspace_id,
+         execution_state)
+       VALUES (?, ?, 'qemu', 'Win98', 'remote_snapshot', ?, 'requested')`,
+      [randomUUID(), w.paired.agentId, workspace.id],
+    );
+    const discarding = w.admin.request({
+      method: 'POST',
+      url: `/admin/workspaces/${workspace.id}/discard`,
+      payload: { confirmVmName: 'Win98' },
+    });
+    // Without waiting for the lock, the discard would find no session and go ahead.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await launch.commit();
+    launch.release();
+    const response = await discarding;
+    expect(response.statusCode, response.body).toBe(409);
+    expect(await errorCode(response)).toBe('vm_running');
+    expect((await readWorkspace(w, workspace.id)).state).toBe('ready');
+    await barrier(w.agent);
+    expect(w.agent.received.filter((m) => m.type === 'server.workspace_discard')).toEqual([]);
+  });
+
+  it('brings back a working copy wrongly recorded as missing, rather than abandoning it', async () => {
+    const w = await world();
+    const { workspace, status } = await readyAndRunning(w);
+    await stop(w, status);
+    await resync(w, { workspaces: [] });
+    expect((await readWorkspace(w, workspace.id)).state).toBe('lost');
+    await resync(w, { workspaces: [workspace.id] });
+    expect(await readWorkspace(w, workspace.id)).toMatchObject({
+      state: 'ready',
+      error: null,
+      finishedAt: null,
+    });
+  });
+
+  it('refuses to discard while the agent is busy with any operation', async () => {
+    const w = await world();
+    const { workspace, status } = await readyAndRunning(w);
+    await stop(w, status);
+    // A snapshot of the persistent copy is under way on the same agent.
+    await snapshot(w);
+    const discarding = await w.admin.request({
+      method: 'POST',
+      url: `/admin/workspaces/${workspace.id}/discard`,
+      payload: { confirmVmName: 'Win98' },
+    });
+    expect(discarding.statusCode).toBe(409);
+    expect(await errorCode(discarding)).toBe('operation_in_progress');
+    expect((await readWorkspace(w, workspace.id)).state).toBe('ready');
+  });
+
   it('protects the persistent copy while a working copy of the VM runs', async () => {
     const w = await world();
     await readyAndRunning(w);

@@ -2125,3 +2125,116 @@ async fn discard_result(
         _ => unreachable!(),
     }
 }
+
+fn discard_of(name: &str, workspace: Uuid) -> Message {
+    Message::ServerWorkspaceDiscard(emucat_agent::protocol::WorkspaceDiscard {
+        workspace_id: workspace,
+        emulator_type: EmulatorType::Qemu,
+        vm_name: VmName::new(name).unwrap(),
+    })
+}
+
+#[tokio::test]
+async fn a_working_copy_is_not_discarded_while_the_agent_works_on_anything() {
+    let world = World::new();
+    world.qemu_vm("Other");
+    let (workspace, root) = working_copy(&world, "Win98", Uuid::new_v4());
+    let hold = Arc::new(tokio::sync::Notify::new());
+    world.repository.store.lock().unwrap().hold_upload = Some(Arc::clone(&hold));
+    let operations = world.start();
+    let copy = request("Other", RegistrationMode::Copy);
+    start(&operations, &copy);
+    next_message(&operations, |message| {
+        matches!(
+            message,
+            Message::AgentRegistrationProgress(progress)
+                if progress.stage == RegistrationStage::Uploading
+        )
+    })
+    .await;
+    operations.handle(discard_of("Win98", workspace));
+    let refused = discard_result(&operations).await;
+    assert!(!refused.removed);
+    assert_eq!(refused.code.as_deref(), Some("agent_busy"));
+    assert!(root.exists());
+    hold.notify_one();
+    result_of(&operations).await;
+}
+
+#[tokio::test]
+async fn nothing_else_starts_on_the_vm_while_its_working_copy_is_being_discarded() {
+    let world = World::new();
+    world.qemu_vm("Win98");
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    let (workspace, _) = working_copy(&world, "Win98", master);
+    let operations = world.start();
+    operations.handle(discard_of("Win98", workspace));
+    // Sent straight after, as a confused or racing server might.
+    start(&operations, &snapshot("Win98", master, None));
+    let (mut removed, mut snapshot_answer) = (None, None);
+    {
+        let mut outbound = operations.outbound().await;
+        while removed.is_none() || snapshot_answer.is_none() {
+            let message = tokio::time::timeout(Duration::from_secs(30), outbound.recv())
+                .await
+                .expect("an answer arrives")
+                .expect("the channel stays open");
+            match message {
+                Message::AgentWorkspaceDiscardResult(result) => removed = Some(result),
+                Message::AgentRegistrationError(error) => snapshot_answer = Some(Err(error.code)),
+                Message::AgentRegistrationResult(_) => snapshot_answer = Some(Ok(())),
+                _ => {}
+            }
+        }
+    }
+    let removed = removed.unwrap();
+    assert!(removed.removed, "{removed:?}");
+    // The snapshot found the agent busy, since the removal had claimed it first.
+    assert_eq!(snapshot_answer, Some(Err("agent_busy".to_owned())));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_working_copy_behind_a_linked_workspaces_directory_is_never_removed() {
+    let world = World::new();
+    let (workspace, root) = working_copy(&world, "Win98", Uuid::new_v4());
+    // The workspaces directory is replaced by a link to where the files really are.
+    let real = world.state.join("elsewhere");
+    let workspaces = emucat_agent::workspaces::workspaces_dir(&world.state);
+    fs::rename(&workspaces, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &workspaces).unwrap();
+    let operations = world.start();
+    operations.handle(discard_of("Win98", workspace));
+    let refused = discard_result(&operations).await;
+    assert!(!refused.removed);
+    assert_eq!(refused.code.as_deref(), Some("workspace_unsafe"));
+    assert!(real.join(workspace.to_string()).join("Win98").exists());
+    assert!(root.exists(), "reachable through the link, and untouched");
+    assert!(
+        emucat_agent::workspaces::held(&world.state).is_empty(),
+        "not offered as usable"
+    );
+}
+
+#[tokio::test]
+async fn a_removal_a_crash_interrupted_is_finished_on_the_next_start() {
+    let world = World::new();
+    let (workspace, root) = working_copy(&world, "Win98", Uuid::new_v4());
+    // As a crash right after the rename leaves it.
+    let workspaces = emucat_agent::workspaces::workspaces_dir(&world.state);
+    let removing = workspaces.join(format!(".removing-{workspace}"));
+    fs::rename(
+        emucat_agent::workspaces::workspace_base(&world.state, workspace),
+        &removing,
+    )
+    .unwrap();
+    // Something unrelated with a similar name is never touched.
+    let unrelated = workspaces.join(".removing-not-a-uuid");
+    fs::create_dir(&unrelated).unwrap();
+    let _operations = world.start();
+    assert!(!removing.exists());
+    assert!(!root.exists());
+    assert!(emucat_agent::workspaces::read_record(&world.state, workspace).is_none());
+    assert!(unrelated.exists());
+}

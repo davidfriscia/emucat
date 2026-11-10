@@ -596,6 +596,9 @@ impl RestoreManager {
                  safe to try again",
             )
         };
+        if let Some(workspace_id) = journal.request.workspace_id {
+            crate::workspaces::forget_unpublished(&self.config.state_dir, workspace_id);
+        }
         self.record_failure(journal, failed);
     }
 
@@ -1047,6 +1050,12 @@ impl RestoreManager {
         // A working copy's directory is created here, empty, the first time. Its parent is under the
         // state directory, which is never inside a base path.
         if request.workspace_id.is_some() {
+            if !crate::workspaces::workspaces_dir_is_safe(&self.config.state_dir) {
+                return Err(failure(
+                    "restore_destination_unsafe",
+                    "The workspaces directory is a link or not a directory",
+                ));
+            }
             fs::create_dir_all(&base_path).map_err(|error| {
                 failure(
                     "restore_staging_failed",

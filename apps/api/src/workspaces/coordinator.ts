@@ -265,49 +265,71 @@ export class WorkspaceCoordinator {
    * again. An agent that is away is asked when it returns.
    */
   async discard(workspaceId: string, confirmVmName: string | undefined): Promise<VmWorkspace> {
-    const row = await this.requireRow(workspaceId);
-    if (row.state === 'discarded') return toWorkspace(row, this.link.isOnline(row.agent_id));
-    if (row.state !== 'ready' && row.state !== 'discarding') {
-      throw new ApiError(409, 'workspace_unavailable', 'This working copy is not on the agent.');
-    }
-    if (row.may_have_changes && vmNameKey(confirmVmName ?? '') !== vmNameKey(row.vm_name)) {
-      throw new ApiError(
-        400,
-        'confirmation_required',
-        'This working copy may hold changes that are not in any snapshot. Type the VM’s name to discard them.',
+    const before = await this.requireRow(workspaceId);
+    if (before.state === 'discarded')
+      return toWorkspace(before, this.link.isOnline(before.agent_id));
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      // The agent's row first, then the working copy's, as a launch takes them: either the launch's
+      // session exists when this looks, or this has marked the working copy before the launch looks.
+      await connection.execute('SELECT id FROM agents WHERE id = ? FOR UPDATE', [before.agent_id]);
+      const [rows] = await connection.execute<RowDataPacket[]>(
+        `SELECT state, may_have_changes, vm_name FROM vm_workspaces WHERE id = ? FOR UPDATE`,
+        [workspaceId],
       );
-    }
-    const [busy] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT 'session' AS kind FROM vm_sessions
-         WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1
-       UNION ALL SELECT 'operation' FROM registration_operations
-         WHERE workspace_id = ? AND active_marker = 1
-       UNION ALL SELECT 'operation' FROM restore_operations
-         WHERE workspace_id = ? AND active_marker = 1`,
-      [row.agent_id, row.emulator_type, row.vm_name, workspaceId, workspaceId],
-    );
-    if (busy.some((item) => item.kind === 'session')) {
-      throw new ApiError(
-        409,
-        'vm_running',
-        'This VM is running on this agent, or may be. Stop it, or dismiss the session, first.',
+      const row = rows[0];
+      if (!row) throw new ApiError(404, 'workspace_not_found', 'Working copy not found');
+      if (row.state !== 'ready' && row.state !== 'discarding') {
+        throw new ApiError(409, 'workspace_unavailable', 'This working copy is not on the agent.');
+      }
+      if (row.may_have_changes && vmNameKey(confirmVmName ?? '') !== vmNameKey(before.vm_name)) {
+        throw new ApiError(
+          400,
+          'confirmation_required',
+          'This working copy may hold changes that are not in any snapshot. Type the VM’s name to discard them.',
+        );
+      }
+      // Unknown sessions count: an emulator that may be running must not lose its files.
+      const [busy] = await connection.execute<RowDataPacket[]>(
+        `SELECT 'session' AS kind FROM vm_sessions
+           WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1
+         UNION ALL SELECT 'operation' FROM registration_operations
+           WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 'operation' FROM restore_operations
+           WHERE agent_id = ? AND active_marker = 1`,
+        [before.agent_id, before.emulator_type, before.vm_name, before.agent_id, before.agent_id],
       );
-    }
-    if (busy.length > 0) {
-      throw new ApiError(
-        409,
-        'operation_in_progress',
-        'An operation is using this working copy. Wait for it to end.',
+      if (busy.some((item) => item.kind === 'session')) {
+        throw new ApiError(
+          409,
+          'vm_running',
+          'This VM is running on this agent, or may be. Stop it, or dismiss the session, first.',
+        );
+      }
+      if (busy.length > 0) {
+        throw new ApiError(
+          409,
+          'operation_in_progress',
+          'This agent is busy with another operation. Wait for it to end.',
+        );
+      }
+      await connection.execute(
+        `UPDATE vm_workspaces
+         SET state = 'discarding',
+             discard_requested_at = COALESCE(discard_requested_at, UTC_TIMESTAMP(3)),
+             error_code = NULL, error_message = NULL
+         WHERE id = ?`,
+        [workspaceId],
       );
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
     }
-    await this.pool.execute(
-      `UPDATE vm_workspaces
-       SET state = 'discarding', discard_requested_at = COALESCE(discard_requested_at, UTC_TIMESTAMP(3)),
-           error_code = NULL, error_message = NULL
-       WHERE id = ? AND state IN ('ready', 'discarding')`,
-      [workspaceId],
-    );
-    this.sendDiscard(row);
+    this.sendDiscard(before);
     const after = await this.requireRow(workspaceId);
     return toWorkspace(after, this.link.isOnline(after.agent_id));
   }
@@ -337,6 +359,36 @@ export class WorkspaceCoordinator {
        WHERE agent_id = ? AND active_marker = 1`,
       [agentId],
     );
+    // A working copy recorded as missing that the agent lists again was only missing from a listing: it
+    // is on that disk, and only an administrator may decide to remove it.
+    const [lost] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT id FROM vm_workspaces
+       WHERE agent_id = ? AND state = 'lost' AND error_code = 'workspace_missing'`,
+      [agentId],
+    );
+    for (const row of lost) {
+      if (!held.has(row.id as string)) continue;
+      try {
+        await this.pool.execute(
+          `UPDATE vm_workspaces SET state = 'ready', finished_at = NULL, error_code = NULL,
+             error_message = NULL
+           WHERE id = ? AND state = 'lost'`,
+          [row.id],
+        );
+      } catch (error) {
+        // Another working copy of the VM is active here now. This one stays lost, and is reported.
+        this.log.warn({ agentId, workspaceId: row.id, err: error }, 'A lost working copy is back');
+      }
+    }
+    const known = new Set([...rows, ...lost].map((row) => row.id as string));
+    for (const workspaceId of held) {
+      if (!known.has(workspaceId)) {
+        this.log.warn(
+          { agentId, workspaceId },
+          'The agent holds a working copy this server does not',
+        );
+      }
+    }
     for (const row of rows) {
       const workspaceId = row.id as string;
       if (row.state === 'discarding') {

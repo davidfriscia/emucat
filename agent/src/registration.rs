@@ -152,6 +152,8 @@ struct Inner {
     stopping: CancelFlag,
     /// Whether an emulator is running a VM. Nothing reads a VM for an archive, or removes it, then.
     activity: OnceLock<ActivityProbe>,
+    /// VMs whose working copy is being removed. Nothing may launch, archive or restore them meanwhile.
+    discarding: Mutex<std::collections::HashSet<VmIdentity>>,
 }
 
 pub struct AgentOperations {
@@ -228,6 +230,7 @@ impl AgentOperations {
             running,
             stopping,
             activity: OnceLock::new(),
+            discarding: Mutex::default(),
         });
 
         // Each side asks the other, so neither can start on a VM the other is using. Weak references, so
@@ -389,6 +392,29 @@ impl AgentOperations {
             ));
             return;
         }
+        // Claimed before anything is removed: a registration, snapshot or restore now finds the agent busy,
+        // and a launch of this VM finds it being worked on, until the removal has finished either way.
+        {
+            let mut running = self.inner.running.lock().expect("poisoned");
+            if !running.is_empty() {
+                drop(running);
+                self.inner.send(Message::AgentWorkspaceDiscardResult(
+                    WorkspaceDiscardResult {
+                        workspace_id,
+                        removed: false,
+                        code: Some("agent_busy".to_owned()),
+                        message: Some("The agent is busy with another operation".to_owned()),
+                    },
+                ));
+                return;
+            }
+            running.insert(workspace_id, CancelFlag::new());
+            self.inner
+                .discarding
+                .lock()
+                .expect("poisoned")
+                .insert(vm.clone());
+        }
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
             let state_dir = inner.config.state_dir.clone();
@@ -424,6 +450,12 @@ impl AgentOperations {
                     message: None,
                 },
             };
+            inner.discarding.lock().expect("poisoned").remove(&vm);
+            inner
+                .running
+                .lock()
+                .expect("poisoned")
+                .remove(&workspace_id);
             inner.send(Message::AgentWorkspaceDiscardResult(result));
         });
     }
@@ -663,6 +695,12 @@ impl Inner {
 
     /// Why `vm` must not be launched now, if this module is working on it.
     fn working_on(&self, vm: &VmIdentity) -> Option<String> {
+        if self.discarding.lock().expect("poisoned").contains(vm) {
+            return Some(format!(
+                "A working copy of {} is being discarded",
+                vm.vm_name
+            ));
+        }
         let running = self.running.lock().expect("poisoned");
         let journals = self.journals.lock().expect("poisoned");
         running.keys().find_map(|operation_id| {
