@@ -1208,55 +1208,79 @@ describe('restore, public cover and VM details, end to end', () => {
       );
     });
 
-    it(
-      'restores through the web interface, with progress and the result on screen',
-      async () => {
-        const root = await qemuVm('Via Browser', 8);
-        const expected = await fingerprint(root);
-        await register('Via Browser', 'qemu', 'transfer');
-        const adminContext = await browser.newContext();
-        const page = await adminContext.newPage();
-        await signIn(page);
-        await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent('Via Browser')}`));
-        await page.getByRole('button', { name: 'Restore…' }).click();
-        const dialog = page.getByRole('dialog', { name: 'Restore Via Browser' });
-        await dialog.waitFor();
-        await dialog.getByText(join(qemu, 'Via Browser')).waitFor();
-        await shot(page, '7-restore-dialog');
-        await dialog
-          .getByText('creates a local copy of the immutable master', { exact: false })
-          .waitFor();
-        await dialog.getByRole('button', { name: 'Restore' }).click();
-        await dialog.waitFor({ state: 'detached' });
-        const card = page.getByRole('article', { name: /Restore on/ });
-        await card.getByText('Restored', { exact: true }).waitFor({ timeout: 120_000 });
-        await card.getByText(join(qemu, 'Via Browser')).waitFor();
-        await card.getByText(/files were verified by the agent/).waitFor();
-        await card.getByText(/The VM was not started/).waitFor();
-        await shot(page, '8-restored');
-        await adminContext.close();
-        expect(await fingerprint(join(qemu, 'Via Browser'))).toEqual(expected);
-      },
-      LONG,
-    );
+    describe('through the web interface', () => {
+      const VIA = 'Via Browser';
+      const destination2 = () => join(qemu, VIA);
+      let viaVersion: string;
+      let expected: Record<string, string>;
 
-    it(
-      'reports changes conservatively after the agent reconnects',
-      async () => {
-        // A new connection means that the copy could have changed in the meantime.
-        await killAgent();
-        await writeFile(join(destination2(), 'run.bat'), 'changed, and longer than it was before');
-        await startDaemon();
-        await waitFor(
-          async () => (await vmState('Via Browser'))?.content_status === 'modified',
-          'the change to be noticed',
-          20_000,
-        );
-      },
-      LONG,
-    );
+      beforeAll(async () => {
+        const root = await qemuVm(VIA, 8);
+        expected = await fingerprint(root);
+        viaVersion = (await register(VIA, 'qemu', 'transfer')).versionId;
+      }, LONG);
 
-    const destination2 = () => join(qemu, 'Via Browser');
+      it(
+        'restores through the web interface, with progress and the result on screen',
+        async () => {
+          const adminContext = await browser.newContext();
+          const page = await adminContext.newPage();
+          await signIn(page);
+          await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VIA)}`));
+          // The master's restore, in its own section. The version history offers one per version too.
+          const copies = page.getByRole('region', { name: 'Master and local copies' });
+          await copies.getByRole('button', { name: 'Restore…' }).click();
+          const dialog = page.getByRole('dialog', { name: 'Restore Via Browser' });
+          await dialog.waitFor();
+          await dialog.getByText(join(qemu, 'Via Browser')).waitFor();
+          await shot(page, '7-restore-dialog');
+          await dialog
+            .getByText('creates a local copy of the immutable version', { exact: false })
+            .waitFor();
+          // With no snapshot yet, the version it restores is the master.
+          await dialog.getByText(viaVersion, { exact: true }).waitFor();
+          await dialog.getByRole('button', { name: 'Restore' }).click();
+          await dialog.waitFor({ state: 'detached' });
+          const card = page.getByRole('article', { name: /Restore on/ });
+          await card.getByText('Restored', { exact: true }).waitFor({ timeout: 120_000 });
+          await card.getByText(join(qemu, 'Via Browser')).waitFor();
+          await card.getByText(/files were verified by the agent/).waitFor();
+          await card.getByText(/The VM was not started/).waitFor();
+          await shot(page, '8-restored');
+          await adminContext.close();
+          expect(await fingerprint(destination2())).toEqual(expected);
+        },
+        LONG,
+      );
+
+      it(
+        'reports changes conservatively after the agent reconnects',
+        async () => {
+          // This needs a verified local copy. The browser restore above makes one; when it did not, a
+          // restore through the API does, so that this test reports on reconnection and nothing else.
+          if ((await vmState(VIA))?.execution_state !== 'idle') {
+            const done = await restoreFinished((await restore(VIA, viaVersion)).id);
+            expect(done.state, JSON.stringify(done)).toBe('succeeded');
+          }
+          expect(await fingerprint(destination2())).toEqual(expected);
+          expect(await vmState(VIA)).toMatchObject({ content_status: 'verified' });
+
+          // A new connection means that the copy could have changed in the meantime.
+          await killAgent();
+          await writeFile(
+            join(destination2(), 'run.bat'),
+            'changed, and longer than it was before',
+          );
+          await startDaemon();
+          await waitFor(
+            async () => (await vmState(VIA))?.content_status === 'modified',
+            'the change to be noticed',
+            20_000,
+          );
+        },
+        LONG,
+      );
+    });
 
     it('sends screenshots through the API, and never through the repository', () => {
       const files = docker('exec', container, 'sh', '-c', 'cd /srv/sftp/repo && find . -type f');

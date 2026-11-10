@@ -16,6 +16,7 @@ import { join, resolve } from 'node:path';
 import {
   discoveryOperationSchema,
   discoveryStateResponseSchema,
+  isRegistrationTerminal,
   pairingRequestReviewSchema,
   registrationOperationSchema,
   repositoryListResponseSchema,
@@ -323,14 +324,33 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     what: string,
     timeoutMs = 120_000,
   ): Promise<RegistrationOperation> {
-    return waitFor(
-      async () => {
-        const operation = await read(operationId);
-        return check(operation) ? operation : null;
-      },
-      what,
-      timeoutMs,
-    );
+    // What was seen, so that a wait that cannot succeed any more says what happened instead.
+    const seen: string[] = [];
+    const label = (operation: RegistrationOperation) =>
+      `${operation.state}${operation.progress.doneBytes === null ? '' : ` ${operation.progress.doneBytes}/${operation.progress.totalBytes}`}`;
+    try {
+      return await waitFor(
+        async () => {
+          const operation = await read(operationId);
+          const now = label(operation);
+          if (seen.at(-1) !== now) seen.push(now);
+          if (check(operation)) return operation;
+          if (isRegistrationTerminal(operation.state)) {
+            throw new Error(
+              `The operation ended before ${what}: ${JSON.stringify(operation.error)}. Seen: ${seen.join(' → ')}`,
+            );
+          }
+          return null;
+        },
+        what,
+        timeoutMs,
+      );
+    } catch (error) {
+      if ((error as Error).message.startsWith('Timed out')) {
+        throw new Error(`${(error as Error).message}. Seen: ${seen.join(' → ')}`, { cause: error });
+      }
+      throw error;
+    }
   }
 
   const finished = (operationId: string) =>

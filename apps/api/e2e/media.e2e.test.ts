@@ -827,7 +827,6 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
       const root = await qemuVm('Server Away');
       await writeFile(join(root, 'shot.ppm'), ppm(64, 48, 1, 2, 3));
       const operation = await register('Server Away', 'qemu', 'transfer');
-      // As soon as the commit has happened, before the agent can prove anything.
       await waitFor(
         async () => {
           const current = await read(operation.id);
@@ -836,8 +835,24 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
         'the commit',
         120_000,
       );
-      // The file needs a full second to count as finished, so nothing can have been proved yet.
       expect((await read(operation.id)).state).toBe('cleaning_local');
+      // The server commits before it acknowledges. Only once the agent has the acknowledgement, which
+      // its journal records before it reads the archive back, is this the moment of proof; stopping
+      // the server earlier would lose the acknowledgement and test a reconnection instead.
+      const journal = join(directory, 'state', 'registrations', `${operation.id}.journal`);
+      await waitFor(
+        async () => {
+          try {
+            return JSON.parse(await readFile(journal, 'utf8')).phase === 'cleaning';
+          } catch {
+            // Not there yet, or being replaced.
+            return false;
+          }
+        },
+        'the agent to accept the commit',
+        30_000,
+      );
+      // Nothing can have been proved yet: proof takes a read-back and a further round of the wait.
       await stopServer();
       // Longer than the agent is configured to wait.
       await new Promise((done) => setTimeout(done, 12_000));

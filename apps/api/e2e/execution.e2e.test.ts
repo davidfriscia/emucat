@@ -11,9 +11,9 @@
  * Remote HTTPS is deliberately not exercised: the agent talks to this API over loopback HTTP.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -24,11 +24,14 @@ import {
   pairingRequestReviewSchema,
   registrationOperationSchema,
   repositorySummarySchema,
+  versionTreeResponseSchema,
   vmSessionSchema,
   vmVerificationSchema,
+  vmWorkspaceSchema,
   type RegistrationOperation,
   type VmSession,
   type VmVerification,
+  type VmWorkspace,
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
 import { chromium, type Browser, type Page } from 'playwright-core';
@@ -73,6 +76,24 @@ function fingerprintOf(path: string): string {
   return execFileSync('ssh-keygen', ['-lf', `${path}.pub`], { encoding: 'utf8' }).split(
     ' ',
   )[1] as string;
+}
+
+/** Every file under a directory and its hash, plus the directories, which is what "the same VM" means. */
+async function fingerprint(root: string, prefix = ''): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const relative = `${prefix}${entry.name}`;
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      result[`${relative}/`] = 'directory';
+      Object.assign(result, await fingerprint(path, `${relative}/`));
+    } else {
+      result[relative] = createHash('sha256')
+        .update(await readFile(path))
+        .digest('hex');
+    }
+  }
+  return result;
 }
 
 /** A 486 with no disks, which stops at the BIOS. The machine and its ROMs are 86Box's own. */
@@ -144,8 +165,35 @@ describe('running and verifying VMs, end to end', () => {
   /** Online, and it has said what it can launch. */
   async function startDaemon(): Promise<void> {
     daemon = startAgent('run');
-    await waitFor(isOnline, 'the agent to be online', 30_000);
+    await untilOnline();
     await new Promise((done) => setTimeout(done, 1_000));
+  }
+
+  /** Waits for the agent's connection, and says what the agent printed when it does not come. */
+  async function untilOnline(timeoutMs = 30_000): Promise<void> {
+    try {
+      await waitFor(isOnline, 'the agent to be online', timeoutMs);
+    } catch (error) {
+      const tail = daemon?.output().split('\n').slice(-20).join('\n') ?? '(never started)';
+      const exit = daemon?.child.exitCode ?? daemon?.child.signalCode ?? 'still running';
+      throw new Error(`${(error as Error).message}. Agent process: ${exit}. Its output:\n${tail}`, {
+        cause: error,
+      });
+    }
+  }
+
+  /**
+   * Each group of tests starts from a connected agent, whatever the group before it did: a test that
+   * stopped the agent and then failed must not leave the next group without one.
+   */
+  async function ensureAgentOnline(): Promise<void> {
+    if (await isOnline()) return;
+    if (daemon && daemon.child.exitCode === null && daemon.child.signalCode === null) {
+      // Running, and perhaps still reconnecting.
+      await untilOnline();
+    } else {
+      await startDaemon();
+    }
   }
 
   async function killAgent(): Promise<void> {
@@ -205,13 +253,28 @@ describe('running and verifying VMs, end to end', () => {
     return done as RegistrationOperation;
   }
 
-  async function launch(vmName: string, emulatorType = 'qemu', mode = 'local') {
+  async function launch(
+    vmName: string,
+    emulatorType = 'qemu',
+    mode = 'local',
+    workspaceId?: string,
+  ) {
     return admin.request({
       method: 'POST',
       url: '/admin/sessions',
-      payload: { agentId, emulatorType, vmName, mode, requestId: randomUUID() },
+      payload: {
+        agentId,
+        emulatorType,
+        vmName,
+        mode,
+        requestId: randomUUID(),
+        ...(workspaceId ? { workspaceId } : {}),
+      },
     });
   }
+
+  const errorCode = (response: { json: <T>() => T }) =>
+    response.json<{ error: { code: string } }>().error.code;
 
   async function readSession(id: string): Promise<VmSession> {
     return vmSessionSchema.parse((await admin.get(`/admin/sessions/${id}`)).json());
@@ -248,6 +311,7 @@ describe('running and verifying VMs, end to end', () => {
   }
 
   const webUrl = (path: string) => `http://127.0.0.1:${webPort}${path}`;
+  const stateDirectory = () => join(directory, 'state');
 
   async function signIn(page: Page): Promise<void> {
     await page.goto(webUrl('/login'));
@@ -459,6 +523,16 @@ describe('running and verifying VMs, end to end', () => {
     const VM = 'E2E QEMU';
     let root: string;
     let session: VmSession;
+    let launched = false;
+
+    /**
+     * The tests after the browser launch act on the session it started: they are one scenario by design.
+     * When that launch did not happen, each says so, rather than failing on an undefined session.
+     */
+    function requireLaunched(): void {
+      if (!launched)
+        throw new Error('No QEMU session: the browser launch earlier in this file failed');
+    }
 
     beforeAll(async () => {
       root = join(qemu, VM);
@@ -470,29 +544,48 @@ describe('running and verifying VMs, end to end', () => {
       );
       await writeFile(join(root, 'disk.qcow2'), randomBytes(256 * 1024));
       await writeFile(join(root, 'nested', 'notes.txt'), 'original\n');
+      await ensureAgentOnline();
       await register(VM, 'qemu');
     }, LONG);
 
-    it('offers local execution only, and says why each remote mode is not available', async () => {
+    it('offers local and Remote Snapshot execution, and says why Remote Volatile is not available', async () => {
       const result = await options(VM);
       expect(result.modes.map((mode) => [mode.mode, mode.available])).toEqual([
         ['local', true],
         ['remote_volatile', false],
-        ['remote_snapshot', false],
+        ['remote_snapshot', true],
       ]);
+      expect(result.modes[0]?.reason).toBeNull();
+      expect(result.modes[1]?.reason).toMatch(/remote display/);
+      // Available, but only through a working copy prepared from the version history.
+      expect(result.modes[2]?.reason).toMatch(/working copy/);
       expect(result.agents[0]).toMatchObject({
         agentId,
         launch: { eligible: true },
         verify: { eligible: true },
         local: { present: true, contentStatus: 'verified' },
       });
-      for (const mode of ['remote_volatile', 'remote_snapshot']) {
-        const refused = await launch(VM, 'qemu', mode);
-        expect(refused.statusCode).toBe(409);
-        expect(refused.json<{ error: { code: string } }>().error.code).toBe(
-          'execution_mode_unavailable',
-        );
-      }
+
+      // Each refusal is a refusal: nothing is launched, locally or otherwise.
+      const volatile = await launch(VM, 'qemu', 'remote_volatile');
+      expect(volatile.statusCode, volatile.body).toBe(409);
+      expect(errorCode(volatile)).toBe('execution_mode_unavailable');
+      // Remote Snapshot names its working copy; without one it is invalid, never a local launch.
+      const unnamed = await launch(VM, 'qemu', 'remote_snapshot');
+      expect(unnamed.statusCode, unnamed.body).toBe(400);
+      expect(errorCode(unnamed)).toBe('validation_failed');
+      // This agent can run the mode, so what is refused is a working copy that does not exist.
+      const unknown = await launch(VM, 'qemu', 'remote_snapshot', randomUUID());
+      expect(unknown.statusCode, unknown.body).toBe(404);
+      expect(errorCode(unknown)).toBe('workspace_not_found');
+      // A local session runs the persistent copy, and cannot be pointed at a working copy.
+      const local = await launch(VM, 'qemu', 'local', randomUUID());
+      expect(local.statusCode, local.body).toBe(400);
+      expect(errorCode(local)).toBe('validation_failed');
+      const list = (await admin.get(`/admin/sessions?vmName=${encodeURIComponent(VM)}`)).json<{
+        sessions: VmSession[];
+      }>().sessions;
+      expect(list, 'no refused request started a session').toEqual([]);
     });
 
     it(
@@ -532,11 +625,21 @@ describe('running and verifying VMs, end to end', () => {
         await signIn(page);
         await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
         const section = page.getByRole('region', { name: 'Run and verify' });
-        await expect
-          .poll(() =>
-            section.getByRole('radio', { name: 'Remote snapshot (not available)' }).isDisabled(),
-          )
-          .toBe(true);
+        const localMode = section.getByRole('radio', { name: 'Local', exact: true });
+        await localMode.waitFor();
+        expect(await localMode.isChecked()).toBe(true);
+        // Remote Volatile cannot be chosen at all, and Remote Snapshot only from the version history,
+        // since it runs a working copy that has to be prepared first.
+        expect(
+          await section
+            .getByRole('radio', { name: 'Remote volatile (not available)' })
+            .isDisabled(),
+        ).toBe(true);
+        expect(
+          await section
+            .getByRole('radio', { name: 'Remote snapshot (from the version history)' })
+            .isDisabled(),
+        ).toBe(true);
         await section.getByRole('button', { name: 'Launch' }).click();
         await section.getByText('Running', { exact: true }).first().waitFor({ timeout: 60_000 });
         await shot(page, 'execution-qemu-running');
@@ -551,6 +654,7 @@ describe('running and verifying VMs, end to end', () => {
           gracefulStopAvailable: true,
         });
         expect(session.pid).toBeGreaterThan(0);
+        launched = true;
 
         await page.goto(webUrl('/admin/catalog'));
         await page
@@ -564,6 +668,7 @@ describe('running and verifying VMs, end to end', () => {
     );
 
     it('refuses a second launch, a verification and a restore while it runs', async () => {
+      requireLaunched();
       const again = await launch(VM);
       expect(again.json<{ error: { code: string } }>().error.code).toBe('session_active');
       const verification = await admin.request({
@@ -583,6 +688,7 @@ describe('running and verifying VMs, end to end', () => {
     it(
       'asks for a graceful stop, which a guest without an OS ignores until it times out',
       async () => {
+        requireLaunched();
         const response = await admin.request({
           method: 'POST',
           url: `/admin/sessions/${session.id}/stop`,
@@ -605,17 +711,21 @@ describe('running and verifying VMs, end to end', () => {
     it(
       'keeps the VM protected while the agent is away, and finds the same process after a restart',
       async () => {
+        requireLaunched();
         await killAgent();
-        const away = await readSession(session.id);
-        expect(away).toMatchObject({ state: 'running', agentOnline: false });
-        const verification = await admin.request({
-          method: 'POST',
-          url: '/admin/verifications',
-          payload: { agentId, emulatorType: 'qemu', vmName: VM },
-        });
-        expect(verification.statusCode).toBe(409);
-
-        await startDaemon();
+        try {
+          const away = await readSession(session.id);
+          expect(away).toMatchObject({ state: 'running', agentOnline: false });
+          const verification = await admin.request({
+            method: 'POST',
+            url: '/admin/verifications',
+            payload: { agentId, emulatorType: 'qemu', vmName: VM },
+          });
+          expect(verification.statusCode).toBe(409);
+        } finally {
+          // Whatever was found while it was away, the rest of the file needs the agent back.
+          await startDaemon();
+        }
         const found = await waitFor(
           async () => {
             const current = await readSession(session.id);
@@ -639,6 +749,7 @@ describe('running and verifying VMs, end to end', () => {
     it(
       'forces a stop from the browser only after the VM’s name is typed',
       async () => {
+        requireLaunched();
         const page = await (await browser.newContext()).newPage();
         await signIn(page);
         await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
@@ -665,6 +776,317 @@ describe('running and verifying VMs, end to end', () => {
     );
   });
 
+  /**
+   * Milestone 7 with nothing simulated: a snapshot of the verified local copy, a working copy of the
+   * older master beside it, real QEMU in that working copy, an agent restart while it runs, a stop that
+   * publishes nothing, a preservation that branches from the master, and a discard.
+   */
+  describe.skipIf(!HAVE_QEMU)('snapshots and Remote Snapshot', () => {
+    const VM = 'E2E Snapshot';
+    let root: string;
+    let masterId: string;
+    let snapshotId: string;
+    let workspace: VmWorkspace;
+    let session: VmSession | undefined;
+    /** The persistent copy as it is once the snapshot is taken. Nothing after that may change it. */
+    let persistent: Record<string, string>;
+
+    const workspaceUrl = (suffix = '') => `/admin/workspaces/${workspace.id}${suffix}`;
+    const readWorkspace = async () =>
+      vmWorkspaceSchema.parse((await admin.get(workspaceUrl())).json());
+    const tree = async () =>
+      versionTreeResponseSchema.parse(
+        (await admin.get(`/admin/vms/qemu/${encodeURIComponent(VM)}/versions`)).json(),
+      );
+    const finishedOperation = (id: string) =>
+      waitFor(
+        async () => {
+          const operation = registrationOperationSchema.parse(
+            (await admin.get(`/admin/registrations/${id}`)).json(),
+          );
+          return ['succeeded', 'failed', 'cancelled', 'partial_success'].includes(operation.state)
+            ? operation
+            : null;
+        },
+        'the snapshot to finish',
+        120_000,
+      );
+    const repositoryArchives = () =>
+      docker('exec', container, 'sh', '-c', 'cd /srv/sftp/repo && find archives -type f | sort')
+        .split('\n')
+        .filter(Boolean);
+    function requireSession(): VmSession {
+      if (!session)
+        throw new Error('No working-copy session: the launch earlier in this group failed');
+      return session;
+    }
+
+    beforeAll(async () => {
+      root = join(qemu, VM);
+      await mkdir(join(root, 'nested'), { recursive: true });
+      await writeFile(
+        join(root, 'run.bat'),
+        '@echo off\r\nqemu-system-i386 -m 16 -nodefaults -display none\r\n',
+      );
+      await writeFile(join(root, 'disk.qcow2'), randomBytes(128 * 1024));
+      await writeFile(join(root, 'nested', 'notes.txt'), 'master\n');
+      await ensureAgentOnline();
+      masterId = (await register(VM, 'qemu')).versionId;
+    }, LONG);
+
+    it(
+      'snapshots the verified local copy as a child of its master',
+      async () => {
+        expect((await verify(VM)).status).toBe('verified');
+        await writeFile(join(root, 'nested', 'notes.txt'), 'snapshot\n');
+        const response = await admin.request({
+          method: 'POST',
+          url: `/admin/vms/qemu/${encodeURIComponent(VM)}/snapshots`,
+          payload: { agentId, parentVersionId: masterId, requestId: randomUUID() },
+        });
+        expect(response.statusCode, response.body).toBe(202);
+        const done = await finishedOperation(registrationOperationSchema.parse(response.json()).id);
+        expect(done, JSON.stringify(done)).toMatchObject({
+          state: 'succeeded',
+          mode: 'snapshot',
+          parentVersionId: masterId,
+          localCopy: 'preserved',
+        });
+        snapshotId = done.versionId;
+        const versions = (await tree()).versions;
+        expect(versions.map((node) => [node.id, node.kind, node.parentVersionId])).toEqual([
+          [masterId, 'master', null],
+          [snapshotId, 'snapshot', masterId],
+        ]);
+        expect((await options(VM)).agents[0]?.local).toMatchObject({
+          sourceVersionId: snapshotId,
+          contentStatus: 'verified',
+        });
+        persistent = await fingerprint(root);
+      },
+      LONG,
+    );
+
+    it(
+      'prepares a working copy of the older master, beside the persistent copy',
+      async () => {
+        const response = await admin.request({
+          method: 'POST',
+          url: `/admin/vms/qemu/${encodeURIComponent(VM)}/workspaces`,
+          payload: { agentId, versionId: masterId, requestId: randomUUID(), launch: false },
+        });
+        expect(response.statusCode, response.body).toBe(202);
+        workspace = vmWorkspaceSchema.parse(response.json());
+        workspace = await waitFor(
+          async () => {
+            const current = await readWorkspace();
+            return current.state === 'preparing' ? null : current;
+          },
+          'the working copy to be prepared',
+          120_000,
+        );
+        expect(workspace, JSON.stringify(workspace)).toMatchObject({
+          state: 'ready',
+          baseVersionId: masterId,
+          sourceVersionId: masterId,
+          mayHaveChanges: false,
+        });
+        const directory = workspace.localDirectory as string;
+        expect(directory).toBe(join(stateDirectory(), 'workspaces', workspace.id, VM));
+        // The master's content, not the persistent copy's.
+        expect(await readFile(join(directory, 'nested', 'notes.txt'), 'utf8')).toBe('master\n');
+        expect(await fingerprint(root)).toEqual(persistent);
+      },
+      LONG,
+    );
+
+    it(
+      'runs real QEMU from the working copy, never from the persistent copy',
+      async () => {
+        const response = await admin.request({
+          method: 'POST',
+          url: workspaceUrl('/launch'),
+          payload: { requestId: randomUUID() },
+        });
+        expect(response.statusCode, response.body).toBe(202);
+        const requested = vmSessionSchema.parse(response.json());
+        started.add(requested.id);
+        const live = await sessionIn(requested.id, ['running', 'failed', 'exited'], 60_000);
+        expect(live, JSON.stringify(live)).toMatchObject({
+          state: 'running',
+          mode: 'remote_snapshot',
+          workspaceId: workspace.id,
+          versionId: masterId,
+        });
+        expect(live.pid).toBeGreaterThan(0);
+        session = live;
+        expect((await readWorkspace()).mayHaveChanges).toBe(true);
+        expect(await fingerprint(root)).toEqual(persistent);
+        // A working copy's session is the VM's session on this agent, for every purpose.
+        const local = await launch(VM);
+        expect(errorCode(local)).toBe('session_active');
+      },
+      LONG,
+    );
+
+    it('refuses to discard or snapshot while the working copy runs', async () => {
+      requireSession();
+      const discard = await admin.request({
+        method: 'POST',
+        url: workspaceUrl('/discard'),
+        payload: { confirmVmName: VM },
+      });
+      expect(discard.statusCode, discard.body).toBe(409);
+      expect(errorCode(discard)).toBe('vm_running');
+      const preserve = await admin.request({
+        method: 'POST',
+        url: workspaceUrl('/snapshot'),
+        payload: { requestId: randomUUID() },
+      });
+      expect(preserve.statusCode, preserve.body).toBe(409);
+      expect((await readWorkspace()).state).toBe('ready');
+    });
+
+    it(
+      'keeps the working copy and its session through an agent restart, refusing a discard meanwhile',
+      async () => {
+        const running = requireSession();
+        await killAgent();
+        try {
+          expect(await readSession(running.id)).toMatchObject({
+            state: 'running',
+            agentOnline: false,
+          });
+          // Whether it still runs cannot be known while the agent is away, so nothing is removed.
+          const discard = await admin.request({
+            method: 'POST',
+            url: workspaceUrl('/discard'),
+            payload: { confirmVmName: VM },
+          });
+          expect(discard.statusCode, discard.body).toBe(409);
+          expect(errorCode(discard)).toBe('vm_running');
+        } finally {
+          await startDaemon();
+        }
+        const found = await waitFor(
+          async () => {
+            const current = await readSession(running.id);
+            return current.agentOnline && current.error?.code === 'graceful_stop_unavailable'
+              ? current
+              : null;
+          },
+          'the agent to find QEMU again',
+          30_000,
+        );
+        expect(found).toMatchObject({
+          state: 'running',
+          pid: running.pid,
+          workspaceId: workspace.id,
+        });
+        expect(await readWorkspace()).toMatchObject({ state: 'ready', mayHaveChanges: true });
+        expect(existsSync(workspace.localDirectory as string)).toBe(true);
+      },
+      LONG,
+    );
+
+    it(
+      'stops without publishing anything, and asks for the name before discarding changes',
+      async () => {
+        const running = requireSession();
+        const archivesBefore = repositoryArchives();
+        const versionsBefore = (await tree()).versions.length;
+        const response = await admin.request({
+          method: 'POST',
+          url: `/admin/sessions/${running.id}/stop`,
+          payload: { force: true, confirmVmName: VM },
+        });
+        expect(response.statusCode, response.body).toBe(202);
+        expect((await sessionIn(running.id, ['stopped'], 30_000)).forceRequested).toBe(true);
+        expect(repositoryArchives(), 'a stop uploads nothing').toEqual(archivesBefore);
+        expect((await tree()).versions).toHaveLength(versionsBefore);
+        expect(await readWorkspace()).toMatchObject({ state: 'ready', mayHaveChanges: true });
+
+        const unconfirmed = await admin.request({
+          method: 'POST',
+          url: workspaceUrl('/discard'),
+          payload: {},
+        });
+        expect(unconfirmed.statusCode, unconfirmed.body).toBe(400);
+        expect(errorCode(unconfirmed)).toBe('confirmation_required');
+        expect(existsSync(workspace.localDirectory as string)).toBe(true);
+      },
+      LONG,
+    );
+
+    it(
+      'preserves the working copy as a new snapshot, branching from the master',
+      async () => {
+        requireSession();
+        // What the guest would have written.
+        await writeFile(
+          join(workspace.localDirectory as string, 'nested', 'notes.txt'),
+          'working copy\n',
+        );
+        const response = await admin.request({
+          method: 'POST',
+          url: workspaceUrl('/snapshot'),
+          payload: { requestId: randomUUID() },
+        });
+        expect(response.statusCode, response.body).toBe(202);
+        const done = await finishedOperation(registrationOperationSchema.parse(response.json()).id);
+        expect(done, JSON.stringify(done)).toMatchObject({
+          state: 'succeeded',
+          mode: 'snapshot',
+          parentVersionId: masterId,
+        });
+        const branch = done.versionId;
+        const versions = (await tree()).versions;
+        expect(versions.find((node) => node.id === masterId)?.childVersionIds.sort()).toEqual(
+          [snapshotId, branch].sort(),
+        );
+        expect(versions.find((node) => node.id === branch)?.parentVersionId).toBe(masterId);
+        expect(await readWorkspace()).toMatchObject({
+          state: 'ready',
+          sourceVersionId: branch,
+          mayHaveChanges: false,
+        });
+        // The persistent copy still comes from the first snapshot, untouched.
+        expect(await fingerprint(root)).toEqual(persistent);
+        expect((await options(VM)).agents[0]?.local.sourceVersionId).toBe(snapshotId);
+      },
+      LONG,
+    );
+
+    it(
+      'discards the stopped working copy, and leaves the persistent copy verified',
+      async () => {
+        requireSession();
+        const directory = workspace.localDirectory as string;
+        // Everything is preserved, so no confirmation is needed.
+        const response = await admin.request({
+          method: 'POST',
+          url: workspaceUrl('/discard'),
+          payload: {},
+        });
+        expect(response.statusCode, response.body).toBe(200);
+        const discarded = await waitFor(
+          async () => {
+            const current = await readWorkspace();
+            return current.state === 'discarded' ? current : null;
+          },
+          'the working copy to be discarded',
+          30_000,
+        );
+        expect(discarded.error).toBeNull();
+        expect(existsSync(directory)).toBe(false);
+        expect(existsSync(join(stateDirectory(), 'workspaces', workspace.id))).toBe(false);
+        expect(await fingerprint(root)).toEqual(persistent);
+        expect((await verify(VM)).status).toBe('verified');
+      },
+      LONG,
+    );
+  });
+
   describe.skipIf(!HAVE_86BOX)('86Box', () => {
     const VM = 'E2E 86Box';
 
@@ -672,6 +1094,7 @@ describe('running and verifying VMs, end to end', () => {
       const root = join(box86, VM);
       await mkdir(root, { recursive: true });
       await writeFile(join(root, '86box.cfg'), BOX86_CONFIG);
+      await ensureAgentOnline();
       await register(VM, '86box');
     }, LONG);
 
