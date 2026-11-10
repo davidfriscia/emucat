@@ -328,7 +328,13 @@ describe('upgrading a populated database to 0009', () => {
     const before = new Map<string, unknown[]>();
     for (const [table, order] of tables) before.set(table, await snapshotOf(table, order));
 
-    const result = await migrate(scratch.options);
+    // Up to 0009 only: later migrations have upgrade tests of their own.
+    for (const migration of (await loadMigrations()).filter((item) =>
+      item.version.startsWith('0009'),
+    )) {
+      await writeFile(join(directory, `${migration.version}.sql`), migration.sql);
+    }
+    const result = await migrate(scratch.options, directory);
     expect(result.applied).toEqual(['0009_snapshots']);
 
     for (const [table, order] of tables) {
@@ -362,6 +368,6 @@ describe('upgrading a populated database to 0009', () => {
       ),
     ).resolves.toBeDefined();
     // It applies once.
-    await expect(migrate(scratch.options)).resolves.toMatchObject({ applied: [] });
+    await expect(migrate(scratch.options, directory)).resolves.toMatchObject({ applied: [] });
   });
 });

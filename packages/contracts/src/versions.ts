@@ -213,11 +213,28 @@ export const SNAPSHOT_INELIGIBLE_TEXT: Record<SnapshotIneligibleReason, string> 
   operation_in_progress: 'This agent, or this VM, is busy with another operation.',
 };
 
-// Remote Snapshot working copies.
+// Working copies, and the remote sessions that run them (decisions 0038 and 0040).
+
+/**
+ * What a working copy is for. `manual` is a Milestone 7 working copy, prepared, preserved and discarded by
+ * hand, and never advanced automatically. The others are remote sessions: a temporary copy of a chosen
+ * version that the server prepares, launches, publishes (Remote Snapshot) and removes on its own.
+ */
+export const WORKSPACE_PURPOSES = ['manual', 'remote_volatile', 'remote_snapshot'] as const;
+export const workspacePurposeSchema = z.enum(WORKSPACE_PURPOSES);
+export type WorkspacePurpose = z.infer<typeof workspacePurposeSchema>;
+
+export const REMOTE_SESSION_MODES = ['remote_volatile', 'remote_snapshot'] as const;
+export const remoteSessionModeSchema = z.enum(REMOTE_SESSION_MODES);
+export type RemoteSessionMode = z.infer<typeof remoteSessionModeSchema>;
 
 export const WORKSPACE_STATES = [
   'preparing',
   'ready',
+  'running',
+  'held',
+  'publishing',
+  'publish_failed',
   'discarding',
   'discarded',
   'failed',
@@ -229,6 +246,10 @@ export type WorkspaceState = z.infer<typeof workspaceStateSchema>;
 export const WORKSPACE_ACTIVE_STATES: readonly WorkspaceState[] = [
   'preparing',
   'ready',
+  'running',
+  'held',
+  'publishing',
+  'publish_failed',
   'discarding',
 ];
 
@@ -243,8 +264,9 @@ export const vmWorkspaceSchema = z.object({
   agentOnline: z.boolean(),
   emulatorType: emulatorTypeSchema,
   vmName: z.string(),
+  purpose: workspacePurposeSchema,
   state: workspaceStateSchema,
-  /** What was first restored into it. */
+  /** The version chosen at launch, and restored into it. A Remote Snapshot's parent is exactly this one. */
   baseVersionId: z.uuid(),
   /** What it is a copy of now: a preservation moves this to the new snapshot. */
   sourceVersionId: z.uuid(),
@@ -252,6 +274,17 @@ export const vmWorkspaceSchema = z.object({
   mayHaveChanges: z.boolean(),
   launchOnReady: z.boolean(),
   restoreOperationId: z.uuid().nullable(),
+  /** The session that ran it. Remote sessions only. */
+  sessionId: z.uuid().nullable(),
+  /** The current publication attempt of a Remote Snapshot, and how many there have been. */
+  snapshotOperationId: z.uuid().nullable(),
+  publishAttempts: z.number().int().nonnegative(),
+  /** When the server will retry an automatic step by itself, if it will. */
+  nextRetryAt: timestampSchema.nullable(),
+  /** An administrator gave up the uncommitted snapshot. */
+  abandonedAt: timestampSchema.nullable(),
+  /** The version a committed Remote Snapshot created. */
+  snapshotVersionId: z.uuid().nullable(),
   localDirectory: z.string().nullable(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
   requestedByDisplayName: z.string().nullable(),
@@ -264,14 +297,36 @@ export type VmWorkspace = z.infer<typeof vmWorkspaceSchema>;
 export const workspaceListResponseSchema = z.object({ workspaces: z.array(vmWorkspaceSchema) });
 export type WorkspaceListResponse = z.infer<typeof workspaceListResponseSchema>;
 
-/** Prepares a working copy of any version on an agent, and launches it when it is ready if asked. */
+/**
+ * Starts a remote session: a temporary copy of exactly this version on this agent, launched as soon as it
+ * is ready, then removed (Remote Volatile) or published as a child snapshot of this version and removed
+ * (Remote Snapshot). A repeated request ID finds the same session.
+ */
 export const createWorkspaceRequestSchema = z.strictObject({
   agentId: z.uuid(),
   versionId: z.uuid(),
   requestId: z.uuid(),
-  launch: z.boolean(),
+  mode: remoteSessionModeSchema,
 });
 export type CreateWorkspaceRequest = z.infer<typeof createWorkspaceRequestSchema>;
+
+/** Retries a failed Remote Snapshot publication. Nothing is published twice. */
+export const retryPublicationRequestSchema = z.strictObject({});
+export type RetryPublicationRequest = z.infer<typeof retryPublicationRequestSchema>;
+
+/**
+ * Lets a held remote session go on: the administrator has checked that its emulator no longer runs. The
+ * VM's name is typed again, because what follows publishes or removes its files.
+ */
+export const resumeWorkspaceRequestSchema = z.strictObject({
+  confirmVmName: z.string().min(1).max(255),
+});
+export type ResumeWorkspaceRequest = z.infer<typeof resumeWorkspaceRequestSchema>;
+
+/** Why a remote session is still active, for the interface. */
+export function isWorkspaceAutomatic(purpose: WorkspacePurpose): boolean {
+  return purpose !== 'manual';
+}
 
 export const launchWorkspaceRequestSchema = z.strictObject({ requestId: z.uuid() });
 export type LaunchWorkspaceRequest = z.infer<typeof launchWorkspaceRequestSchema>;

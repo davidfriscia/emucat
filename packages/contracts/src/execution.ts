@@ -9,23 +9,27 @@ import { vmNameSchema } from './vm-name.js';
  */
 
 /**
- * Where a session runs, and what happens to its changes. `local` runs the agent's persistent copy.
- * `remote_snapshot` runs a working copy of a chosen version, whose changes become a snapshot only when an
- * administrator asks (decision 0038). `remote_volatile` is not implemented. A mode that cannot run is
- * refused, never quietly replaced by another.
+ * Where a session runs, and what happens to its changes. `local` runs the agent's persistent copy, and
+ * keeps its changes there. Both remote modes run a temporary copy of a chosen remote version, isolated from
+ * the persistent copy: `remote_volatile` throws every change away when the emulator ends, and
+ * `remote_snapshot` publishes the result as a new snapshot of that version, then removes the copy
+ * (decision 0040). A mode that cannot run is refused, never quietly replaced by another.
  */
 export const EXECUTION_MODES = ['local', 'remote_volatile', 'remote_snapshot'] as const;
 export const executionModeSchema = z.enum(EXECUTION_MODES);
 export type ExecutionMode = z.infer<typeof executionModeSchema>;
 
 /** The modes this version implements. A newer agent may say more in its capabilities. */
-export const IMPLEMENTED_EXECUTION_MODES: readonly ExecutionMode[] = ['local', 'remote_snapshot'];
+export const IMPLEMENTED_EXECUTION_MODES: readonly ExecutionMode[] = [
+  'local',
+  'remote_volatile',
+  'remote_snapshot',
+];
 
+/** Why an agent cannot run a remote mode, when it does not say that it can. */
 export const EXECUTION_MODE_UNAVAILABLE_REASONS: Record<Exclude<ExecutionMode, 'local'>, string> = {
-  remote_volatile:
-    'Remote volatile sessions need a remote display and a disposable working copy, which this version does not provide.',
-  remote_snapshot:
-    'Remote Snapshot runs a working copy of a version. Start it from the version history, which prepares the working copy first.',
+  remote_volatile: 'This agent cannot run Remote Volatile sessions. Update it.',
+  remote_snapshot: 'This agent cannot run Remote Snapshot sessions. Update it.',
 };
 
 const safeSizeSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -45,7 +49,7 @@ export const vmLaunchPayloadSchema = z.strictObject({
   mode: executionModeSchema,
   /** The version the local copy is believed to come from, for the record only. */
   versionId: z.uuid().nullable(),
-  /** For `remote_snapshot` only: the working copy to run. The agent finds its directory itself. */
+  /** For the remote modes only: the working copy to run. The agent finds its directory itself. */
   workspaceId: z.uuid().optional(),
 });
 export type VmLaunchPayload = z.infer<typeof vmLaunchPayloadSchema>;
@@ -224,6 +228,7 @@ export const EXECUTION_ERROR_CODES = [
   'vm_already_running',
   'vm_busy',
   'workspace_unavailable',
+  'workspace_purpose_mismatch',
   'state_unwritable',
   // Stopping.
   'graceful_stop_unavailable',
@@ -257,10 +262,10 @@ const EXECUTION_RECOVERY: Partial<Record<string, string>> = {
   launch_failed: 'The operating system refused to start the emulator. Check the agent’s log.',
   launch_exited_early:
     'The emulator exited at once. Start it by hand on that computer to see why, for example a missing ROM.',
-  execution_mode_unavailable:
-    'This agent cannot run this mode. Remote Snapshot needs an up-to-date agent; Remote Volatile is not available in this version.',
-  workspace_unavailable:
-    'The working copy is not on the agent. Prepare a new one from the version history.',
+  execution_mode_unavailable: 'This agent cannot run this mode. Update it.',
+  workspace_unavailable: 'The temporary copy is not on the agent. Start a new remote session.',
+  workspace_purpose_mismatch:
+    'This temporary copy was prepared for another mode, and the agent refused to run it differently.',
   vm_already_running: 'The VM is already running on that agent.',
   vm_busy: 'A registration, restore or verification of this VM is in progress. Wait for it to end.',
   state_unwritable: 'Check the agent’s state directory, and try again.',
@@ -314,16 +319,16 @@ export const launchRequestSchema = z
     mode: executionModeSchema,
     /** Chosen by the browser, so that a repeated click or a retried request starts one session. */
     requestId: z.uuid(),
-    /** A ready Remote Snapshot working copy. Required for `remote_snapshot`, refused otherwise. */
+    /**
+     * A working copy. Remote modes run one, and only they do: the browser starts a remote session, which
+     * prepares one, rather than naming one here. See decision 0040.
+     */
     workspaceId: z.uuid().optional(),
   })
-  .refine(
-    (request) => (request.mode === 'remote_snapshot') === (request.workspaceId !== undefined),
-    {
-      message: 'A Remote Snapshot session runs a working copy, and only it names one',
-      path: ['workspaceId'],
-    },
-  );
+  .refine((request) => (request.mode !== 'local') === (request.workspaceId !== undefined), {
+    message: 'A remote session runs a working copy, and only it names one',
+    path: ['workspaceId'],
+  });
 export type LaunchRequest = z.infer<typeof launchRequestSchema>;
 
 /** A forced stop must repeat the VM's name, as typed by the administrator. */
@@ -359,7 +364,7 @@ export const vmSessionSchema = z.object({
   mode: executionModeSchema,
   state: vmSessionStateSchema,
   versionId: z.uuid().nullable(),
-  /** The working copy a `remote_snapshot` session runs. */
+  /** The working copy a remote session runs. */
   workspaceId: z.uuid().nullable(),
   pid: z.number().int().nullable(),
   processStartedAt: timestampSchema.nullable(),
@@ -434,6 +439,31 @@ export const LAUNCH_INELIGIBLE_REASONS = [
 ] as const;
 export type LaunchIneligibleReason = (typeof LAUNCH_INELIGIBLE_REASONS)[number];
 
+/** Why an agent cannot start a remote session of a VM now. */
+export const REMOTE_INELIGIBLE_REASONS = [
+  'agent_revoked',
+  'agent_offline',
+  'agent_cannot_launch',
+  'emulator_not_launchable',
+  'mode_not_supported',
+  'agent_cannot_restore',
+  'emulator_not_configured',
+  'repository_not_authorized',
+  'repository_not_configured',
+  'no_versions',
+  'session_active',
+  'remote_session_pending',
+  'operation_in_progress',
+] as const;
+export type RemoteIneligibleReason = (typeof REMOTE_INELIGIBLE_REASONS)[number];
+
+const remoteEligibilitySchema = z.object({
+  eligible: z.boolean(),
+  reason: z.enum(REMOTE_INELIGIBLE_REASONS).nullable(),
+  /** What the agent said about its executable, when it cannot launch. */
+  problem: z.string().nullable(),
+});
+
 export const VERIFY_INELIGIBLE_REASONS = [
   'agent_revoked',
   'agent_offline',
@@ -459,6 +489,13 @@ export const executionAgentOptionSchema = z.object({
     eligible: z.boolean(),
     reason: z.enum(VERIFY_INELIGIBLE_REASONS).nullable(),
   }),
+  /** Whether this agent can start each remote mode for this VM now, and why not. */
+  remote: z.object({
+    remote_volatile: remoteEligibilitySchema,
+    remote_snapshot: remoteEligibilitySchema,
+  }),
+  /** The remote session or working copy of this VM still active on this agent, if any. */
+  activeWorkspaceId: z.uuid().nullable(),
   local: z.object({
     present: z.boolean(),
     contentStatus: z.enum(['unverified', 'verified', 'modified']).nullable(),

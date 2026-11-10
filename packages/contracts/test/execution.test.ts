@@ -82,10 +82,30 @@ describe('sessions', () => {
     }
   });
 
-  it('implements local and Remote Snapshot execution, and says why Remote Volatile is unavailable', () => {
-    expect(IMPLEMENTED_EXECUTION_MODES).toEqual(['local', 'remote_snapshot']);
-    expect(EXECUTION_MODE_UNAVAILABLE_REASONS.remote_volatile).toMatch(/remote/);
-    expect(EXECUTION_MODE_UNAVAILABLE_REASONS.remote_snapshot).toMatch(/working copy/);
+  it('implements all three modes, and says why an agent that cannot run a remote one is refused', () => {
+    expect(IMPLEMENTED_EXECUTION_MODES).toEqual(['local', 'remote_volatile', 'remote_snapshot']);
+    expect(EXECUTION_MODE_UNAVAILABLE_REASONS.remote_volatile).toMatch(/Remote Volatile/);
+    expect(EXECUTION_MODE_UNAVAILABLE_REASONS.remote_snapshot).toMatch(/Remote Snapshot/);
+  });
+
+  it('runs a remote mode only on a working copy, and the local mode never on one', () => {
+    const base = {
+      agentId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f60',
+      emulatorType: 'qemu',
+      vmName: 'Win98',
+      requestId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f61',
+    };
+    const workspaceId = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f62';
+    expect(launchRequestSchema.safeParse({ ...base, mode: 'local' }).success).toBe(true);
+    expect(launchRequestSchema.safeParse({ ...base, mode: 'local', workspaceId }).success).toBe(
+      false,
+    );
+    for (const mode of ['remote_volatile', 'remote_snapshot']) {
+      expect(launchRequestSchema.safeParse({ ...base, mode }).success, mode).toBe(false);
+      expect(launchRequestSchema.safeParse({ ...base, mode, workspaceId }).success, mode).toBe(
+        true,
+      );
+    }
   });
 
   it('has recovery advice for each code an administrator can act on', () => {

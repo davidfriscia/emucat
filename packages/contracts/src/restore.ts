@@ -60,6 +60,12 @@ export const RESTORE_ERROR_CODES = [
   'restore_emulator_not_configured',
   'restore_insufficient_space',
   'restore_staging_failed',
+  // Replacing a persistent copy. The current copy was kept.
+  'local_copy_modified',
+  'local_copy_unverified',
+  'local_copy_changed',
+  'local_copy_missing',
+  'restore_replacement_failed',
   // From the repository.
   'repository_not_configured',
   'repository_unreachable',
@@ -104,6 +110,15 @@ const RECOVERY: Partial<Record<string, string>> = {
   restore_insufficient_space:
     'Free up space on the staging or destination disk, or lower the cache’s size limit, and try again.',
   restore_staging_failed: 'Check the agent’s staging directory, and try again.',
+  local_copy_modified:
+    'The local copy differs from the version it was restored from, so it was kept. Snapshot it first, or confirm that its changes may be discarded.',
+  local_copy_unverified:
+    'The agent cannot prove which version the local copy comes from, so its changes cannot be ruled out. It was kept. Verify it, or confirm that its changes may be discarded.',
+  local_copy_changed:
+    'The local copy is no longer the one the page showed. It was kept. Reload, and try again.',
+  local_copy_missing: 'There is no local copy to replace any more. Reload, and restore normally.',
+  restore_replacement_failed:
+    'The new version could not be put in place, and the previous local copy was put back unchanged. Check the agent’s log, and try again.',
   repository_not_configured:
     'Add this repository’s UUID to the agent’s configuration, and restart the agent.',
   repository_unreachable: 'Check that the SSH server is running and reachable, and try again.',
@@ -170,6 +185,22 @@ export const restoreRequestPayloadSchema = z.strictObject({
    * than under the emulator's base path. The persistent local copy is never touched. See decision 0038.
    */
   workspaceId: z.uuid().optional(),
+  /**
+   * What the working copy is for, recorded with it so that the agent can refuse to run or snapshot it in
+   * another way. Absent for Milestone 7 working copies, which are `manual`. See decision 0040.
+   */
+  workspacePurpose: z.enum(['remote_volatile', 'remote_snapshot']).optional(),
+  /**
+   * Replace the persistent local copy, which must exist. The agent checks that it is the copy of
+   * `expectedVersionId` and, unless `discardLocalChanges`, that it is unchanged, before anything else;
+   * the old copy is kept until the new one is in place. Never combined with `workspaceId`.
+   */
+  replace: z
+    .strictObject({
+      expectedVersionId: z.uuid().nullable(),
+      discardLocalChanges: z.boolean(),
+    })
+    .optional(),
 });
 export type RestoreRequestPayload = z.infer<typeof restoreRequestPayloadSchema>;
 
@@ -207,6 +238,8 @@ export const restoreSyncPayloadSchema = z.object({
     repositoryIds: z.array(z.uuid()).max(64),
     cacheMaxBytes: safeSizeSchema,
     cacheUsedBytes: safeSizeSchema,
+    /** Whether the agent can replace a persistent copy safely (decision 0040). Older agents do not say. */
+    replaceLocal: z.boolean().optional(),
   }),
   localCopies: z
     .array(
@@ -218,7 +251,7 @@ export const restoreSyncPayloadSchema = z.object({
       }),
     )
     .max(RESTORE_LOCAL_COPIES_MAX),
-  /** The Remote Snapshot working copies this agent holds. Older agents do not say. */
+  /** The working copies this agent holds, for any purpose. Older agents do not say. */
   workspaces: z.array(z.uuid()).max(256).optional(),
 });
 export type RestoreSyncPayload = z.infer<typeof restoreSyncPayloadSchema>;
@@ -271,12 +304,26 @@ export type RestoreErrorPayload = z.infer<typeof restoreErrorPayloadSchema>;
 
 // What an administrator asks for, and sees.
 
+/**
+ * Replacing an existing persistent copy: always explicit. `expectedVersionId` is the version the page
+ * showed as installed, so that a stale page cannot replace a copy it did not show. The VM's name is typed
+ * again, as for every destructive action.
+ */
+export const restoreReplaceSchema = z.strictObject({
+  expectedVersionId: z.uuid().nullable(),
+  discardLocalChanges: z.boolean(),
+  confirmVmName: z.string().min(1).max(255),
+});
+export type RestoreReplace = z.infer<typeof restoreReplaceSchema>;
+
 /** It can name a VM, one of its versions and an agent. It can never say where anything goes. */
 export const createRestoreRequestSchema = z.strictObject({
   agentId: z.uuid(),
   emulatorType: emulatorTypeSchema,
   vmName: vmNameSchema,
   versionId: z.uuid(),
+  /** Required when the agent already holds a persistent copy, refused when it does not. */
+  replace: restoreReplaceSchema.optional(),
 });
 export type CreateRestoreRequest = z.infer<typeof createRestoreRequestSchema>;
 
@@ -292,6 +339,13 @@ export const restoreOperationSchema = z.object({
   versionId: z.uuid(),
   /** Set when this restore prepares a Remote Snapshot working copy. */
   workspaceId: z.uuid().nullable(),
+  /** Whether this restore replaced an existing persistent copy, and which version that copy was. */
+  replacement: z
+    .object({
+      replacedVersionId: z.uuid().nullable(),
+      discardLocalChanges: z.boolean(),
+    })
+    .nullable(),
   state: restoreStateSchema,
   archive: z.object({ sizeBytes: safeSizeSchema, sha256: sha256HexSchema }),
   progress: z.object({
@@ -343,6 +397,8 @@ export const RESTORE_INELIGIBLE_REASONS = [
   'repository_not_authorized',
   'repository_not_configured',
   'local_copy_exists',
+  /** Replacing needs a persistent copy to replace. */
+  'no_local_copy',
   'vm_running',
   'operation_in_progress',
 ] as const;
@@ -364,6 +420,14 @@ export const restoreAgentOptionSchema = z.object({
     contentStatus: z.enum(['unverified', 'verified', 'modified']).nullable(),
     sourceVersionId: z.uuid().nullable(),
     lastVerifiedAt: timestampSchema.nullable(),
+  }),
+  /**
+   * Whether the persistent copy can be replaced now, when there is one. Replacing needs the same as a
+   * restore, and a VM that is not running.
+   */
+  replace: z.object({
+    eligible: z.boolean(),
+    reason: z.enum(RESTORE_INELIGIBLE_REASONS).nullable(),
   }),
   cacheUsedBytes: safeSizeSchema.nullable(),
   cacheMaxBytes: safeSizeSchema.nullable(),

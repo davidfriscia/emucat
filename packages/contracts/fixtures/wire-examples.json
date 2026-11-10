@@ -479,6 +479,28 @@
         "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6200",
         "outcome": "rejected"
       }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6212",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.restore_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6213",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6202",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201.zip",
+        "archiveSizeBytes": 2048,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expectedUncompressedBytes": 4096,
+        "replace": {
+          "expectedVersionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6203",
+          "discardLocalChanges": false
+        }
+      }
     }
   ],
   "restoreAgentMessages": [
@@ -503,7 +525,8 @@
           ],
           "repositoryIds": ["018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6202"],
           "cacheMaxBytes": 1000,
-          "cacheUsedBytes": 10
+          "cacheUsedBytes": 10,
+          "replaceLocal": true
         },
         "localCopies": [
           {
@@ -634,6 +657,29 @@
         "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6200",
         "outcome": "closed",
         "removeLocal": true
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6239",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.restore_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6213",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6202",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6201.zip",
+        "archiveSizeBytes": 2048,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expectedUncompressedBytes": 4096,
+        "replace": {
+          "expectedVersionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6203",
+          "discardLocalChanges": false,
+          "path": "C:\\Windows"
+        }
       }
     }
   ],
@@ -991,6 +1037,40 @@
         "workspaceId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6404",
         "emulatorType": "qemu",
         "vmName": "Win98"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6415",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.restore_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6400",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6402",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6403",
+        "archiveKey": "archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6403.zip",
+        "archiveSizeBytes": 2048,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expectedUncompressedBytes": 4096,
+        "workspaceId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6404",
+        "workspacePurpose": "remote_volatile"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6416",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6417",
+        "emulatorType": "qemu",
+        "vmName": "Win98",
+        "mode": "remote_volatile",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6403",
+        "workspaceId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6404"
       }
     }
   ],

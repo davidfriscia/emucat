@@ -95,6 +95,7 @@ export const REGISTRATION_ERROR_CODES = [
   'snapshot_parent_unknown',
   'snapshot_lineage_unverified',
   'workspace_unavailable',
+  'workspace_purpose_mismatch',
   // From local cleanup, after the master exists.
   'cleanup_identity_mismatch',
   'cleanup_content_changed',
@@ -157,7 +158,9 @@ const RECOVERY: Partial<Record<string, string>> = {
   snapshot_lineage_unverified:
     'Nothing proves which version this directory came from: its record predates Milestone 7, or the directory was replaced. Nothing was published. If it is unchanged, verify the local copy, which records its lineage, and try again. Otherwise restore the version you want to change, or use Remote Snapshot.',
   workspace_unavailable:
-    'The working copy is not on the agent any more. Prepare a new one from the version you want.',
+    'The temporary copy is not on the agent any more. Start a new remote session from the version you want.',
+  workspace_purpose_mismatch:
+    'This temporary copy belongs to a Remote Volatile session, whose changes are never published.',
   cleanup_identity_mismatch:
     'The master is registered and safe. The directory is no longer the one that was archived, so it was kept. Decide what to do with it yourself.',
   cleanup_content_changed:

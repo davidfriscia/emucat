@@ -11,6 +11,7 @@ export * from './media.js';
 export * from './operations.js';
 export * from './protocol.js';
 export * from './registration.js';
+export * from './remote-sessions.js';
 export * from './restore.js';
 export * from './snapshot-name.js';
 export * from './version.js';
