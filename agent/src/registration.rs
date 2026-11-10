@@ -35,7 +35,7 @@ use crate::protocol::{
     RegistrationFailure, RegistrationMode, RegistrationPhase, RegistrationProgress,
     RegistrationRequest, RegistrationResult, RegistrationRetryCleanup, RegistrationStage,
     RegistrationSync, RegistrationSyncEntry, RepositoryConfigSummary, RepositoryHealthRequest,
-    RepositoryHealthResult,
+    RepositoryHealthResult, WorkspaceDiscard, WorkspaceDiscardResult,
 };
 use crate::removal::{
     RemovalRefusal, RemovalRequest, blocking_media, hash_excluded_files, quarantine_path,
@@ -152,6 +152,8 @@ struct Inner {
     stopping: CancelFlag,
     /// Whether an emulator is running a VM. Nothing reads a VM for an archive, or removes it, then.
     activity: OnceLock<ActivityProbe>,
+    /// VMs whose working copy is being removed. Nothing may launch, archive or restore them meanwhile.
+    discarding: Mutex<std::collections::HashSet<VmIdentity>>,
 }
 
 pub struct AgentOperations {
@@ -228,6 +230,7 @@ impl AgentOperations {
             running,
             stopping,
             activity: OnceLock::new(),
+            discarding: Mutex::default(),
         });
 
         // Each side asks the other, so neither can start on a VM the other is using. Weak references, so
@@ -259,6 +262,7 @@ impl AgentOperations {
         execution.set_busy_probe(disk_work);
 
         inner.recover_interrupted();
+        crate::workspaces::recover(&inner.config.state_dir);
         Ok(Arc::new(Self {
             inner,
             restores,
@@ -286,6 +290,7 @@ impl AgentOperations {
         };
         let mut messages = vec![Message::AgentRegistrationSync(RegistrationSync {
             operations,
+            snapshots: true,
         })];
         messages.push(self.restores.sync_message());
         messages.push(
@@ -350,8 +355,109 @@ impl AgentOperations {
             message @ (Message::ServerVmLaunch(_)
             | Message::ServerVmStop(_)
             | Message::ServerVmExecutionAck(_)) => self.execution.handle(message),
+            Message::ServerWorkspaceDiscard(discard) => self.discard_workspace(discard),
             _ => {}
         }
+    }
+
+    /// Removes a working copy the server asked about, unless anything runs or works on its VM here. The
+    /// check is per VM, as every other one is, so a session of the persistent copy also keeps it. The
+    /// answer is sent once; the next `agent.restore_sync` lists what is still held, which recovers a lost
+    /// request or answer.
+    fn discard_workspace(&self, discard: WorkspaceDiscard) {
+        let vm = VmIdentity {
+            emulator_type: discard.emulator_type,
+            vm_name: discard.vm_name.clone(),
+        };
+        let refusal = self
+            .execution
+            .activity(&vm)
+            .map(|reason| ("vm_running", reason))
+            .or_else(|| {
+                self.inner
+                    .working_on(&vm)
+                    .or_else(|| self.restores.working_on(&vm))
+                    .map(|reason| ("operation_in_progress", reason))
+            });
+        let workspace_id = discard.workspace_id;
+        if let Some((code, reason)) = refusal {
+            tracing::warn!(%workspace_id, code, "Refused to discard a working copy");
+            self.inner.send(Message::AgentWorkspaceDiscardResult(
+                WorkspaceDiscardResult {
+                    workspace_id,
+                    removed: false,
+                    code: Some(code.to_owned()),
+                    message: Some(bounded(&format!("{reason}. The working copy was kept"))),
+                },
+            ));
+            return;
+        }
+        // Claimed before anything is removed: a registration, snapshot or restore now finds the agent busy,
+        // and a launch of this VM finds it being worked on, until the removal has finished either way.
+        {
+            let mut running = self.inner.running.lock().expect("poisoned");
+            if !running.is_empty() {
+                drop(running);
+                self.inner.send(Message::AgentWorkspaceDiscardResult(
+                    WorkspaceDiscardResult {
+                        workspace_id,
+                        removed: false,
+                        code: Some("agent_busy".to_owned()),
+                        message: Some("The agent is busy with another operation".to_owned()),
+                    },
+                ));
+                return;
+            }
+            running.insert(workspace_id, CancelFlag::new());
+            self.inner
+                .discarding
+                .lock()
+                .expect("poisoned")
+                .insert(vm.clone());
+        }
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let state_dir = inner.config.state_dir.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::workspaces::discard(
+                    &state_dir,
+                    workspace_id,
+                    discard.emulator_type,
+                    &discard.vm_name,
+                )
+            })
+            .await;
+            let result = match outcome {
+                Ok(Ok(())) => {
+                    tracing::info!(%workspace_id, "Working copy discarded");
+                    WorkspaceDiscardResult {
+                        workspace_id,
+                        removed: true,
+                        code: None,
+                        message: None,
+                    }
+                }
+                Ok(Err(error)) => WorkspaceDiscardResult {
+                    workspace_id,
+                    removed: false,
+                    code: Some(error.code.to_owned()),
+                    message: Some(bounded(&error.message)),
+                },
+                Err(_) => WorkspaceDiscardResult {
+                    workspace_id,
+                    removed: false,
+                    code: Some("internal_error".to_owned()),
+                    message: None,
+                },
+            };
+            inner.discarding.lock().expect("poisoned").remove(&vm);
+            inner
+                .running
+                .lock()
+                .expect("poisoned")
+                .remove(&workspace_id);
+            inner.send(Message::AgentWorkspaceDiscardResult(result));
+        });
     }
 
     /// A verification that failed validation is answered as a failed one, so that it does not hang.
@@ -589,6 +695,12 @@ impl Inner {
 
     /// Why `vm` must not be launched now, if this module is working on it.
     fn working_on(&self, vm: &VmIdentity) -> Option<String> {
+        if self.discarding.lock().expect("poisoned").contains(vm) {
+            return Some(format!(
+                "A working copy of {} is being discarded",
+                vm.vm_name
+            ));
+        }
         let running = self.running.lock().expect("poisoned");
         let journals = self.journals.lock().expect("poisoned");
         running.keys().find_map(|operation_id| {
@@ -759,6 +871,10 @@ impl Inner {
                     format!("{} is not configured on this agent", request.emulator_type),
                 )
             })?;
+        let base_path = match request.workspace_id {
+            Some(workspace_id) => self.snapshot_workspace_base(&request, workspace_id)?,
+            None => base_path,
+        };
         let repository = self.config.repositories.open(request.repository_id)?;
 
         let root = {
@@ -775,6 +891,11 @@ impl Inner {
                 format!("Cannot identify the directory: {error}"),
             )
         })?;
+        // A snapshot's parent is a claim about where these files came from. It is accepted only for the
+        // very directory that lineage was recorded for.
+        if request.mode == RegistrationMode::Snapshot && request.workspace_id.is_none() {
+            self.check_snapshot_lineage(&request, directory)?;
+        }
         // With synchronization, screenshots are dealt with after the commit, since an unregistered VM
         // cannot upload anything. Without it, nothing could prove them safe, so this stops here.
         if request.mode == RegistrationMode::Transfer && self.config.media.is_none() {
@@ -835,6 +956,15 @@ impl Inner {
             })
             .await??
         };
+        // The lineage was proven for one directory, so the archive must be of that one, still.
+        if request.mode == RegistrationMode::Snapshot
+            && directory_identity(&root).ok() != Some(directory)
+        {
+            return Err(failure(
+                "source_changed",
+                "The directory was replaced while it was archived",
+            ));
+        }
         write_manifest(&self.manifest_path(operation_id), &built.manifest).map_err(|error| {
             failure(
                 "staging_failed",
@@ -966,6 +1096,85 @@ impl Inner {
         tracing::info!(%operation_id, size = built.size_bytes, sha256 = %built.sha256, "Archive published");
         self.send(Message::AgentRegistrationResult(result));
         Ok(())
+    }
+
+    /// A snapshot of a working copy reads it where this agent put it, and only if it is still the copy of
+    /// the version named as the parent.
+    fn snapshot_workspace_base(
+        &self,
+        request: &RegistrationRequest,
+        workspace_id: Uuid,
+    ) -> Result<PathBuf, JobFailure> {
+        let state_dir = &self.config.state_dir;
+        if crate::workspaces::existing_vm_root(
+            state_dir,
+            workspace_id,
+            request.emulator_type,
+            &request.vm_name,
+        )
+        .is_none()
+        {
+            return Err(failure(
+                "workspace_unavailable",
+                "This working copy is not on this agent",
+            ));
+        }
+        let record = crate::workspaces::read_record(state_dir, workspace_id)
+            .ok_or_else(|| failure("workspace_unavailable", "This working copy has no record"))?;
+        if Some(record.source_version_id) != request.parent_version_id {
+            return Err(failure(
+                "snapshot_parent_mismatch",
+                "The working copy is not a copy of the version named as the parent",
+            ));
+        }
+        Ok(crate::workspaces::workspace_base(state_dir, workspace_id))
+    }
+
+    /// The parent the server names must be the version this agent recorded the local copy as coming from,
+    /// and the record must have been made for this very directory: a restore that published it, a copy or
+    /// snapshot that read it, or a verification that found it identical to that version. Nothing else is
+    /// evidence. A copy with no such record, such as one recorded before Milestone 7 or one whose directory
+    /// was replaced, is refused rather than attributed to whatever the server believes. Verifying it, if
+    /// it is unchanged, records its lineage. See decision 0037.
+    fn check_snapshot_lineage(
+        &self,
+        request: &RegistrationRequest,
+        directory: DirectoryIdentity,
+    ) -> Result<(), JobFailure> {
+        use crate::state::LineageProblem;
+        let Some(parent) = request.parent_version_id else {
+            return Err(failure("invalid_request", "A snapshot names its parent"));
+        };
+        let unverified = |message: &str| {
+            failure(
+                "snapshot_lineage_unverified",
+                format!(
+                    "{message}. Verify the local copy, or restore the version you want to change"
+                ),
+            )
+        };
+        match crate::state::proven_lineage(
+            &self.config.state_dir,
+            request.emulator_type,
+            &request.vm_name,
+            directory,
+            parent,
+        ) {
+            Ok(()) => Ok(()),
+            Err(LineageProblem::OtherVersion(_)) => Err(failure(
+                "snapshot_parent_mismatch",
+                "This agent recorded its local copy as coming from another version",
+            )),
+            Err(LineageProblem::Unrecorded) => Err(unverified(
+                "This agent has no record of which version its local copy came from",
+            )),
+            Err(LineageProblem::NoDirectoryRecorded) => Err(unverified(
+                "This agent's record of where the local copy came from predates lineage checks",
+            )),
+            Err(LineageProblem::DirectoryReplaced) => Err(unverified(
+                "The directory is not the one this agent's lineage record was made for: it was replaced",
+            )),
+        }
     }
 
     async fn upload_and_verify(
@@ -1258,7 +1467,34 @@ impl Inner {
 
     fn keep_local(&self, journal: &Journal) -> RegistrationCleanup {
         let request = &journal.request;
-        if request.mode == RegistrationMode::Copy
+        // A working copy is now a copy of the new snapshot. The persistent copy is not this one's business.
+        if let Some(workspace_id) = request.workspace_id {
+            if let Err(error) = crate::workspaces::record_source(
+                &self.config.state_dir,
+                workspace_id,
+                request.version_id,
+                journal
+                    .result
+                    .as_ref()
+                    .map(|result| result.manifest_sha256.as_str()),
+            ) {
+                tracing::warn!(%error, %workspace_id, "Cannot record the working copy's new source");
+            }
+            return RegistrationCleanup {
+                operation_id: request.operation_id,
+                version_id: request.version_id,
+                local_copy: LocalCopyStatus::Preserved,
+                code: None,
+                message: None,
+            };
+        }
+        // A snapshot means the same as a copy for the directory it read: it is a verified copy of the
+        // version just published.
+        let keeps = matches!(
+            request.mode,
+            RegistrationMode::Copy | RegistrationMode::Snapshot
+        );
+        if keeps
             && let Err(error) = record_local_source(
                 &self.config.state_dir,
                 self.config.agent_id,
@@ -1269,16 +1505,16 @@ impl Inner {
                     .result
                     .as_ref()
                     .map(|result| result.manifest_sha256.as_str()),
+                // The directory that was archived, as recorded before reading it.
+                journal.identity,
             )
         {
             // Registration succeeded. Local bookkeeping can be rebuilt by a later verification.
             tracing::warn!(%error, "Cannot record the local source version");
         }
-        // The kept copy is now a copy of this master, so its manifest lets a verification run without
+        // The kept copy is now a copy of this version, so its manifest lets a verification run without
         // downloading anything. Only the manifest that was archived is kept.
-        if request.mode == RegistrationMode::Copy
-            && let Some(result) = &journal.result
-        {
+        if keeps && let Some(result) = &journal.result {
             let manifest = fs::read(self.manifest_path(request.operation_id))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())

@@ -213,6 +213,14 @@ An administrator restores a registered master from the VM's page, by choosing an
 **After a restart,** a restore in progress is reported as failed and cleaned up, and it is safe to try again. One stopped exactly at the rename is recognized by checking the directory itself: if it is the one that was assembled, it was published. Anything the agent cannot identify is left alone and reported. See decisions [0021](decisions/0021-restore-lifecycle.md),
 [0022](decisions/0022-safe-zip-extraction.md), [0023](decisions/0023-atomic-local-publication.md) and [0024](decisions/0024-local-archive-cache.md).
 
+**Any version** can be restored, the master or a snapshot. The restored copy then counts as a copy of that version, and a snapshot made from it is that version's child.
+
+## Snapshots and working copies
+
+A snapshot archives this agent's copy of a registered VM as a new version, exactly as a copy registration does, and never removes anything. The agent refuses one whose parent contradicts what it recorded about the copy (`snapshot_parent_mismatch`). It also refuses, with `snapshot_lineage_unverified`, a copy whose lineage it cannot prove for this very directory: no record, a record from before Milestone 7, or a directory that replaced the one the record was made for. Verifying an unchanged copy records its lineage, after which it can be snapshotted.
+
+Remote Snapshot working copies are kept in `workspaces` under the state directory, one directory per working copy with the VM inside it and a small `.workspace.json` record beside it. Nothing else reads or writes there; discovery never sees it, since the state directory is refused inside any base path. A working copy is removed only when the server asks, and only if nothing runs or works on the VM: it is renamed to `.removing-{id}` first, and a removal a crash interrupted finishes on the next start. Delete one by hand only while the agent is stopped. See [the launcher guide](launcher.md#snapshots-and-remote-snapshot).
+
 ## Running and verifying VMs
 
 An administrator can launch a VM the agent holds, stop it, and verify its copy against the master, from the VM's page. The agent builds every command line itself, never runs a batch file, tracks the emulator by its PID and creation time, and refuses to restore, remove or verify a VM while it may be running. Everything is in [the launcher guide](launcher.md).

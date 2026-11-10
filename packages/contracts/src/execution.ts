@@ -9,21 +9,23 @@ import { vmNameSchema } from './vm-name.js';
  */
 
 /**
- * Where a session runs, and what happens to its changes. Only `local` exists in this version: a remote
- * mode is refused, never quietly replaced by a local launch.
+ * Where a session runs, and what happens to its changes. `local` runs the agent's persistent copy.
+ * `remote_snapshot` runs a working copy of a chosen version, whose changes become a snapshot only when an
+ * administrator asks (decision 0038). `remote_volatile` is not implemented. A mode that cannot run is
+ * refused, never quietly replaced by another.
  */
 export const EXECUTION_MODES = ['local', 'remote_volatile', 'remote_snapshot'] as const;
 export const executionModeSchema = z.enum(EXECUTION_MODES);
 export type ExecutionMode = z.infer<typeof executionModeSchema>;
 
 /** The modes this version implements. A newer agent may say more in its capabilities. */
-export const IMPLEMENTED_EXECUTION_MODES: readonly ExecutionMode[] = ['local'];
+export const IMPLEMENTED_EXECUTION_MODES: readonly ExecutionMode[] = ['local', 'remote_snapshot'];
 
 export const EXECUTION_MODE_UNAVAILABLE_REASONS: Record<Exclude<ExecutionMode, 'local'>, string> = {
   remote_volatile:
     'Remote volatile sessions need a remote display and a disposable working copy, which this version does not provide.',
   remote_snapshot:
-    'Remote snapshot sessions need snapshot publication, which is planned for Milestone 7.',
+    'Remote Snapshot runs a working copy of a version. Start it from the version history, which prepares the working copy first.',
 };
 
 const safeSizeSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -43,6 +45,8 @@ export const vmLaunchPayloadSchema = z.strictObject({
   mode: executionModeSchema,
   /** The version the local copy is believed to come from, for the record only. */
   versionId: z.uuid().nullable(),
+  /** For `remote_snapshot` only: the working copy to run. The agent finds its directory itself. */
+  workspaceId: z.uuid().optional(),
 });
 export type VmLaunchPayload = z.infer<typeof vmLaunchPayloadSchema>;
 
@@ -219,6 +223,7 @@ export const EXECUTION_ERROR_CODES = [
   'execution_mode_unavailable',
   'vm_already_running',
   'vm_busy',
+  'workspace_unavailable',
   'state_unwritable',
   // Stopping.
   'graceful_stop_unavailable',
@@ -253,7 +258,9 @@ const EXECUTION_RECOVERY: Partial<Record<string, string>> = {
   launch_exited_early:
     'The emulator exited at once. Start it by hand on that computer to see why, for example a missing ROM.',
   execution_mode_unavailable:
-    'Use local execution. Remote modes are not available in this version.',
+    'This agent cannot run this mode. Remote Snapshot needs an up-to-date agent; Remote Volatile is not available in this version.',
+  workspace_unavailable:
+    'The working copy is not on the agent. Prepare a new one from the version history.',
   vm_already_running: 'The VM is already running on that agent.',
   vm_busy: 'A registration, restore or verification of this VM is in progress. Wait for it to end.',
   state_unwritable: 'Check the agent’s state directory, and try again.',
@@ -299,14 +306,24 @@ export function verifyRecovery(code: string): string | null {
   return VERIFY_RECOVERY[code] ?? null;
 }
 
-export const launchRequestSchema = z.strictObject({
-  agentId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
-  vmName: vmNameSchema,
-  mode: executionModeSchema,
-  /** Chosen by the browser, so that a repeated click or a retried request starts one session. */
-  requestId: z.uuid(),
-});
+export const launchRequestSchema = z
+  .strictObject({
+    agentId: z.uuid(),
+    emulatorType: emulatorTypeSchema,
+    vmName: vmNameSchema,
+    mode: executionModeSchema,
+    /** Chosen by the browser, so that a repeated click or a retried request starts one session. */
+    requestId: z.uuid(),
+    /** A ready Remote Snapshot working copy. Required for `remote_snapshot`, refused otherwise. */
+    workspaceId: z.uuid().optional(),
+  })
+  .refine(
+    (request) => (request.mode === 'remote_snapshot') === (request.workspaceId !== undefined),
+    {
+      message: 'A Remote Snapshot session runs a working copy, and only it names one',
+      path: ['workspaceId'],
+    },
+  );
 export type LaunchRequest = z.infer<typeof launchRequestSchema>;
 
 /** A forced stop must repeat the VM's name, as typed by the administrator. */
@@ -342,6 +359,8 @@ export const vmSessionSchema = z.object({
   mode: executionModeSchema,
   state: vmSessionStateSchema,
   versionId: z.uuid().nullable(),
+  /** The working copy a `remote_snapshot` session runs. */
+  workspaceId: z.uuid().nullable(),
   pid: z.number().int().nullable(),
   processStartedAt: timestampSchema.nullable(),
   requestedAt: timestampSchema,

@@ -138,6 +138,7 @@ fn launch(emulator: EmulatorType, name: &str) -> VmLaunchRequest {
         vm_name: VmName::new(name).unwrap(),
         mode: ExecutionMode::Local,
         version_id: None,
+        workspace_id: None,
     }
 }
 
@@ -451,6 +452,20 @@ async fn refuses_duplicates_unsafe_launchers_and_remote_modes() {
             .await;
         assert_eq!(refused.code.as_deref(), Some("execution_mode_unavailable"));
     }
+
+    // A Remote Snapshot session runs a working copy, and never the persistent copy instead.
+    let no_working_copy = VmLaunchRequest {
+        mode: ExecutionMode::RemoteSnapshot,
+        workspace_id: Some(Uuid::new_v4()),
+        ..launch(EmulatorType::Box86, "dos")
+    };
+    agent
+        .manager
+        .handle(Message::ServerVmLaunch(no_working_copy.clone()));
+    let refused = agent
+        .wait_state(no_working_copy.session_id, AgentExecutionState::Failed)
+        .await;
+    assert_eq!(refused.code.as_deref(), Some("workspace_unavailable"));
 
     let missing = launch(EmulatorType::Box86, "nothing-here");
     agent

@@ -228,15 +228,15 @@ a transfer in `partial_success` with the code `transfer_blocked_media`, with the
 Administrators only, with the same-origin and CSRF rules as everything else here. None of these routes accepts or returns archive bytes, and none accepts a filesystem path. Shapes are in
 [`restore.ts`](../packages/contracts/src/restore.ts).
 
-| Method and path                                        | What it does                                                                                              |
-| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `GET /admin/vms/:emulatorType/:vmName/restore-options` | The master, and for each paired agent whether it is eligible, what it holds and where it would restore to |
-| `POST /admin/restores`                                 | Starts one: `{ agentId, emulatorType, vmName, versionId }`. 202, with the operation                       |
-| `GET /admin/restores`                                  | The latest 100. Filter with `agentId`, `emulatorType` and `vmName`                                        |
-| `GET /admin/restores/:operationId`                     | One operation                                                                                             |
-| `POST /admin/restores/:operationId/cancel`             | Cancels one, until publication has begun                                                                  |
+| Method and path                                        | What it does                                                                                                                |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `GET /admin/vms/:emulatorType/:vmName/restore-options` | The master and every version, and for each paired agent whether it is eligible, what it holds and where it would restore to |
+| `POST /admin/restores`                                 | Starts one: `{ agentId, emulatorType, vmName, versionId }`. 202, with the operation                                         |
+| `GET /admin/restores`                                  | The latest 100. Filter with `agentId`, `emulatorType` and `vmName`                                                          |
+| `GET /admin/restores/:operationId`                     | One operation                                                                                                               |
+| `POST /admin/restores/:operationId/cancel`             | Cancels one, until publication has begun                                                                                    |
 
-Starting one answers 404 with `agent_not_found` or `version_not_found`, and 409 with `version_not_master`, `repository_disabled`, `agent_revoked`, `agent_offline`, `agent_cannot_restore`, `emulator_not_configured`, `repository_not_authorized`,
+Any version can be restored, the master or a snapshot (Milestone 7). Starting one answers 404 with `agent_not_found` or `version_not_found`, and 409 with `repository_disabled`, `agent_revoked`, `agent_offline`, `agent_cannot_restore`, `emulator_not_configured`, `repository_not_authorized`,
 `repository_not_configured`, `local_copy_exists` or `operation_in_progress`. Cancelling answers 409 with `restore_too_late` or `restore_finished`.
 
 An operation's `error` has a `code`, from `RESTORE_ERROR_CODES`, and `recovery` says what can be done about it. `verified` says what the agent reports having verified, and the server has not read the archive.
@@ -262,6 +262,27 @@ Launching answers 409 with `execution_mode_unavailable`, `request_id_reused`, `a
 `session_active` or `operation_in_progress`. Restores also answer 409 with `vm_running` while a session of the VM is active.
 
 The administrators' catalog cards carry `activeSessions`, for a running badge. Nothing about sessions appears in a public response.
+
+`mode: "remote_snapshot"` needs `workspaceId`, a ready working copy, and is refused without one (400) or on an agent that does not run the mode (409 `execution_mode_unavailable`); it is never replaced by a local launch. Working copies are normally launched through the routes below.
+
+## Versions, snapshots and Remote Snapshot
+
+Administrators only, with the same-origin and CSRF rules as everything else here: nothing about versions appears in a public response, whatever the VM's visibility ([decision 0039](decisions/0039-version-history-is-administrative.md)). No route accepts a path, a repository or an archive key. Shapes are in [`versions.ts`](../packages/contracts/src/versions.ts); the lifecycles are in decisions [0037](decisions/0037-snapshots-as-registrations.md) and [0038](decisions/0038-remote-snapshot-working-copies.md).
+
+| Method and path                                    | What it does                                                                                                                                         |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /admin/vms/:emulatorType/:vmName/versions`    | The version tree: every version with its parent, children, name, creation time, archive size and hash, what the agent verified, and who holds a copy |
+| `POST /admin/vms/:emulatorType/:vmName/snapshots`  | Snapshots an agent's persistent copy: `{ agentId, parentVersionId, requestId }`. 202, with the registration operation (`mode: "snapshot"`)           |
+| `GET /admin/vms/:emulatorType/:vmName/workspaces`  | The VM's Remote Snapshot working copies, active ones first                                                                                           |
+| `POST /admin/vms/:emulatorType/:vmName/workspaces` | Prepares a working copy of any version: `{ agentId, versionId, requestId, launch }`. 202. With `launch`, it starts once restored                     |
+| `GET /admin/workspaces/:workspaceId`               | One working copy                                                                                                                                     |
+| `POST /admin/workspaces/:workspaceId/launch`       | Launches a ready working copy: `{ requestId }`. 202, with the session                                                                                |
+| `POST /admin/workspaces/:workspaceId/snapshot`     | Preserves it as a snapshot of its current source version: `{ requestId }`. 202, with the registration operation                                      |
+| `POST /admin/workspaces/:workspaceId/discard`      | Asks the agent to remove it: `{ confirmVmName }` is required when it may hold unpreserved changes                                                    |
+
+A snapshot's parent must be the version the agent's copy came from. Creating one answers 404 with `version_not_found` (also for a version of another VM), and 409 with `agent_offline`, `agent_cannot_snapshot`, `agent_revoked`, `local_copy_missing`, `local_copy_unsafe`, `snapshot_parent_unknown`, `snapshot_parent_mismatch`, `repository_disabled`, `repository_not_authorized`, `vm_running` (any active session, `unknown` included), `operation_in_progress` or `request_id_reused`. A repeated `requestId` returns the same operation. Its progress, cancellation and reconciliation are the registration routes'.
+
+Preparing a working copy answers 409 with `agent_offline`, `execution_mode_unavailable`, `workspace_exists` (one per VM and agent), or a restore's refusals. Preserving answers as creating a snapshot does, and 409 `workspace_unavailable` unless it is ready. Discarding answers 400 `confirmation_required`, and 409 with `vm_running` (any active session of the VM on that agent, `unknown` included), `operation_in_progress` (any operation on that agent) or `workspace_unavailable`. Snapshots also answer 409 `snapshot_lineage_unverified` for a copy discovery saw disappear and come back, until a verification proves what it is.
 
 ## Repositories
 

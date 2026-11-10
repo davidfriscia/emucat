@@ -3,15 +3,13 @@
 Self-hosted web catalog and local launcher for [86Box](https://86box.net/) and
 [QEMU](https://www.qemu.org/) virtual machines.
 
-**Status: Milestone 5 (restore, local cache and VM details).** There is a first-administrator
+**Status: Milestone 7 (immutable snapshots and the version tree).** There is a first-administrator
 setup, local sign-in with persistent sessions, a public catalog, and an administration area. A native agent pairs with
 the server, stays connected over an authenticated WebSocket, and reports the VMs it finds. An administrator can register
 one, with **Copy** or **Transfer**: the agent builds a standalone ZIP with a manifest, uploads it directly to an SSH/SFTP
 repository, verifies its SHA-256 there, and publishes it immutably, after which the server records one private master.
 Screenshots synchronize by themselves from registered VMs to the server, and are public exactly while their VM is: see [the media guide](docs/media.md).
-An administrator can **restore** a master onto an agent: it downloads the ZIP directly from the repository, verifies its SHA-256 and manifest, extracts it safely, and
-publishes the VM under the emulator's base path, never over an existing directory, keeping verified ZIPs in a local cache. Selecting a VM in the catalog opens its page, with a screenshot gallery that
-shows each viewer what they may see. Launching and snapshots are **not** implemented yet. See [known limitations](#known-limitations).
+An administrator can **restore** any version onto an agent, launch a VM, stop it, and verify a local copy. A **snapshot** archives an agent's copy again as a new immutable version whose parent is the version that copy came from, so history branches; the version tree is shown to administrators only. **Remote Snapshot** runs any version in a separate working copy, and keeps its changes as a snapshot only when asked. See [the launcher guide](docs/launcher.md#snapshots-and-remote-snapshot) and See [known limitations](#known-limitations).
 
 | Part                                       | Technology                                       |
 | ------------------------------------------ | ------------------------------------------------ |
@@ -167,13 +165,15 @@ No server has been installed from it yet.
 
 ## Known limitations
 
-- **Only local execution.** Remote volatile and remote snapshot modes are shown but refused, never replaced by a local launch. Snapshots arrive in Milestone 7. Launching is implemented in the Windows agent only. There is no way to delete a registered VM, a local copy or
-  an archive through the app. See [the launcher guide](docs/launcher.md).
+- **No Remote Volatile execution.** It is shown but refused, never replaced by another mode. "Remote" Snapshot still runs the emulator on the agent's computer: what is remote is the version it starts from. Launching is implemented in the Windows agent only. There is no way to delete a registered VM, a version, a local copy or
+  an archive through the app: deleting versions is deferred, by [decision 0037](docs/decisions/0037-snapshots-as-registrations.md#retention). See [the launcher guide](docs/launcher.md).
+- **Restoring never overwrites.** To restore an older version onto an agent that already holds the VM, move its directory away first and run discovery, or use Remote Snapshot, which needs neither.
+- **Screenshots taken in a Remote Snapshot working copy are not synchronized,** and go when it is discarded. Working copies use disk space until discarded.
 - **Some QEMU launchers need a profile.** A `run.bat` that is more than one plain QEMU command, or that forwards a port on every interface, is refused until an `emucat-launch.json` describes the VM.
 - **A graceful QEMU stop needs a guest that handles ACPI.** Otherwise it times out, and a forced stop is the administrator's choice. After an agent restart, QEMU can only be force-stopped.
 - **Verification reads the whole VM,** and reports only its final counts. A VM that has been run is expected to verify as modified.
 - **Remote HTTPS uploads are not integration-tested.** Remote agents must use HTTPS, and the agent enforces that, but screenshot uploads have only been exercised end to end over loopback HTTP. This test is deferred by decision.
-- **Restoring only restores masters,** and an interrupted download starts over rather than resuming. See [decision 0021](docs/decisions/0021-restore-lifecycle.md).
+- **An interrupted restore download starts over** rather than resuming. See [decision 0021](docs/decisions/0021-restore-lifecycle.md).
 - **"Modified" is only as good as names and sizes between verifications.** A same-size change is caught by "Verify local copy", which hashes every file, but not by the cheaper check on reconnection. See [decision 0032](docs/decisions/0032-local-verification.md).
 - **A transfer of a VM with screenshots can end as a partial success.** Screenshots are not in archives, so the VM is only removed once the
   server holds every one of them. If that cannot be proved, the master and the local VM both stay, and the removal can be retried.

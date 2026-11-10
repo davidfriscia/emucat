@@ -197,7 +197,7 @@ async function errorCode(response: { json: <T>() => T }): Promise<string> {
 }
 
 describe('options', () => {
-  it('offers local execution only, and says why each remote mode is unavailable', async () => {
+  it('offers local and Remote Snapshot execution, and says why Remote Volatile is unavailable', async () => {
     const w = await world();
     const response = await w.admin.get('/admin/vms/qemu/Win98/execution-options');
     expect(response.statusCode, response.body).toBe(200);
@@ -205,9 +205,10 @@ describe('options', () => {
     expect(options.modes.map((mode) => [mode.mode, mode.available])).toEqual([
       ['local', true],
       ['remote_volatile', false],
-      ['remote_snapshot', false],
+      ['remote_snapshot', true],
     ]);
-    expect(options.modes[2]?.reason).toMatch(/Milestone 7/);
+    expect(options.modes[1]?.reason).toMatch(/remote display/);
+    expect(options.modes[2]?.reason).toMatch(/working copy/);
     expect(options.agents[0]).toMatchObject({
       launch: { eligible: true, reason: null },
       verify: { eligible: true, reason: null },
@@ -306,14 +307,21 @@ describe('launch', () => {
 
   it('refuses a remote mode, and never falls back to a local launch', async () => {
     const w = await world();
-    for (const mode of ['remote_volatile', 'remote_snapshot']) {
+    const attempts: [object, number, string][] = [
+      [{ mode: 'remote_volatile' }, 409, 'execution_mode_unavailable'],
+      // Remote Snapshot runs a working copy, so it has to name one.
+      [{ mode: 'remote_snapshot' }, 400, 'validation_failed'],
+      // This agent only says it runs local sessions.
+      [{ mode: 'remote_snapshot', workspaceId: randomUUID() }, 409, 'execution_mode_unavailable'],
+    ];
+    for (const [overrides, status, code] of attempts) {
       const response = await w.admin.request({
         method: 'POST',
         url: '/admin/sessions',
-        payload: launchBody(w, { mode }),
+        payload: launchBody(w, overrides),
       });
-      expect(response.statusCode).toBe(409);
-      expect(await errorCode(response)).toBe('execution_mode_unavailable');
+      expect(response.statusCode, response.body).toBe(status);
+      expect(await errorCode(response)).toBe(code);
     }
     await barrier(w.agent);
     expect(w.agent.received.filter((message) => message.type === 'server.vm_launch')).toEqual([]);

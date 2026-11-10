@@ -28,6 +28,7 @@
 //! - [`process`]: starts emulator processes, and knows them again by PID and creation time.
 //! - [`execution`]: durable VM sessions: launch, watch, stop, and recovery after a restart.
 //! - [`verification`]: compares a local VM with the manifest of its master, read-only.
+//! - [`workspaces`]: Remote Snapshot working copies, outside every base path.
 //!
 //! The agent has no inbound listener. It starts an emulator only for a session an administrator asked for,
 //! from a command line it built itself, and stops only a process whose identity it verified. It removes a
@@ -64,4 +65,5 @@ pub mod sftp;
 pub mod shutdown;
 pub mod state;
 pub mod verification;
+pub mod workspaces;
 pub mod zip_directory;

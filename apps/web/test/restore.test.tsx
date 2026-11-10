@@ -47,6 +47,7 @@ function options(overrides: Partial<RestoreOptionsResponse> = {}): RestoreOption
       fileCount: 3,
       totalUncompressedBytes: 4096,
     },
+    versions: [],
     agents: [agentOption()] as RestoreOptionsResponse['agents'],
     ...overrides,
   };
@@ -63,6 +64,7 @@ function operation(overrides: Partial<RestoreOperation> = {}): RestoreOperation 
     emulatorType: 'qemu',
     vmName: 'Win98',
     versionId: VERSION_ID,
+    workspaceId: null,
     state: 'queued',
     archive: { sizeBytes: 2048, sha256: SHA },
     progress: { doneBytes: null, totalBytes: null },
@@ -164,7 +166,7 @@ describe('the VM’s page', () => {
   });
 
   it('has no restore for a VM with no master', async () => {
-    base({ [`GET ${OPTIONS_PATH}`]: { master: null, agents: [] } });
+    base({ [`GET ${OPTIONS_PATH}`]: { master: null, versions: [], agents: [] } });
     renderAt(VM_PATH);
     expect(await screen.findByText('This VM has no master version to restore.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Restore…' })).toBeNull();
@@ -184,7 +186,7 @@ describe('the dialog', () => {
     const dialog = await openDialog();
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     const view = within(dialog);
-    expect(view.getByText(/creates a local copy of the immutable master/)).toBeTruthy();
+    expect(view.getByText(/creates a local copy of the immutable version you choose/)).toBeTruthy();
     expect(view.getByText(/the VM is not started/)).toBeTruthy();
     expect(view.getByText(VERSION_ID)).toBeTruthy();
     expect(view.getByText('2.0 KiB')).toBeTruthy();

@@ -16,6 +16,7 @@ import {
   vmVerifyResultPayloadSchema,
 } from './execution.js';
 import { mediaSyncStatusPayloadSchema } from './media.js';
+import { workspaceDiscardPayloadSchema, workspaceDiscardResultPayloadSchema } from './versions.js';
 import { architectureSchema, platformSchema } from './platform.js';
 import {
   registrationAckPayloadSchema,
@@ -170,6 +171,10 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.vm_verify_result'),
     payload: vmVerifyResultPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.workspace_discard_result'),
+    payload: workspaceDiscardResultPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -227,6 +232,10 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.vm_verify_ack'),
     payload: vmVerifyAckPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.workspace_discard'),
+    payload: workspaceDiscardPayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

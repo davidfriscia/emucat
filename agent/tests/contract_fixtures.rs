@@ -450,3 +450,36 @@ fn a_launch_command_cannot_carry_a_command_line_or_a_path() {
         }
     }
 }
+
+#[test]
+fn snapshot_and_working_copy_messages_match_the_shared_fixtures() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in ["snapshotServerMessages", "snapshotAgentMessages"] {
+        let examples = wire[key].as_array().unwrap();
+        assert!(!examples.is_empty());
+        for example in examples {
+            let envelope: Envelope = serde_json::from_value(example.clone())
+                .unwrap_or_else(|error| panic!("{example}: {error}"));
+            let round_trip = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(round_trip["type"], example["type"]);
+            assert_eq!(round_trip["payload"], example["payload"], "{example}");
+        }
+    }
+}
+
+#[test]
+fn a_snapshot_command_must_name_its_parent_and_nothing_else_can() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    let examples = wire["snapshotRefusedByTheAgent"].as_array().unwrap();
+    assert!(!examples.is_empty());
+    for example in examples {
+        assert!(
+            serde_json::from_value::<Envelope>(example.clone()).is_err(),
+            "{example}"
+        );
+        assert!(
+            matches!(decode(&example.to_string()), Decoded::InvalidPayload { .. }),
+            "{example}"
+        );
+    }
+}

@@ -379,7 +379,7 @@ impl ExecutionManager {
                     },
                 )
                 .collect(),
-            modes: vec![ExecutionMode::Local],
+            modes: vec![ExecutionMode::Local, ExecutionMode::RemoteSnapshot],
         }
     }
 
@@ -513,13 +513,45 @@ impl ExecutionManager {
             emulator_type: request.emulator_type,
             vm_name: request.vm_name.clone(),
         };
-        if request.mode != ExecutionMode::Local {
-            return self.fail_new(
-                request,
-                "execution_mode_unavailable",
-                "Only local execution is available in this version".to_owned(),
-            );
-        }
+        // Each mode runs from exactly one place, and never from another one instead.
+        let workspace_base = match (request.mode, request.workspace_id) {
+            (ExecutionMode::Local, None) => None,
+            (ExecutionMode::RemoteSnapshot, Some(workspace_id)) => {
+                if crate::workspaces::existing_vm_root(
+                    &self.config.state_dir,
+                    workspace_id,
+                    request.emulator_type,
+                    &request.vm_name,
+                )
+                .is_none()
+                {
+                    return self.fail_new(
+                        request,
+                        "workspace_unavailable",
+                        "The working copy is not on this agent. Nothing was launched".to_owned(),
+                    );
+                }
+                Some(crate::workspaces::workspace_base(
+                    &self.config.state_dir,
+                    workspace_id,
+                ))
+            }
+            (ExecutionMode::RemoteVolatile, _) => {
+                return self.fail_new(
+                    request,
+                    "execution_mode_unavailable",
+                    "Remote volatile execution is not available in this version".to_owned(),
+                );
+            }
+            _ => {
+                return self.fail_new(
+                    request,
+                    "execution_mode_unavailable",
+                    "A Remote Snapshot session runs a working copy, and only it names one"
+                        .to_owned(),
+                );
+            }
+        };
         if let Some(reason) = self.activity(&vm) {
             return self.fail_new(request, "vm_already_running", reason);
         }
@@ -561,11 +593,12 @@ impl ExecutionManager {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let vm_name = vm.vm_name.clone();
+            let base_path = workspace_base.unwrap_or_else(|| emulator.base_path.clone());
             let planned = blocking(move || {
                 let plan = plan_launch(
                     vm.emulator_type,
                     &emulator.executable,
-                    &emulator.base_path,
+                    &base_path,
                     &vm.vm_name,
                 )?;
                 tracing::info!(

@@ -14,4 +14,5 @@ export * from './registration.js';
 export * from './restore.js';
 export * from './snapshot-name.js';
 export * from './version.js';
+export * from './versions.js';
 export * from './vm-name.js';

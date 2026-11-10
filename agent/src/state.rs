@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::archives::VersionId;
 use crate::emulators::{EmulatorType, VmName};
+use crate::packaging::DirectoryIdentity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +88,12 @@ pub struct AgentVmState {
     pub last_verified_at: Option<OffsetDateTime>,
     pub last_verified_sha256: Option<String>,
     pub pending_operations: Vec<PendingOperation>,
+    /// The directory this lineage was established for: the volume and file ID of the very directory a
+    /// restore published, a registration or snapshot read, or a verification found identical to its
+    /// version. A directory with the VM's name but another identity has no proven lineage, whatever this
+    /// record says. Records written by agents older than Milestone 7 have none. See decision 0037.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_identity: Option<DirectoryIdentity>,
 }
 
 const LOCAL_STATE_FILE: &str = "vm-state.json";
@@ -100,6 +107,7 @@ pub fn record_local_source(
     vm_name: &VmName,
     version_id: Uuid,
     manifest_sha256: Option<&str>,
+    directory: Option<DirectoryIdentity>,
 ) -> std::io::Result<()> {
     let path = state_dir.join(LOCAL_STATE_FILE);
     let mut states: BTreeMap<String, AgentVmState> = match fs::read(&path) {
@@ -119,11 +127,52 @@ pub fn record_local_source(
             last_verified_at: Some(OffsetDateTime::now_utc()),
             last_verified_sha256: manifest_sha256.map(str::to_owned),
             pending_operations: Vec::new(),
+            directory_identity: directory,
         },
     );
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(&states)?)?;
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(&states)?)?;
+        // Lineage decides what a snapshot is a child of, so it is made durable before it is relied on.
+        file.sync_all()?;
+    }
     fs::rename(&temporary, &path)
+}
+
+/// Why a local copy's lineage cannot be relied on for a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineageProblem {
+    /// Nothing records where this copy came from.
+    Unrecorded,
+    /// A record exists, from an agent that did not record which directory it was for.
+    NoDirectoryRecorded,
+    /// The directory with this name is not the one the record was made for.
+    DirectoryReplaced,
+    /// The record names another version.
+    OtherVersion(Uuid),
+}
+
+/// The version a local copy provably came from: a record naming it, made for this very directory.
+pub fn proven_lineage(
+    state_dir: &Path,
+    emulator_type: EmulatorType,
+    vm_name: &VmName,
+    directory: DirectoryIdentity,
+    expected_version: Uuid,
+) -> Result<(), LineageProblem> {
+    let state =
+        read_local_state(state_dir, emulator_type, vm_name).ok_or(LineageProblem::Unrecorded)?;
+    let Some(VersionId(source)) = state.local_source_version_id else {
+        return Err(LineageProblem::Unrecorded);
+    };
+    match state.directory_identity {
+        None => Err(LineageProblem::NoDirectoryRecorded),
+        Some(recorded) if recorded != directory => Err(LineageProblem::DirectoryReplaced),
+        Some(_) if source != expected_version => Err(LineageProblem::OtherVersion(source)),
+        Some(_) => Ok(()),
+    }
 }
 
 /// Every local copy [`record_local_source`] recorded.

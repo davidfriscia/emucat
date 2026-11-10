@@ -146,6 +146,7 @@ fn launch(emulator: EmulatorType, name: &str) -> VmLaunchRequest {
         vm_name: VmName::new(name).unwrap(),
         mode: ExecutionMode::Local,
         version_id: None,
+        workspace_id: None,
     }
 }
 

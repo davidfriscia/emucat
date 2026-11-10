@@ -1237,6 +1237,7 @@ impl Harness {
             archive_sha256: sha256(&self.archive),
             manifest_sha256: Some(self.manifest_sha256.clone()),
             expected_uncompressed_bytes: Some(self.manifest.total_uncompressed_bytes),
+            workspace_id: None,
         }
     }
 
@@ -2411,4 +2412,240 @@ async fn nothing_restores_or_verifies_a_vm_that_may_be_running() {
     let request = harness.request();
     start(&operations, &request);
     outcome(&operations).await.unwrap();
+}
+
+// Remote Snapshot working copies: a restore into one, a snapshot of it, and its removal. Decision 0038.
+
+#[tokio::test]
+async fn a_working_copy_is_restored_beside_the_persistent_copy_and_never_touches_it() {
+    let harness = Harness::new();
+    // A persistent copy is already there, and stays exactly as it is.
+    fs::create_dir(harness.destination()).unwrap();
+    fs::write(
+        harness.destination().join("run.bat"),
+        b"the persistent copy",
+    )
+    .unwrap();
+    emucat_agent::state::record_local_source(
+        &harness.state,
+        Uuid::from_u128(1),
+        EmulatorType::Qemu,
+        &harness.vm_name,
+        Uuid::from_u128(42),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let operations = harness.operations();
+    let workspace = Uuid::new_v4();
+    let request = RestoreRequest {
+        workspace_id: Some(workspace),
+        ..harness.request()
+    };
+    start(&operations, &request);
+    let result = outcome(&operations).await.expect("the restore succeeds");
+
+    let base = emucat_agent::workspaces::workspace_base(&harness.state, workspace);
+    let root = base.join("Win98");
+    assert_eq!(result.local_directory, root.to_string_lossy());
+    assert_eq!(
+        fs::read(root.join("disk.qcow2")).unwrap(),
+        fs::read(harness.source.join("Win98/disk.qcow2")).unwrap()
+    );
+    assert_eq!(
+        fs::read(harness.destination().join("run.bat")).unwrap(),
+        b"the persistent copy"
+    );
+    let state = read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).unwrap();
+    assert_eq!(
+        state.local_source_version_id,
+        Some(VersionId(Uuid::from_u128(42))),
+        "the persistent copy's record is untouched"
+    );
+    let record = emucat_agent::workspaces::read_record(&harness.state, workspace).unwrap();
+    assert_eq!(record.source_version_id, harness.version);
+    assert_eq!(
+        record.manifest_sha256.as_deref(),
+        Some(harness.manifest_sha256.as_str())
+    );
+    assert_eq!(
+        emucat_agent::workspaces::held(&harness.state),
+        vec![workspace]
+    );
+    // Nothing was left in the working copy's directory but the VM.
+    let names: Vec<_> = fs::read_dir(&base)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["Win98".to_owned()]);
+}
+
+#[tokio::test]
+async fn a_working_copy_is_never_restored_over_an_existing_one() {
+    let harness = Harness::new();
+    let workspace = Uuid::new_v4();
+    let root = emucat_agent::workspaces::workspace_base(&harness.state, workspace).join("Win98");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("keep.txt"), b"changes nobody preserved").unwrap();
+    let operations = harness.operations();
+    let request = RestoreRequest {
+        workspace_id: Some(workspace),
+        ..harness.request()
+    };
+    start(&operations, &request);
+    let (code, _) = outcome(&operations).await.unwrap_err();
+    assert_eq!(code, "restore_destination_exists");
+    assert_eq!(
+        fs::read(root.join("keep.txt")).unwrap(),
+        b"changes nobody preserved"
+    );
+}
+
+#[tokio::test]
+async fn a_working_copy_with_a_corrupt_archive_publishes_nothing() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let workspace = Uuid::new_v4();
+    let request = RestoreRequest {
+        workspace_id: Some(workspace),
+        archive_sha256: "0".repeat(64),
+        ..harness.request()
+    };
+    start(&operations, &request);
+    assert!(outcome(&operations).await.is_err());
+    assert!(emucat_agent::workspaces::held(&harness.state).is_empty());
+    // Nothing is left of it: no directory, and no record.
+    assert!(!emucat_agent::workspaces::workspace_base(&harness.state, workspace).exists());
+    assert!(emucat_agent::workspaces::read_record(&harness.state, workspace).is_none());
+}
+
+#[tokio::test]
+async fn a_restored_working_copy_is_removed_only_when_discarded() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let workspace = Uuid::new_v4();
+    start(
+        &operations,
+        &RestoreRequest {
+            workspace_id: Some(workspace),
+            ..harness.request()
+        },
+    );
+    outcome(&operations).await.expect("the restore succeeds");
+    let root = emucat_agent::workspaces::workspace_base(&harness.state, workspace).join("Win98");
+    // What a session changed. Preserving it is the registration workflow's, tested with it.
+    fs::write(root.join("a/b/c.bin"), b"changed by the guest").unwrap();
+
+    operations.handle(Message::ServerWorkspaceDiscard(
+        emucat_agent::protocol::WorkspaceDiscard {
+            workspace_id: workspace,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: harness.vm_name.clone(),
+        },
+    ));
+    let discarded = next_message(&operations, |message| {
+        matches!(message, Message::AgentWorkspaceDiscardResult(_))
+    })
+    .await;
+    assert!(matches!(
+        discarded,
+        Message::AgentWorkspaceDiscardResult(ref result) if result.removed
+    ));
+    assert!(!root.exists());
+    assert!(emucat_agent::workspaces::held(&harness.state).is_empty());
+}
+
+// Lineage: which version a local copy provably came from, for the directory it is. Decision 0037.
+
+#[tokio::test]
+async fn a_restore_records_lineage_for_the_directory_it_published() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    start(&operations, &harness.request());
+    outcome(&operations).await.unwrap();
+    let directory = emucat_agent::packaging::directory_identity(&harness.destination()).unwrap();
+    assert_eq!(
+        emucat_agent::state::proven_lineage(
+            &harness.state,
+            EmulatorType::Qemu,
+            &harness.vm_name,
+            directory,
+            harness.version,
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        emucat_agent::state::proven_lineage(
+            &harness.state,
+            EmulatorType::Qemu,
+            &harness.vm_name,
+            directory,
+            Uuid::new_v4(),
+        ),
+        Err(emucat_agent::state::LineageProblem::OtherVersion(
+            harness.version
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_verification_of_an_unchanged_copy_establishes_lineage_and_a_changed_one_does_not() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let restore = harness.request();
+    start(&operations, &restore);
+    outcome(&operations).await.unwrap();
+    close(&operations, restore.operation_id);
+    let directory = emucat_agent::packaging::directory_identity(&harness.destination()).unwrap();
+    let lineage = || {
+        emucat_agent::state::proven_lineage(
+            &harness.state,
+            EmulatorType::Qemu,
+            &harness.vm_name,
+            directory,
+            harness.version,
+        )
+    };
+
+    // As an agent older than Milestone 7 left it: a version, and no directory.
+    emucat_agent::state::record_local_source(
+        &harness.state,
+        Uuid::from_u128(1),
+        EmulatorType::Qemu,
+        &harness.vm_name,
+        harness.version,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        lineage(),
+        Err(emucat_agent::state::LineageProblem::NoDirectoryRecorded)
+    );
+
+    // A changed copy proves nothing.
+    let original = fs::read(harness.destination().join("a/b/c.bin")).unwrap();
+    fs::write(harness.destination().join("a/b/c.bin"), b"DEEP").unwrap();
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    assert_eq!(
+        verified(&operations, request.operation_id).await.status,
+        VerifyResultStatus::Modified
+    );
+    assert_eq!(
+        lineage(),
+        Err(emucat_agent::state::LineageProblem::NoDirectoryRecorded)
+    );
+
+    // An identical one is a copy of that version, and now says so for this directory.
+    fs::write(harness.destination().join("a/b/c.bin"), original).unwrap();
+    let request = harness.verify_request();
+    verify(&operations, &request);
+    assert_eq!(
+        verified(&operations, request.operation_id).await.status,
+        VerifyResultStatus::Verified
+    );
+    assert_eq!(lineage(), Ok(()));
 }

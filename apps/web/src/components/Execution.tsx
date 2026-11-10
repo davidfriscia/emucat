@@ -446,28 +446,37 @@ function ModeSelector({
   return (
     <fieldset className="mb-3">
       <legend className="form-label fs-6">Execution mode</legend>
-      {modes.map((mode) => (
-        <div className="form-check" key={mode.mode}>
-          <input
-            id={`mode-${mode.mode}`}
-            className="form-check-input"
-            type="radio"
-            name="execution-mode"
-            value={mode.mode}
-            checked={value === mode.mode}
-            disabled={!mode.available}
-            onChange={() => onChange(mode.mode)}
-            aria-describedby={`mode-${mode.mode}-help`}
-          />
-          <label className="form-check-label" htmlFor={`mode-${mode.mode}`}>
-            {MODE_TEXT[mode.mode]}
-            {mode.available ? '' : ' (not available)'}
-          </label>
-          <div id={`mode-${mode.mode}-help`} className="form-text mt-0">
-            {mode.available ? MODE_EXPLANATION[mode.mode] : mode.reason}
+      {modes.map((mode) => {
+        // Remote Snapshot runs a working copy of a chosen version, so it starts from the version history.
+        const fromHistory = mode.mode === 'remote_snapshot' && mode.available;
+        const selectable = mode.available && !fromHistory;
+        return (
+          <div className="form-check" key={mode.mode}>
+            <input
+              id={`mode-${mode.mode}`}
+              className="form-check-input"
+              type="radio"
+              name="execution-mode"
+              value={mode.mode}
+              checked={value === mode.mode}
+              disabled={!selectable}
+              onChange={() => onChange(mode.mode)}
+              aria-describedby={`mode-${mode.mode}-help`}
+            />
+            <label className="form-check-label" htmlFor={`mode-${mode.mode}`}>
+              {MODE_TEXT[mode.mode]}
+              {fromHistory
+                ? ' (from the version history)'
+                : mode.available
+                  ? ''
+                  : ' (not available)'}
+            </label>
+            <div id={`mode-${mode.mode}-help`} className="form-text mt-0">
+              {selectable ? MODE_EXPLANATION[mode.mode] : mode.reason}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </fieldset>
   );
 }

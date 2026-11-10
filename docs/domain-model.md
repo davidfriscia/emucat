@@ -166,9 +166,17 @@ An archive is a complete standalone ZIP of the VM's directory, ending with a det
 
 ## Restore
 
-An operation restores one immutable master onto one agent. It holds the operation's UUID, the VM's identity, the version's UUID, the repository's and the agent's UUIDs, the administrator who asked, its state and its
-progress, and it keeps the archive's key, size and hash as they were when it was created. The destination is not in the request: the agent derives it from its own base path, as `{base_path}/{vm_name}`. Only masters are restored for now.
+An operation restores one immutable version, the master or any snapshot, onto one agent. It holds the operation's UUID, the VM's identity, the version's UUID, the repository's and the agent's UUIDs, the administrator who asked, its state and its
+progress, and it keeps the archive's key, size and hash as they were when it was created. The destination is not in the request: the agent derives it from its own base path, as `{base_path}/{vm_name}`, or for a working copy from its state directory.
 See [decision 0021](decisions/0021-restore-lifecycle.md).
+
+## Snapshots
+
+A snapshot is a `registration_operations` row with `mode = 'snapshot'`, naming its parent and its label, which commits one `vm_versions` row with `kind = 'snapshot'`. Its parent is the version the archived files came from: the agent's `local_source_version_id`, or a working copy's `source_version_id`. A commit moves that source to the new snapshot. See [decision 0037](decisions/0037-snapshots-as-registrations.md).
+
+## Working copies
+
+A `vm_workspaces` row is a Remote Snapshot working copy of one VM on one agent: `preparing`, `ready`, `discarding`, and then `discarded`, `failed` or `lost`. It records the version first restored into it and the version it is a copy of now, and whether a session may have changed it since its last snapshot. Restores, snapshots and sessions that concern it name it. See [decision 0038](decisions/0038-remote-snapshot-working-copies.md).
 
 ## Database tables
 
@@ -187,6 +195,7 @@ See [decision 0021](decisions/0021-restore-lifecycle.md).
 | `agent_repositories`      | Which agents may use which repository    | `(agent_id, repository_id)`          |
 | `registration_operations` | Registrations, kept after they end       | `id`                                 |
 | `restore_operations`      | Restores, kept after they end            | `id`                                 |
+| `vm_workspaces`           | Remote Snapshot working copies           | `id`                                 |
 | `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                       |
 | `schema_migrations`       | Migration history, managed by the runner | `version`                            |
 

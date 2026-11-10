@@ -90,7 +90,7 @@ interface VmActions {
   running: ReadonlySet<string>;
   /** Registered since this report was made. The report itself says nothing about that. */
   registered: ReadonlySet<string>;
-  onChoose: (vm: DiscoveryListedVm, mode: RegistrationMode) => void;
+  onChoose: (vm: DiscoveryListedVm, mode: Exclude<RegistrationMode, 'snapshot'>) => void;
 }
 
 const vmKey = (emulatorType: string, vmName: string) => `${emulatorType}/${vmName.toLowerCase()}`;
@@ -275,7 +275,7 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
   if (active !== isActive) setActive(isActive);
   const [choice, setChoice] = useState<{
     target: RegistrationTarget;
-    mode: RegistrationMode;
+    mode: Exclude<RegistrationMode, 'snapshot'>;
   } | null>(null);
 
   const [running, setRunning] = useState(false);

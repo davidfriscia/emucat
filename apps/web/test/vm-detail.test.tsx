@@ -208,6 +208,7 @@ describe('the Launch action', () => {
               mode: 'local',
               state: 'running',
               versionId: null,
+              workspaceId: null,
               pid: 4242,
               processStartedAt: PAST,
               requestedAt: PAST,

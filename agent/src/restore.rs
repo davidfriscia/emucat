@@ -472,6 +472,21 @@ impl RestoreManager {
             .map(|config| config.base_path.clone())
     }
 
+    /// Where a restore publishes: the emulator's base path, or a working copy's own directory, which the
+    /// agent derives from its state directory and the working copy's UUID alone.
+    fn target_base(&self, request: &RestoreRequest) -> Option<PathBuf> {
+        match request.workspace_id {
+            Some(workspace_id) => {
+                self.base_path(request.emulator_type)?;
+                Some(crate::workspaces::workspace_base(
+                    &self.config.state_dir,
+                    workspace_id,
+                ))
+            }
+            None => self.base_path(request.emulator_type),
+        }
+    }
+
     fn record_failure(&self, mut journal: Journal, failed: JobFailure) {
         let operation_id = journal.request.operation_id;
         let report = RestoreFailure {
@@ -501,8 +516,11 @@ impl RestoreManager {
             remove_staging_files(&self.config.staging_dir, operation_id);
             match journal.phase {
                 RestorePhase::Running => {
-                    if let Some(base) = self.base_path(journal.request.emulator_type) {
+                    if let Some(base) = self.target_base(&journal.request) {
                         remove_staged_directory(&staged_directory(&base, operation_id));
+                    }
+                    if let Some(workspace_id) = journal.request.workspace_id {
+                        crate::workspaces::forget_unpublished(&self.config.state_dir, workspace_id);
                     }
                     self.record_failure(
                         journal,
@@ -523,7 +541,7 @@ impl RestoreManager {
     /// is this operation's only if it is the very one that was assembled. Anything else is left alone.
     fn resolve_publishing(&self, mut journal: Journal) {
         let operation_id = journal.request.operation_id;
-        let Some(base) = self.base_path(journal.request.emulator_type) else {
+        let Some(base) = self.target_base(&journal.request) else {
             self.record_failure(
                 journal,
                 failure(
@@ -578,6 +596,9 @@ impl RestoreManager {
                  safe to try again",
             )
         };
+        if let Some(workspace_id) = journal.request.workspace_id {
+            crate::workspaces::forget_unpublished(&self.config.state_dir, workspace_id);
+        }
         self.record_failure(journal, failed);
     }
 
@@ -593,6 +614,12 @@ impl RestoreManager {
         if let Err(error) = self.persist(journal.clone()) {
             tracing::error!(%error, %operation_id, "Cannot record a publication");
         }
+        // A working copy's record was written before the rename, and the persistent copy's state is not
+        // this restore's business.
+        if journal.request.workspace_id.is_some() {
+            self.send(Message::AgentRestoreResult(result));
+            return;
+        }
         // Local bookkeeping. If it fails, the server still knows, and the next report says so.
         if let Err(error) = record_local_source(
             &self.config.state_dir,
@@ -601,6 +628,8 @@ impl RestoreManager {
             &journal.request.vm_name,
             journal.request.version_id,
             Some(&result.manifest_sha256),
+            // The rename moved the directory this restore assembled; its identity is that one's.
+            journal.staged_identity,
         ) {
             tracing::warn!(%error, "Cannot record the local source version");
         }
@@ -624,6 +653,7 @@ impl RestoreManager {
             operations,
             capabilities: self.capabilities(),
             local_copies: self.local_copies(),
+            workspaces: crate::workspaces::held(&self.config.state_dir),
         })
     }
 
@@ -806,7 +836,8 @@ impl RestoreManager {
             running.insert(operation_id, cancel.clone());
         }
 
-        let emulator = request.emulator_type;
+        let target = self.target_base(&request);
+        let workspace = request.workspace_id;
         let journal = Journal {
             request,
             phase: RestorePhase::Running,
@@ -837,8 +868,11 @@ impl RestoreManager {
             if let Err(failed) = outcome {
                 tracing::warn!(%operation_id, code = %failed.code, message = %failed.message, "Restore failed");
                 remove_staging_files(&this.config.staging_dir, operation_id);
-                if let Some(base) = this.base_path(emulator) {
-                    remove_staged_directory(&staged_directory(&base, operation_id));
+                if let Some(base) = &target {
+                    remove_staged_directory(&staged_directory(base, operation_id));
+                }
+                if let Some(workspace_id) = workspace {
+                    crate::workspaces::forget_unpublished(&this.config.state_dir, workspace_id);
                 }
                 if let Some(journal) = this.journal(operation_id) {
                     this.record_failure(journal, failed);
@@ -1007,12 +1041,28 @@ impl RestoreManager {
                 "A hash in the request is not valid",
             ));
         }
-        let base_path = self.base_path(request.emulator_type).ok_or_else(|| {
+        let base_path = self.target_base(&request).ok_or_else(|| {
             failure(
                 "restore_emulator_not_configured",
                 format!("{} is not configured on this agent", request.emulator_type),
             )
         })?;
+        // A working copy's directory is created here, empty, the first time. Its parent is under the
+        // state directory, which is never inside a base path.
+        if request.workspace_id.is_some() {
+            if !crate::workspaces::workspaces_dir_is_safe(&self.config.state_dir) {
+                return Err(failure(
+                    "restore_destination_unsafe",
+                    "The workspaces directory is a link or not a directory",
+                ));
+            }
+            fs::create_dir_all(&base_path).map_err(|error| {
+                failure(
+                    "restore_staging_failed",
+                    format!("Cannot create the working copy's directory: {error}"),
+                )
+            })?;
+        }
         let repository = self.config.repositories.open(request.repository_id)?;
 
         let base_identity = {
@@ -1141,7 +1191,24 @@ impl RestoreManager {
 
         let destination = crate::filesystem::vm_directory(&base_path, &request.vm_name);
         // Kept before the rename, so that a crash right after it can be told from one right before it.
-        {
+        if let Some(workspace_id) = request.workspace_id {
+            crate::workspaces::write_record(
+                &self.config.state_dir,
+                &crate::workspaces::WorkspaceRecord {
+                    workspace_id,
+                    emulator_type: request.emulator_type,
+                    vm_name: request.vm_name.clone(),
+                    source_version_id: request.version_id,
+                    manifest_sha256: Some(inspected.manifest_sha256.clone()),
+                },
+            )
+            .map_err(|error| {
+                failure(
+                    "restore_staging_failed",
+                    format!("Cannot record the working copy: {error}"),
+                )
+            })?;
+        } else {
             let path = local_manifest_path(
                 &self.config.state_dir,
                 request.emulator_type,
@@ -1676,6 +1743,7 @@ impl RestoreManager {
             archive_sha256: request.archive_sha256.clone(),
             manifest_sha256: request.manifest_sha256.clone(),
             expected_uncompressed_bytes: None,
+            workspace_id: None,
         };
         let obtained = self
             .obtain_archive(&as_restore, &*repository, &key, cancel)
@@ -1783,6 +1851,9 @@ impl RestoreManager {
                 }
             }
         };
+        // Which directory this is, before and after reading it: a verified result establishes lineage only
+        // for the directory that was read.
+        let before = directory_identity(&root).ok();
         let (manifest, manifest_sha256, source) =
             match self.verification_manifest(request, vm, cancel).await {
                 Ok(found) => found,
@@ -1799,8 +1870,11 @@ impl RestoreManager {
         }
         let (emulator, cancel) = (request.emulator_type, cancel.clone());
         let compared = manifest.clone();
+        let read_root = root.clone();
         let outcome =
-            match blocking(move || verify_local_copy(&root, emulator, &compared, &cancel)).await {
+            match blocking(move || verify_local_copy(&read_root, emulator, &compared, &cancel))
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     return failed(
@@ -1810,13 +1884,32 @@ impl RestoreManager {
                     );
                 }
             };
+        let after = directory_identity(&root).ok();
         let status = match outcome.status {
+            VerifyStatus::Verified if before.is_none() || before != after => {
+                VerifyResultStatus::VerificationFailed
+            }
             VerifyStatus::Verified => VerifyResultStatus::Verified,
             VerifyStatus::Modified => VerifyResultStatus::Modified,
             VerifyStatus::Missing => VerifyResultStatus::Missing,
             VerifyStatus::VerificationFailed => VerifyResultStatus::VerificationFailed,
         };
-        // A verified copy is a copy of this master, so its manifest is worth keeping for next time.
+        // Identical, file for file, to this version: this directory is a copy of it, which is what a
+        // snapshot's parent must be. Recorded with the directory's identity, as a restore would.
+        if status == VerifyResultStatus::Verified
+            && let Err(error) = record_local_source(
+                &self.config.state_dir,
+                self.config.agent_id,
+                vm.emulator_type,
+                &vm.vm_name,
+                request.version_id,
+                Some(&manifest_sha256),
+                before,
+            )
+        {
+            tracing::warn!(%error, "Cannot record the verified copy's lineage");
+        }
+        // A verified copy is a copy of this version, so its manifest is worth keeping for next time.
         if status == VerifyResultStatus::Verified
             && source != ManifestSource::Local
             && let Err(error) = keep_local_manifest(
@@ -1842,7 +1935,13 @@ impl RestoreManager {
             manifest_source: Some(source.as_str().to_owned()),
             code: (status == VerifyResultStatus::VerificationFailed)
                 .then(|| "verification_failed".to_owned()),
-            message: outcome.message.map(|message| bounded(&message)),
+            message: if outcome.status == VerifyStatus::Verified
+                && status == VerifyResultStatus::VerificationFailed
+            {
+                Some("The directory was replaced while it was verified".to_owned())
+            } else {
+                outcome.message.map(|message| bounded(&message))
+            },
         }
     }
 }

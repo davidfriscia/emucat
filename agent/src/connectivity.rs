@@ -598,7 +598,8 @@ async fn run_session<F: Future<Output = ()>>(
                         | Message::ServerVmStop(_)
                         | Message::ServerVmExecutionAck(_)
                         | Message::ServerVmVerify(_)
-                        | Message::ServerVmVerifyAck(_)) => {
+                        | Message::ServerVmVerifyAck(_)
+                        | Message::ServerWorkspaceDiscard(_)) => {
                             match &settings.operations {
                                 Some(operations) if welcomed => operations.handle(message),
                                 _ => tracing::warn!("Ignored a repository command"),

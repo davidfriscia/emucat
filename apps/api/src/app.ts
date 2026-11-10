@@ -8,6 +8,7 @@ import { registerErrorHandling } from './errors.js';
 import { ExecutionCoordinator } from './execution/coordinator.js';
 import { RegistrationCoordinator } from './registration/coordinator.js';
 import { RestoreCoordinator } from './restore/coordinator.js';
+import { WorkspaceCoordinator } from './workspaces/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
 import { registerBrowserRoutes, type BrowserDependencies } from './routes/browser.js';
@@ -58,6 +59,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           {
             isOnline: (agentId) => hub.isOnline(agentId),
             isRegistrationCapable: (agentId) => hub.isRegistrationCapable(agentId),
+            isSnapshotCapable: (agentId) => hub.isSnapshotCapable(agentId),
             activeConnectionId: (agentId) => hub.activeConnectionId(agentId),
             latestDiscovery: (agentId) => hub.discovery.get(agentId),
             send: (agentId, message) => hub.sendToAgent(agentId, message),
@@ -81,11 +83,24 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           {
             isOnline: (agentId) => hub.isOnline(agentId),
             executionCapabilities: (agentId) => hub.executionCapabilities(agentId),
+            workspacesSupported: (agentId) => hub.workspacesSupported(agentId),
             send: (agentId, message) => hub.sendToAgent(agentId, message),
           },
           app.log,
         );
         hub.setExecution(execution);
+        const workspaces = new WorkspaceCoordinator(
+          browser.pool,
+          {
+            isOnline: (agentId) => hub.isOnline(agentId),
+            send: (agentId, message) => hub.sendToAgent(agentId, message),
+          },
+          app.log,
+          restores,
+          execution,
+          registrations,
+        );
+        hub.setWorkspaces(workspaces);
         await api.register(async (scope) =>
           registerBrowserRoutes(
             scope,
@@ -94,6 +109,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             registrations,
             restores,
             execution,
+            workspaces,
             dependencies.authenticateAgent,
           ),
         );

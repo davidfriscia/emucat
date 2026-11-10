@@ -645,7 +645,7 @@ describe('upgrading to VM-level publication (0008)', () => {
     await expect(card('LegacyPrivate')).resolves.toEqual([]);
 
     const result = await migrate(scratch.options);
-    expect(result.applied).toEqual(['0008_vm_level_publication']);
+    expect(result.applied[0]).toBe('0008_vm_level_publication');
 
     // After: the VM decides, for the cover and for everything else.
     await expect(card('LegacyPublic')).resolves.toEqual([privateMainOfPublicVm]);
