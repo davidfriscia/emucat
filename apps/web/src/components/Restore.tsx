@@ -15,7 +15,7 @@ import { Link } from 'react-router';
 import { cancelRestore, fetchRestoreOptions, fetchRestores, startRestore } from '../api';
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
-import { InfoDialog, nameMatches } from './Dialogs';
+import { InfoDialog } from './Dialogs';
 import { useModalDialog } from './Gallery';
 import {
   CreateSnapshotDialog,
@@ -475,7 +475,8 @@ function refusal(agent: RestoreAgentOption): RestoreIneligibleReason | null {
 /**
  * The confirmation. It explains what will and will not happen, and offers no way to choose a path. Any
  * version can be restored: the master, or any snapshot in the tree. On an agent that already holds a
- * copy, it is an explicit replacement: what is there now, what replaces it, and the VM's name typed.
+ * copy, it is an explicit replacement: what is there now, what replaces it, and a destructive button that
+ * says so. Changes known to be in the copy have to be acknowledged before that button is enabled.
  */
 export function RestoreDialog({
   vm,
@@ -500,7 +501,6 @@ export function RestoreDialog({
     initialVersionId ?? options.master?.versionId ?? options.versions[0]?.versionId ?? '',
   );
   const [discard, setDiscard] = useState(false);
-  const [typed, setTyped] = useState('');
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLDivElement>(null);
@@ -517,10 +517,7 @@ export function RestoreDialog({
   const replacing = chosen !== undefined && replaces(chosen);
   const modified = replacing && chosen.local.contentStatus === 'modified';
   const mayHaveChanges = replacing && chosen.local.contentStatus !== 'verified';
-  const ready =
-    chosen !== undefined &&
-    canTake(chosen) &&
-    (!replacing || (nameMatches(typed, vm.vmName) && (!modified || discard)));
+  const ready = chosen !== undefined && canTake(chosen) && (!replacing || !modified || discard);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -538,7 +535,6 @@ export function RestoreDialog({
               replace: {
                 expectedVersionId: chosen.local.sourceVersionId,
                 discardLocalChanges: discard,
-                confirmVmName: typed.trim(),
               },
             }
           : {}),
@@ -618,7 +614,6 @@ export function RestoreDialog({
               value={agentId}
               onChange={(event) => {
                 setAgentId(event.target.value);
-                setTyped('');
                 setDiscard(false);
               }}
             >
@@ -644,6 +639,8 @@ export function RestoreDialog({
             <dd>{EMULATOR_LABELS[vm.emulatorType]}</dd>
             {replacing ? (
               <>
+                <dt>Target agent</dt>
+                <dd>{chosen.agentName}</dd>
                 <dt>Installed now</dt>
                 <dd>
                   {chosen.local.sourceVersionId ? (
@@ -654,6 +651,14 @@ export function RestoreDialog({
                   ) : (
                     'A copy whose version is not known'
                   )}
+                </dd>
+                <dt>Local changes</dt>
+                <dd>
+                  {modified
+                    ? 'Modified: it differs from its version'
+                    : mayHaveChanges
+                      ? 'Not known: not verified since the agent last connected'
+                      : 'None: verified against its version'}
                 </dd>
               </>
             ) : null}
@@ -680,6 +685,11 @@ export function RestoreDialog({
           </dl>
           {replacing ? (
             <div className="border-top pt-3 mb-3">
+              <div className="alert alert-danger small" role="alert">
+                The existing local copy of <span className="vm-identity">{vm.vmName}</span> on{' '}
+                {chosen.agentName} will be replaced. Changes in it that are not preserved in a
+                snapshot may be permanently lost.
+              </div>
               {mayHaveChanges ? (
                 <div className="alert alert-warning small" role="alert">
                   {modified
@@ -706,7 +716,7 @@ export function RestoreDialog({
                   ) : null}
                 </div>
               ) : null}
-              <div className="form-check mb-3">
+              <div className="form-check mb-0">
                 <input
                   id="restore-discard"
                   className="form-check-input"
@@ -724,16 +734,6 @@ export function RestoreDialog({
                     : 'Without this, the agent first verifies the current copy against its version, and refuses if anything differs.'}
                 </div>
               </div>
-              <label htmlFor="restore-confirm-name" className="form-label">
-                Type <span className="vm-identity">{vm.vmName}</span> to confirm
-              </label>
-              <input
-                id="restore-confirm-name"
-                className="form-control"
-                autoComplete="off"
-                value={typed}
-                onChange={(event) => setTyped(event.target.value)}
-              />
             </div>
           ) : null}
           <div className="d-flex flex-wrap gap-2">
@@ -742,7 +742,13 @@ export function RestoreDialog({
               className={`btn ${replacing ? 'btn-danger' : 'btn-primary'}`}
               disabled={busy || !ready}
             >
-              {busy ? 'Starting…' : replacing ? 'Replace' : 'Restore'}
+              {busy
+                ? 'Starting…'
+                : !replacing
+                  ? 'Restore'
+                  : discard
+                    ? 'Discard changes and replace VM'
+                    : 'Replace existing VM'}
             </button>
             <button
               type="button"
