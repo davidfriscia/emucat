@@ -12,6 +12,7 @@
   --emucat-placeholder-from: #f0fdfa;
   --emucat-placeholder-to: #ccfbf1;
   --emucat-pale-mark: 0.55;
+  --emucat-image-frame: #e9ecef;
 
   --bs-primary: #0f766e;
   --bs-primary-rgb: 15, 118, 110;
@@ -33,6 +34,7 @@
   --emucat-placeholder-from: #10252a;
   --emucat-placeholder-to: #0b1a1e;
   --emucat-pale-mark: 0.7;
+  --emucat-image-frame: #0b0f12;
 
   --bs-primary: #2dd4bf;
   --bs-primary-rgb: 45, 212, 191;
@@ -193,13 +195,20 @@
   overflow-wrap: anywhere;
 }
 
-/* Every VM image shares this 4:3 frame, the shape of the screens it shows. */
+/*
+ * Every VM image shares this 4:3 frame, so that cards line up whatever the screenshots are. The whole image
+ * is always shown: `scale-down` fits it inside the frame without cropping or stretching, centers it, and
+ * letterboxes or pillarboxes it against the frame's background, but never enlarges a small image beyond its
+ * natural size. The frame's size does not depend on the image, so nothing moves as it loads.
+ */
 .vm-image {
   display: block;
   width: 100%;
+  height: auto;
   aspect-ratio: 4 / 3;
-  object-fit: cover;
-  background: var(--bs-tertiary-bg);
+  object-fit: scale-down;
+  object-position: center;
+  background: var(--emucat-image-frame);
 }
 
 .vm-image-placeholder {
