@@ -17,7 +17,6 @@ import {
   type ServerMessage,
   type RemoteSessionMode,
   type VmIdentity,
-  vmNameKey,
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
@@ -468,7 +467,7 @@ export class RestoreCoordinator {
         workspace ? 'workspace' : replace ? 'replace' : 'create',
       );
       if (reason) throw new ApiError(409, reason, INELIGIBLE_TEXT[reason]);
-      if (replace) this.checkReplacement(replace, canonicalName, states[0]);
+      if (replace) this.checkReplacement(replace, states[0]);
 
       if (workspace) {
         try {
@@ -572,21 +571,13 @@ export class RestoreCoordinator {
 
   /**
    * What the server can check about a replacement before asking the agent, which checks it all again on
-   * its own disk: that the page showed the copy recorded here, that the name was typed, and that changes
-   * recorded here are acknowledged as lost.
+   * its own disk: that the page showed the copy recorded here, and that changes recorded here are
+   * acknowledged as lost.
    */
   private checkReplacement(
     replace: NonNullable<CreateRestoreRequest['replace']>,
-    vmName: string,
     state: RowDataPacket | undefined,
   ): void {
-    if (vmNameKey(replace.confirmVmName) !== vmNameKey(vmName)) {
-      throw new ApiError(
-        400,
-        'confirmation_mismatch',
-        'Type the VM’s name to replace its local copy.',
-      );
-    }
     const recorded = (state?.local_source_version_id as string | null | undefined) ?? null;
     if (recorded !== replace.expectedVersionId) {
       throw new ApiError(

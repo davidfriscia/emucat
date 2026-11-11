@@ -668,7 +668,7 @@ describe('replacing the persistent copy', () => {
         emulatorType: 'qemu',
         vmName: 'Win98',
         versionId,
-        replace: { confirmVmName: 'Win98', discardLocalChanges: false, ...replacement },
+        replace: { discardLocalChanges: false, ...replacement },
       },
     });
   }
@@ -735,17 +735,29 @@ describe('replacing the persistent copy', () => {
     expect(await localSource(w)).toBe(a.versionId);
   });
 
-  it('refuses a stale page, a wrong name, and changes nobody acknowledged', async () => {
+  it('refuses a stale page, an unknown field, and changes nobody acknowledged', async () => {
     const w = await remoteWorld({}, { replaceLocal: true });
     const stale = await replace(w, w.masterId, { expectedVersionId: randomUUID() });
     expect(stale.statusCode).toBe(409);
     expect(await errorCode(stale)).toBe('local_copy_changed');
-    const misnamed = await replace(w, w.masterId, {
+    // The replacement is confirmed by the request itself: no typed name, and nothing else either.
+    const extra = await replace(w, w.masterId, {
       expectedVersionId: w.masterId,
-      confirmVmName: 'Other',
+      confirmVmName: 'Win98',
     });
-    expect(misnamed.statusCode).toBe(400);
-    expect(await errorCode(misnamed)).toBe('confirmation_mismatch');
+    expect(extra.statusCode).toBe(400);
+    const missingAcknowledgement = await w.admin.request({
+      method: 'POST',
+      url: '/admin/restores',
+      payload: {
+        agentId: w.paired.agentId,
+        emulatorType: 'qemu',
+        vmName: 'Win98',
+        versionId: w.masterId,
+        replace: { expectedVersionId: w.masterId },
+      },
+    });
+    expect(missingAcknowledgement.statusCode).toBe(400);
 
     await w.context.pool.execute(
       "UPDATE agent_vm_state SET content_status = 'modified' WHERE agent_id = ?",
@@ -802,6 +814,33 @@ describe('replacing the persistent copy', () => {
     );
     const missing = await replace(w, w.masterId, { expectedVersionId: w.masterId });
     expect(await errorCode(missing)).toBe('no_local_copy');
+    await barrier(w.agent);
+    expect(sent(w, 'server.restore_request')).toEqual([]);
+  });
+
+  it('keeps a replacement to administrators, with the CSRF token', async () => {
+    const w = await remoteWorld({}, { replaceLocal: true });
+    const payload = {
+      agentId: w.paired.agentId,
+      emulatorType: 'qemu',
+      vmName: 'Win98',
+      versionId: w.masterId,
+      replace: { expectedVersionId: w.masterId, discardLocalChanges: true },
+    };
+    const anonymous = new TestClient(w.context.app);
+    const unauthenticated = await anonymous.request({
+      method: 'POST',
+      url: '/admin/restores',
+      payload,
+    });
+    expect(unauthenticated.statusCode).toBe(401);
+    const withoutToken = await w.admin.request({
+      method: 'POST',
+      url: '/admin/restores',
+      payload,
+      csrf: false,
+    });
+    expect(withoutToken.statusCode).toBe(403);
     await barrier(w.agent);
     expect(sent(w, 'server.restore_request')).toEqual([]);
   });

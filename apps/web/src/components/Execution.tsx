@@ -19,7 +19,7 @@ import {
   type WorkspacePurpose,
   type WorkspaceState,
 } from '@emucat/contracts';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   createWorkspace,
   discardWorkspace,
@@ -692,6 +692,19 @@ export function RemoteSessionCard({
   );
 }
 
+/** A few words under each mode's name, so that the three fit on one line. The full explanation is below. */
+const MODE_TAGLINE: Record<ExecutionMode, string> = {
+  local: 'Persistent local copy',
+  remote_volatile: 'Temporary, nothing kept',
+  remote_snapshot: 'Temporary, published',
+};
+
+/**
+ * The three modes side by side, as one radio group: arrow keys move between them, and each radio's
+ * description is its full explanation, or why it is unavailable. Only the chosen mode's explanation and
+ * every refusal are shown, so that the row stays one line high; the rest stay available to screen readers
+ * and as tooltips.
+ */
 function ModeSelector({
   modes,
   value,
@@ -702,30 +715,65 @@ function ModeSelector({
   onChange: (mode: ExecutionMode) => void;
 }) {
   return (
-    <fieldset className="mb-3">
+    <fieldset className="execution-modes">
       <legend className="form-label fs-6">Execution mode</legend>
-      {modes.map((mode) => (
-        <div className="form-check" key={mode.mode}>
-          <input
-            id={`mode-${mode.mode}`}
-            className="form-check-input"
-            type="radio"
-            name="execution-mode"
-            value={mode.mode}
-            checked={value === mode.mode}
-            disabled={!mode.available}
-            onChange={() => onChange(mode.mode)}
-            aria-describedby={`mode-${mode.mode}-help`}
-          />
-          <label className="form-check-label" htmlFor={`mode-${mode.mode}`}>
-            {MODE_TEXT[mode.mode]}
-            {mode.available ? '' : ' (not available)'}
-          </label>
-          <div id={`mode-${mode.mode}-help`} className="form-text mt-0">
-            {mode.available ? MODE_EXPLANATION[mode.mode] : mode.reason}
+      <div className="execution-mode-options">
+        {modes.map((mode) => (
+          <div className="execution-mode-option" key={mode.mode}>
+            <input
+              id={`mode-${mode.mode}`}
+              className="btn-check"
+              type="radio"
+              name="execution-mode"
+              value={mode.mode}
+              checked={value === mode.mode}
+              disabled={!mode.available}
+              onChange={() => onChange(mode.mode)}
+              aria-describedby={`mode-${mode.mode}-help`}
+            />
+            <label
+              className="btn btn-outline-primary execution-mode-button"
+              htmlFor={`mode-${mode.mode}`}
+              title={mode.available ? MODE_EXPLANATION[mode.mode] : (mode.reason ?? undefined)}
+              data-available={mode.available ? 'true' : 'false'}
+            >
+              <span className="execution-mode-name">
+                {MODE_TEXT[mode.mode]}
+                {mode.available ? null : (
+                  <>
+                    {' '}
+                    <span className="visually-hidden">(not available)</span>
+                  </>
+                )}
+              </span>
+              <span className="execution-mode-tagline" aria-hidden="true">
+                {mode.available ? MODE_TAGLINE[mode.mode] : 'Not available'}
+              </span>
+            </label>
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
+      <div className="execution-mode-help">
+        {modes.map((mode) => {
+          const shown = !mode.available || value === mode.mode;
+          return (
+            <p
+              key={mode.mode}
+              id={`mode-${mode.mode}-help`}
+              className={shown ? 'form-text mt-1 mb-0' : 'visually-hidden'}
+            >
+              {mode.available ? (
+                MODE_EXPLANATION[mode.mode]
+              ) : (
+                <>
+                  <span className="fw-semibold">{MODE_TEXT[mode.mode]} is not available:</span>{' '}
+                  {mode.reason}
+                </>
+              )}
+            </p>
+          );
+        })}
+      </div>
     </fieldset>
   );
 }
@@ -799,6 +847,7 @@ export function VmExecutionSection({
   const [error, setError] = useState<unknown>(null);
   const [started, setStarted] = useState<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const nowHeading = useId();
   // One request per intent: a retry after a lost response finds what it already started, and a
   // different agent, version or mode is a different request.
   const request = useRef<{ intent: string; id: string } | null>(null);
@@ -913,7 +962,7 @@ export function VmExecutionSection({
   const nothingNow = !localSession && activeRemote.length === 0 && !chosen?.lastVerification;
 
   return (
-    <section className="card" aria-labelledby="vm-execution-heading">
+    <section className="card execution-panel" aria-labelledby="vm-execution-heading">
       <div className="card-body">
         <h2 id="vm-execution-heading" ref={heading} tabIndex={-1} className="h6 card-title">
           Run and verify
@@ -927,9 +976,11 @@ export function VmExecutionSection({
           <p className="small mb-0">No paired agent can run this VM.</p>
         ) : null}
         {options.data && chosen ? (
-          <div className="row g-4">
-            <div className="col-12 col-xl-5">
+          <div className="execution-layout">
+            <div className="execution-mode-area">
               <ModeSelector modes={options.data.modes} value={mode} onChange={setMode} />
+            </div>
+            <div className="execution-controls">
               {remote ? (
                 <div className="mb-3">
                   <label htmlFor="execution-version" className="form-label">
@@ -1036,9 +1087,13 @@ export function VmExecutionSection({
                 </p>
               ) : null}
             </div>
-            <div className="col-12 col-xl-7">
-              <h3 className="h6">Now</h3>
-              {nothingNow ? <p className="small text-body-secondary">Nothing is running.</p> : null}
+            <section className="execution-now" aria-labelledby={nowHeading}>
+              <h3 id={nowHeading} className="h6">
+                Now
+              </h3>
+              {nothingNow ? (
+                <p className="small text-body-secondary mb-0">Nothing is running.</p>
+              ) : null}
               {localSession ? <SessionCard session={localSession} onChange={refresh} /> : null}
               {activeRemote.map((item) => (
                 <RemoteSessionCard
@@ -1051,7 +1106,7 @@ export function VmExecutionSection({
               {chosen.lastVerification ? (
                 <VerificationResult verification={chosen.lastVerification} />
               ) : null}
-            </div>
+            </section>
           </div>
         ) : null}
         {endedRemote.length > 0 ? (

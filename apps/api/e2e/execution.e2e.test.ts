@@ -883,7 +883,7 @@ describe('running and verifying VMs, end to end', () => {
           emulatorType: 'qemu',
           vmName: VM,
           versionId,
-          replace: { expectedVersionId, discardLocalChanges, confirmVmName: VM },
+          replace: { expectedVersionId, discardLocalChanges },
         },
       });
     }

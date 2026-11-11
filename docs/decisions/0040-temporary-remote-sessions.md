@@ -137,7 +137,9 @@ working copies; no historical session is reinterpreted. New manual working copie
 
 A restore may now replace the agent's persistent copy, as an explicit **replacement**:
 
-- The request carries `replace: { expectedVersionId, discardLocalChanges, confirmVmName }`. The server refuses it
+- The request carries `replace: { expectedVersionId, discardLocalChanges }`. The administrator confirms it with an
+  explicit destructive button (the VM's name used to be typed as well; that was dropped as needless friction for a
+  routine, explicitly started restore, since the safeguards below do the real work). The server refuses it
   while a session of the VM is active or unknown, while the agent is busy, if `expectedVersionId` is not what it
   records (a stale page), and if the copy is recorded as modified without `discardLocalChanges`.
 - The agent checks again: no session or operation on the VM; the directory is a plain directory; its recorded

@@ -233,6 +233,67 @@ describe('launching', () => {
     expect(view.getByText(/planned for Milestone 7/)).toBeTruthy();
   });
 
+  it('lays the modes out as one radio group, with Now beside it and every refusal in words', async () => {
+    remoteBase([]);
+    const view = await section();
+    const local = (await view.findByRole('radio', { name: 'Local' })) as HTMLInputElement;
+    const group = view.getByRole('group', { name: 'Execution mode' });
+    const radios = within(group).getAllByRole('radio') as HTMLInputElement[];
+    expect(radios.map((radio) => radio.value)).toEqual([
+      'local',
+      'remote_volatile',
+      'remote_snapshot',
+    ]);
+    // One native group: the browser gives it arrow-key navigation and a single tab stop.
+    expect(new Set(radios.map((radio) => radio.name))).toEqual(new Set(['execution-mode']));
+    // The three options share one row container, and Now is a sibling of the mode area, not inside it.
+    const row = local.closest('.execution-mode-options') as HTMLElement;
+    expect(row.querySelectorAll('input[type="radio"]')).toHaveLength(3);
+    const now = view.getByRole('region', { name: 'Now' });
+    const layout = now.parentElement as HTMLElement;
+    expect(layout.className).toBe('execution-layout');
+    expect([...layout.children].map((child) => child.className)).toEqual([
+      'execution-mode-area',
+      'execution-controls',
+      'execution-now',
+    ]);
+    expect(within(now).getByText('Nothing is running.')).toBeTruthy();
+
+    // Only the chosen mode's explanation is shown; the others stay as descriptions.
+    const help = (radio: HTMLInputElement) =>
+      document.getElementById(radio.getAttribute('aria-describedby') ?? '') as HTMLElement;
+    expect(help(local).className).not.toMatch(/visually-hidden/);
+    expect(help(local).textContent).toMatch(/persistent local copy/);
+    const volatile = view.getByRole('radio', { name: 'Remote Volatile' }) as HTMLInputElement;
+    expect(help(volatile).className).toMatch(/visually-hidden/);
+    expect(help(volatile).textContent).toMatch(/temporary copy is deleted/);
+
+    fireEvent.click(volatile);
+    expect(volatile.checked).toBe(true);
+    expect(help(volatile).className).not.toMatch(/visually-hidden/);
+    expect(help(local).className).toMatch(/visually-hidden/);
+    // The dependent controls follow the mode.
+    expect(view.getByLabelText('Version')).toBeTruthy();
+    expect(view.getByRole('button', { name: 'Start Remote Volatile' })).toBeTruthy();
+    fireEvent.click(local);
+    expect(view.queryByLabelText('Version')).toBeNull();
+    expect(view.getByRole('button', { name: 'Launch' })).toBeTruthy();
+  });
+
+  it('shows why a mode is unavailable, whichever mode is chosen', async () => {
+    base();
+    const view = await section();
+    const snapshot = (await view.findByRole('radio', {
+      name: 'Remote Snapshot (not available)',
+    })) as HTMLInputElement;
+    const help = document.getElementById(snapshot.getAttribute('aria-describedby') ?? '');
+    expect(help?.className).not.toMatch(/visually-hidden/);
+    expect(help?.textContent).toBe(
+      'Remote Snapshot is not available: Remote snapshot sessions are planned for Milestone 7.',
+    );
+    expect(view.getAllByText('Not available')).toHaveLength(2);
+  });
+
   it('sends only the agent, the VM, the mode and a request ID', async () => {
     const api = base({ 'POST /admin/sessions': session({ state: 'requested', pid: null }) });
     const view = await section();

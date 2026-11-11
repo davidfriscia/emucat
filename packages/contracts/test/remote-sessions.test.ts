@@ -85,14 +85,27 @@ describe('replacing a persistent copy', () => {
     versionId: ids.version,
   };
 
-  it('is explicit, names what the page showed, and repeats the VM name', () => {
+  it('is explicit, names what the page showed, and acknowledges discarded changes', () => {
     expect(createRestoreRequestSchema.safeParse(restore).success).toBe(true);
-    const replace = { expectedVersionId: null, discardLocalChanges: false, confirmVmName: 'Win98' };
+    const replace = { expectedVersionId: null, discardLocalChanges: false };
     expect(createRestoreRequestSchema.safeParse({ ...restore, replace }).success).toBe(true);
     expect(
       createRestoreRequestSchema.safeParse({
         ...restore,
-        replace: { ...replace, confirmVmName: '' },
+        replace: { ...replace, discardLocalChanges: true },
+      }).success,
+    ).toBe(true);
+    // The typed VM name is no longer part of a replacement, and nothing unknown is accepted.
+    expect(
+      createRestoreRequestSchema.safeParse({
+        ...restore,
+        replace: { ...replace, confirmVmName: 'Win98' },
+      }).success,
+    ).toBe(false);
+    expect(
+      createRestoreRequestSchema.safeParse({
+        ...restore,
+        replace: { expectedVersionId: null },
       }).success,
     ).toBe(false);
     expect(

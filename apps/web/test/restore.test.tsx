@@ -335,7 +335,7 @@ describe('replacing a local copy', () => {
     return within(await screen.findByRole('dialog', { name: 'Replace the local copy of Win98' }));
   };
 
-  it('shows what is installed and what replaces it, and needs the name typed', async () => {
+  it('shows what is installed and what replaces it, and confirms with a button, not a typed name', async () => {
     const api = base({
       [`GET ${OPTIONS_PATH}`]: holding('verified'),
       'POST /admin/restores': operation({
@@ -346,15 +346,24 @@ describe('replacing a local copy', () => {
     fireEvent.change(dialog.getByLabelText('Version'), { target: { value: SNAPSHOT_ID } });
     expect(dialog.getByText('Installed now')).toBeTruthy();
     expect(dialog.getByText('Replaced by')).toBeTruthy();
+    expect(
+      dialog.getByText('Target agent', { selector: 'dt' }).nextElementSibling?.textContent,
+    ).toBe('Study PC');
+    expect(dialog.getByText('Local changes').nextElementSibling?.textContent).toMatch(/^None/);
     expect(dialog.getByText(/the current copy is left as it is/)).toBeTruthy();
-    // A verified copy needs no warning, and no discard.
-    expect(dialog.queryByRole('alert')).toBeNull();
-    const replace = dialog.getByRole('button', { name: 'Replace' }) as HTMLButtonElement;
-    expect(replace.disabled).toBe(true);
-    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'Win95' } });
-    expect(replace.disabled).toBe(true);
-    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'win98' } });
+    // Every replacement says what it does to the current copy; a verified one needs no further warning.
+    const alerts = dialog.getAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.textContent).toMatch(/will be replaced.*may be permanently lost/);
+    expect(dialog.queryByRole('textbox')).toBeNull();
+    expect(dialog.queryByLabelText(/to confirm/)).toBeNull();
+
+    const replace = dialog.getByRole('button', {
+      name: 'Replace existing VM',
+    }) as HTMLButtonElement;
     expect(replace.disabled).toBe(false);
+    expect(replace.className).toMatch(/btn-danger/);
+    expect(dialog.getByRole('button', { name: 'Cancel' }).className).not.toMatch(/btn-danger/);
     fireEvent.click(replace);
     await waitFor(() => expect(api.callsTo('POST', '/admin/restores')).toHaveLength(1));
     expect(api.callsTo('POST', '/admin/restores')[0]?.body).toEqual({
@@ -362,11 +371,24 @@ describe('replacing a local copy', () => {
       emulatorType: 'qemu',
       vmName: 'Win98',
       versionId: SNAPSHOT_ID,
-      replace: {
-        expectedVersionId: VERSION_ID,
-        discardLocalChanges: false,
-        confirmVmName: 'win98',
-      },
+      replace: { expectedVersionId: VERSION_ID, discardLocalChanges: false },
+    });
+  });
+
+  it('names the discard on the button once it is acknowledged', async () => {
+    const api = base({
+      [`GET ${OPTIONS_PATH}`]: holding('verified'),
+      'POST /admin/restores': operation({
+        replacement: { replacedVersionId: VERSION_ID, discardLocalChanges: true },
+      }),
+    });
+    const dialog = await openReplacement();
+    fireEvent.click(dialog.getByLabelText('Discard any changes in the current copy'));
+    expect(dialog.queryByRole('button', { name: 'Replace existing VM' })).toBeNull();
+    fireEvent.click(dialog.getByRole('button', { name: 'Discard changes and replace VM' }));
+    await waitFor(() => expect(api.callsTo('POST', '/admin/restores')).toHaveLength(1));
+    expect(api.callsTo('POST', '/admin/restores')[0]?.body).toMatchObject({
+      replace: { expectedVersionId: VERSION_ID, discardLocalChanges: true },
     });
   });
 
@@ -376,12 +398,22 @@ describe('replacing a local copy', () => {
       [`POST ${VM_PATH}/snapshots`]: new Reply(202, {}),
     });
     const dialog = await openReplacement();
-    expect(dialog.getByRole('alert').textContent).toMatch(/removes them for good/);
-    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'Win98' } });
-    const replace = dialog.getByRole('button', { name: 'Replace' }) as HTMLButtonElement;
+    expect(dialog.getByText('Local changes').nextElementSibling?.textContent).toMatch(/^Modified/);
+    const warnings = dialog.getAllByRole('alert').map((alert) => alert.textContent);
+    expect(warnings.some((text) => /removes them for good/.test(text ?? ''))).toBe(true);
+    const replace = dialog.getByRole('button', {
+      name: 'Replace existing VM',
+    }) as HTMLButtonElement;
     expect(replace.disabled).toBe(true);
     fireEvent.click(dialog.getByLabelText('Discard any changes in the current copy'));
-    expect(replace.disabled).toBe(false);
+    const confirm = dialog.getByRole('button', {
+      name: 'Discard changes and replace VM',
+    }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    fireEvent.click(dialog.getByLabelText('Discard any changes in the current copy'));
+    expect(
+      (dialog.getByRole('button', { name: 'Replace existing VM' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
 
     fireEvent.click(dialog.getByRole('button', { name: 'Snapshot it first…' }));
     const snapshot = within(
@@ -401,11 +433,12 @@ describe('replacing a local copy', () => {
   it('warns that an unverified copy may hold changes, without requiring the discard', async () => {
     base({ [`GET ${OPTIONS_PATH}`]: holding('unverified') });
     const dialog = await openReplacement();
-    expect(dialog.getByRole('alert').textContent).toMatch(/may hold changes/);
-    fireEvent.change(dialog.getByLabelText(/to confirm/), { target: { value: 'Win98' } });
-    expect((dialog.getByRole('button', { name: 'Replace' }) as HTMLButtonElement).disabled).toBe(
-      false,
-    );
+    const warnings = dialog.getAllByRole('alert').map((alert) => alert.textContent);
+    expect(warnings.some((text) => /may hold changes/.test(text ?? ''))).toBe(true);
+    expect(dialog.getByText('Local changes').nextElementSibling?.textContent).toMatch(/^Not known/);
+    expect(
+      (dialog.getByRole('button', { name: 'Replace existing VM' }) as HTMLButtonElement).disabled,
+    ).toBe(false);
     expect(dialog.getByText(/verifies the current copy against its version/)).toBeTruthy();
   });
 

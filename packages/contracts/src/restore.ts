@@ -305,14 +305,15 @@ export type RestoreErrorPayload = z.infer<typeof restoreErrorPayloadSchema>;
 // What an administrator asks for, and sees.
 
 /**
- * Replacing an existing persistent copy: always explicit. `expectedVersionId` is the version the page
- * showed as installed, so that a stale page cannot replace a copy it did not show. The VM's name is typed
- * again, as for every destructive action.
+ * Replacing an existing persistent copy: always explicit, since a request without this object never
+ * touches a copy. `expectedVersionId` is the version the page showed as installed, so that a stale page
+ * cannot replace a copy it did not show. `discardLocalChanges` acknowledges that changes in no version are
+ * lost, and is required when the copy is known to differ. The administrator confirms with an explicit
+ * button; the VM's name is not typed again.
  */
 export const restoreReplaceSchema = z.strictObject({
   expectedVersionId: z.uuid().nullable(),
   discardLocalChanges: z.boolean(),
-  confirmVmName: z.string().min(1).max(255),
 });
 export type RestoreReplace = z.infer<typeof restoreReplaceSchema>;
 
