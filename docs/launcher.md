@@ -50,14 +50,38 @@ The program is `qemu-system-<system>.exe` next to the configured QEMU executable
 checks. Nothing on `PATH` is searched. The agent then appends `-qmp stdio`, its own channel to QEMU's
 monitor, which opens no listener.
 
+### QEMU's human monitor
+
+Run by itself, a graphical QEMU shows its human monitor (HMP) on a virtual console: Ctrl+Alt+2 opens it,
+and Ctrl+Alt+1 returns to the VM. QEMU makes that monitor only while no other monitor is configured, and
+`-qmp` counts as one, so the agent also appends `-monitor vc` after `-qmp stdio`, unless the VM's own
+arguments say otherwise. Nothing is added when they:
+
+- configure a monitor: `-monitor vc`, `-monitor vc:WxH`, or `-mon` on a `-chardev vc` or `-chardev null`;
+- turn it off: `-monitor none`;
+- turn QEMU's defaults off: `-nodefaults`, under which QEMU makes no monitor either;
+- have no display: `-display none`, `-nographic` or `-machine graphics=off`.
+
+Options are read in `-option value`, `--option value` and `-option=value` form, and a value is never
+taken for an option. The rule is the same in Local, Remote Volatile and Remote Snapshot sessions, since
+they all start the VM through the same plan; the VM's arguments, directory and `run.bat` are not changed.
+
+Only monitors on QEMU's own window are allowed in a VM's arguments: `-monitor vc[:WxH]`, `-monitor none`,
+`-chardev vc,id=…` (with `width`, `height`, `cols`, `rows`) or `-chardev null,id=…`, and
+`-mon chardev=…,mode=readline` on one of them. `-monitor stdio` is refused, because standard input and
+output carry the agent's QMP channel, and so are QMP monitors (`-qmp`, `-mon mode=control`), every other
+monitor or character device backend, and character device IDs named `compat_monitor…`, which QEMU gives
+its own monitors. Like running QEMU from `run.bat`, the human monitor gives whoever is at QEMU's window
+full control of QEMU.
+
 ### What QEMU arguments are refused
 
 Every argument is checked against an allowlist, whichever description it comes from. Every file argument
 must resolve to a plain file inside the VM's directory: no absolute paths elsewhere, no `..`, no links.
 Refused outright, with the reason in the error:
 
-- monitors and character devices: `-monitor`, `-qmp`, `-mon`, `-chardev`, `-serial`, `-parallel`,
-  `-nographic`;
+- QMP monitors, ports and the console: `-qmp`, `-qmp-pretty`, `-serial`, `-parallel`, `-nographic`, and
+  monitors or character devices other than those above;
 - anything that changes how QEMU runs or detaches from the tracked process: `-daemonize`, `-no-shutdown`,
   `-run-with`, `-sandbox`;
 - host files and code: `-virtfs`, `-fsdev`, `-object`, `-plugin`, `-readconfig`, `-writeconfig`, `-L`,

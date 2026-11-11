@@ -20,8 +20,10 @@ start from batch files that can contain anything.
   text and accepted only if it is one plain QEMU command; anything a shell would interpret is refused
   with `launch_configuration_required`, and a launch profile is the remedy.
 - **An allowlist, not a blocklist, of QEMU arguments,** with every file argument confined to the VM's
-  directory and no links. Monitors, listeners, host files, host devices and options that detach the
-  process are refused by name, so the error can say why. A host forward must name `127.0.0.1`.
+  directory and no links. Monitors that reach outside QEMU's own window, listeners, host files, host
+  devices and options that detach the process are refused by name, so the error can say why. The human
+  monitor on QEMU's window (`-monitor vc`), which `-qmp` would otherwise suppress, is kept: see
+  `docs/launcher.md`. A host forward must name `127.0.0.1`.
 - **The executable is checked:** its file name must be `86Box.exe` or `qemu-system-*.exe`, and the QEMU
   system binary is the sibling of the configured one. `PATH` is never searched.
 

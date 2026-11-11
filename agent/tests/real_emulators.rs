@@ -326,3 +326,90 @@ async fn real_qemu_quits_through_its_monitor_when_forced() {
     assert_eq!(stopped.exit_code, Some(0), "QMP quit is a clean exit");
     assert_eq!(stopped.code.as_deref(), Some("forced"));
 }
+
+/// A graphical PC with no disks, as a user's `run.bat` describes one: QEMU opens its window, and SeaBIOS
+/// finds nothing to boot.
+const QEMU_GRAPHICAL: &str = "@echo off\r\ncd /d \"%~dp0\"\r\nqemu-system-i386 -machine pc -cpu pentium \
+-vga cirrus -boot once=a -m 16 -net nic,model=ne2k_pci -net user\r\n";
+
+/// QEMU accepts the agent's `-qmp stdio -monitor vc` beside a user's graphical command line in every mode:
+/// it starts and stays up, answers QMP, is tracked, and quits through QMP when stopped. Ctrl+Alt+2 on its
+/// window then shows the human monitor, which only a person at the window can check.
+#[tokio::test]
+#[ignore = "needs QEMU: set EMUCAT_REAL_QEMU"]
+async fn real_qemu_keeps_its_human_monitor_in_every_mode() {
+    use emucat_agent::protocol::WorkspacePurpose;
+    let Some(executable) = installed("EMUCAT_REAL_QEMU") else {
+        println!("EMUCAT_REAL_QEMU is not set; skipped");
+        return;
+    };
+    let machine = Machine::new(EmulatorType::Qemu, executable);
+    let state_dir = machine.directory.path().join("state");
+    let local = machine.vm(EmulatorType::Qemu, "disposable-hmp");
+    fs::write(local.join("run.bat"), QEMU_GRAPHICAL).unwrap();
+    let mut agent = machine.manager(settings());
+
+    let mut requests = vec![(launch(EmulatorType::Qemu, "disposable-hmp"), local)];
+    for (mode, purpose) in [
+        (
+            ExecutionMode::RemoteVolatile,
+            WorkspacePurpose::RemoteVolatile,
+        ),
+        (
+            ExecutionMode::RemoteSnapshot,
+            WorkspacePurpose::RemoteSnapshot,
+        ),
+    ] {
+        let workspace = Uuid::new_v4();
+        emucat_agent::workspaces::write_record(
+            &state_dir,
+            &emucat_agent::workspaces::WorkspaceRecord {
+                workspace_id: workspace,
+                emulator_type: EmulatorType::Qemu,
+                vm_name: VmName::new("disposable-hmp").unwrap(),
+                source_version_id: Uuid::new_v4(),
+                manifest_sha256: None,
+                purpose: Some(purpose),
+            },
+        )
+        .unwrap();
+        let root =
+            emucat_agent::workspaces::workspace_base(&state_dir, workspace).join("disposable-hmp");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("run.bat"), QEMU_GRAPHICAL).unwrap();
+        requests.push((
+            VmLaunchRequest {
+                mode,
+                workspace_id: Some(workspace),
+                ..launch(EmulatorType::Qemu, "disposable-hmp")
+            },
+            root,
+        ));
+    }
+
+    for (request, root) in requests {
+        println!("{:?}", request.mode);
+        agent
+            .manager
+            .handle(Message::ServerVmLaunch(request.clone()));
+        let running = agent
+            .wait_state(request.session_id, AgentExecutionState::Running)
+            .await;
+        assert!(running.graceful_stop_available, "QMP answered on stdio");
+        assert!(running.pid.is_some());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(agent.manager.active_sessions(), vec![request.session_id]);
+
+        agent.manager.handle(stop(&request, true));
+        let stopped = agent
+            .wait_state(request.session_id, AgentExecutionState::Stopped)
+            .await;
+        assert_eq!(stopped.exit_code, Some(0), "QMP quit is a clean exit");
+        assert_eq!(stopped.code.as_deref(), Some("forced"));
+        assert!(agent.manager.active_sessions().is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("run.bat")).unwrap(),
+            QEMU_GRAPHICAL
+        );
+    }
+}

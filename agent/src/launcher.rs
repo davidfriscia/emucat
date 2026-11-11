@@ -288,6 +288,12 @@ fn plan_qemu(executable: &Path, root: PathBuf) -> Result<LaunchPlan, LaunchError
     // The agent's own channel to QEMU's monitor, on QEMU's standard input and output. It opens no listener.
     args.push(OsString::from("-qmp"));
     args.push(OsString::from("stdio"));
+    // QEMU counts `-qmp` as a monitor, and then no longer creates the human monitor it would otherwise show
+    // on Ctrl+Alt+2. It is asked for again, exactly as QEMU would have made it, unless the VM says otherwise.
+    if human_monitor(&command.args) == HumanMonitor::Added {
+        args.push(OsString::from("-monitor"));
+        args.push(OsString::from("vc"));
+    }
     Ok(LaunchPlan {
         spawn: SpawnRequest {
             program,
@@ -298,6 +304,107 @@ fn plan_qemu(executable: &Path, root: PathBuf) -> Result<LaunchPlan, LaunchError
         graceful: GracefulStop::QmpPowerdown,
         source,
     })
+}
+
+/// What becomes of QEMU's human monitor (HMP) once the agent adds `-qmp stdio`, judged from the VM's own
+/// arguments alone.
+///
+/// Run by itself, a graphical QEMU creates a human monitor on a virtual console, shown on Ctrl+Alt+2. It
+/// does so only while no monitor is configured, and `-qmp` is one, so the agent's own channel would take
+/// that console away. It is added back as `-monitor vc` only when the VM itself would have had it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HumanMonitor {
+    /// QEMU would have made its default monitor: the agent adds `-monitor vc`.
+    Added,
+    /// The VM configures a monitor itself, with `-monitor` or `-mon`. Nothing is added beside it.
+    Configured,
+    /// The VM turns the monitor off with `-monitor none`.
+    Disabled,
+    /// `-nodefaults`: QEMU would make no monitor of its own either.
+    DefaultsDisabled,
+    /// No display, so no console to show a monitor on: `-display none`, `-nographic`, or
+    /// `-machine graphics=off`.
+    Headless,
+}
+
+/// QEMU options that take no value. Any other option takes the next argument as its value.
+const QEMU_FLAGS: &[&str] = &[
+    "usb",
+    "enable-kvm",
+    "no-acpi",
+    "no-hpet",
+    "no-reboot",
+    "snapshot",
+    "full-screen",
+    "nodefaults",
+    "no-fd-bootchk",
+    "localtime",
+    "win2k-hack",
+    "no-user-config",
+    "no-frame",
+    "alt-grab",
+    "ctrl-grab",
+    // Refused by the allowlist, but known here so that what follows them is read correctly.
+    "nographic",
+    "no-shutdown",
+    "daemonize",
+    "s",
+];
+
+/// An option's name, from `-name` or `--name`, and a value written into it as `-name=value`.
+fn split_option(raw: &str) -> Option<(&str, Option<&str>)> {
+    let name = raw.strip_prefix("--").or_else(|| raw.strip_prefix('-'))?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(match name.split_once('=') {
+        Some((name, value)) => (name, Some(value)),
+        None => (name, None),
+    })
+}
+
+/// Reads the VM's arguments, in either `-option value` or `-option=value` form, for what they say about
+/// the human monitor. Values are never mistaken for options: `-name -monitor` names the VM `-monitor`.
+pub fn human_monitor(args: &[String]) -> HumanMonitor {
+    let (mut configured, mut disabled, mut no_defaults, mut headless) =
+        (false, false, false, false);
+    let mut index = 0;
+    while index < args.len() {
+        let Some((name, inline)) = split_option(&args[index]) else {
+            index += 1;
+            continue;
+        };
+        let value = if inline.is_some() || QEMU_FLAGS.contains(&name) {
+            index += 1;
+            inline
+        } else {
+            index += 2;
+            args.get(index - 1).map(String::as_str)
+        };
+        let elements = || value.unwrap_or_default().split(',');
+        match name {
+            "monitor" if value == Some("none") => disabled = true,
+            "monitor" | "mon" => configured = true,
+            "nodefaults" => no_defaults = true,
+            "nographic" => headless = true,
+            "display" if elements().next() == Some("none") => headless = true,
+            "machine" | "M" if elements().any(|element| element == "graphics=off") => {
+                headless = true;
+            }
+            _ => {}
+        }
+    }
+    if configured {
+        HumanMonitor::Configured
+    } else if disabled {
+        HumanMonitor::Disabled
+    } else if no_defaults {
+        HumanMonitor::DefaultsDisabled
+    } else if headless {
+        HumanMonitor::Headless
+    } else {
+        HumanMonitor::Added
+    }
 }
 
 fn read_text(path: &Path, name: &str) -> Result<String, LaunchError> {
@@ -559,27 +666,16 @@ pub fn check_vm_file(root: &Path, relative: &str) -> Result<(), String> {
 }
 
 /// Options that would let a launcher reach outside its VM: other files, listeners, scripts, host
-/// devices, or the agent's own monitor channel. Named so that a refusal can say why.
+/// devices, or the agent's own monitor channel. Named so that a refusal can say why. A human monitor on
+/// QEMU's own window is allowed, and checked by [`check_monitor`], [`check_chardev`] and [`check_mon`].
 const REFUSED: &[(&str, &str)] = &[
     (
-        "monitor",
-        "it opens a monitor, which EmuCat reserves for itself",
-    ),
-    (
         "qmp",
-        "it opens a monitor, which EmuCat reserves for itself",
+        "it opens a QMP monitor, which EmuCat reserves for itself",
     ),
     (
         "qmp-pretty",
-        "it opens a monitor, which EmuCat reserves for itself",
-    ),
-    (
-        "mon",
-        "it opens a monitor, which EmuCat reserves for itself",
-    ),
-    (
-        "chardev",
-        "character devices can reach files, sockets and pipes",
+        "it opens a QMP monitor, which EmuCat reserves for itself",
     ),
     ("serial", "a serial port can reach files, sockets and pipes"),
     ("parallel", "a parallel port can reach files and devices"),
@@ -773,11 +869,104 @@ fn check_drive(value: &str, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `WxH` or `COLSCxROWSC`, the size of a virtual console.
+fn console_size(value: &str) -> bool {
+    let number = |part: &str| {
+        let digits = part.strip_suffix('C').unwrap_or(part);
+        !digits.is_empty() && digits.len() <= 5 && digits.chars().all(|c| c.is_ascii_digit())
+    };
+    matches!(value.split_once('x'), Some((width, height)) if number(width) && number(height))
+}
+
+/// `-monitor vc`, the human monitor on QEMU's own window, or `-monitor none`. Every other monitor reaches
+/// a file, a socket, a pipe or the console, and `stdio` is the agent's own channel.
+fn check_monitor(value: &str) -> Result<(), String> {
+    let on_window = value == "vc" || value.strip_prefix("vc:").is_some_and(console_size);
+    match value {
+        _ if on_window || value == "none" => Ok(()),
+        "stdio" => Err(
+            "EmuCat uses QEMU's standard input and output for its own QMP monitor. Use -monitor vc, \
+             which QEMU shows on Ctrl+Alt+2"
+                .to_owned(),
+        ),
+        _ => Err(
+            "only -monitor vc and -monitor none are allowed: other monitors reach files, sockets, \
+             pipes or the host console"
+                .to_owned(),
+        ),
+    }
+}
+
+/// `-chardev vc,id=ID[,width=,height=,cols=,rows=]` or `-chardev null,id=ID`: the only character devices that
+/// reach nothing outside QEMU's window. Returns the device's ID. QEMU names the monitors it makes for
+/// `-qmp` and `-monitor` `compat_monitorN`, so those IDs are left to it.
+fn check_chardev(value: &str) -> Result<&str, String> {
+    let (backend, pairs) = options(value)?;
+    let sizes: &[&str] = match backend {
+        Some("vc") => &["width", "height", "cols", "rows"],
+        Some("null") => &[],
+        _ => {
+            return Err(
+                "only vc and null character devices are allowed: others reach files, sockets and pipes"
+                    .to_owned(),
+            );
+        }
+    };
+    let mut id = None;
+    for (key, item) in pairs {
+        match key {
+            "id" if charset(item, "_-.") => id = Some(item),
+            _ if sizes.contains(&key)
+                && item.len() <= 5
+                && item.parse::<u32>().is_ok_and(|n| n > 0) => {}
+            _ => {
+                return Err(format!(
+                    "the character device option {key}={item} is not allowed"
+                ));
+            }
+        }
+    }
+    let id = id.ok_or_else(|| "a character device needs an id".to_owned())?;
+    if id.to_ascii_lowercase().starts_with("compat_monitor") {
+        return Err(format!(
+            "{id} is a name QEMU gives its own monitors, and would clash with EmuCat's"
+        ));
+    }
+    Ok(id)
+}
+
+/// `-mon [chardev=]ID[,mode=readline][,pretty=on|off]`: a human monitor on a character device that the same
+/// arguments define. Returns the device's ID. A QMP monitor (`mode=control`) is the agent's own.
+fn check_mon(value: &str) -> Result<&str, String> {
+    let (head, pairs) = options(value)?;
+    let mut chardev = head;
+    for (key, item) in pairs {
+        match key {
+            "chardev" if chardev.is_none() => chardev = Some(item),
+            "mode" if item == "readline" => {}
+            "mode" => {
+                return Err(
+                    "only mode=readline is allowed: a QMP monitor is EmuCat's own".to_owned(),
+                );
+            }
+            "pretty" if matches!(item, "" | "on" | "off") => {}
+            "id" if charset(item, "_-.") => {}
+            _ => return Err(format!("the monitor option {key}={item} is not allowed")),
+        }
+    }
+    chardev
+        .filter(|id| charset(id, "_-."))
+        .ok_or_else(|| "a monitor must name its character device with chardev=".to_owned())
+}
+
 /// Checks a QEMU argument vector against the allowlist. File arguments must be inside the VM's directory.
 pub fn check_qemu_arguments(args: &[String], root: &Path) -> Result<(), LaunchError> {
     if args.len() > MAX_ARGUMENTS {
         return Err(required("it has too many arguments"));
     }
+    // Character devices that `-chardev` defines, and those `-mon` puts a monitor on, which must be among them.
+    let mut chardevs: Vec<&str> = Vec::new();
+    let mut monitored: Vec<&str> = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let raw = &args[index];
@@ -789,25 +978,7 @@ pub fn check_qemu_arguments(args: &[String], root: &Path) -> Result<(), LaunchEr
         if let Some((_, why)) = REFUSED.iter().find(|(refused, _)| *refused == name) {
             return Err(required(format!("-{name} is not allowed: {why}")));
         }
-        let flag = matches!(
-            name,
-            "usb"
-                | "enable-kvm"
-                | "no-acpi"
-                | "no-hpet"
-                | "no-reboot"
-                | "snapshot"
-                | "full-screen"
-                | "nodefaults"
-                | "no-fd-bootchk"
-                | "localtime"
-                | "win2k-hack"
-                | "no-user-config"
-                | "no-frame"
-                | "alt-grab"
-                | "ctrl-grab"
-        );
-        if flag {
+        if QEMU_FLAGS.contains(&name) {
             index += 1;
             continue;
         }
@@ -927,6 +1098,9 @@ pub fn check_qemu_arguments(args: &[String], root: &Path) -> Result<(), LaunchEr
                 _ => Err(format!("-audiodev {value} is not allowed")),
             },
             "soundhw" => simple(value, "_-,"),
+            "monitor" => check_monitor(value),
+            "chardev" => check_chardev(value).map(|id| chardevs.push(id)),
+            "mon" => check_mon(value).map(|id| monitored.push(id)),
             _ => Err(format!(
                 "-{name} is not an option EmuCat can check. Remove it, or describe the VM in {QEMU_PROFILE_FILE} \
                  with options it can check"
@@ -934,6 +1108,11 @@ pub fn check_qemu_arguments(args: &[String], root: &Path) -> Result<(), LaunchEr
         };
         checked.map_err(|why| required(format!("-{name} {value}: {why}")))?;
         index += 2;
+    }
+    if let Some(missing) = monitored.iter().find(|id| !chardevs.contains(id)) {
+        return Err(required(format!(
+            "-mon chardev={missing}: no -chardev vc or -chardev null has that id"
+        )));
     }
     Ok(())
 }
@@ -1039,6 +1218,246 @@ mod tests {
         ] {
             assert!(ok(&refused).is_err(), "{refused:?}");
         }
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn a_graphical_vm_gets_back_the_human_monitor_qemu_would_have_shown() {
+        // The VM this was found with: QEMU's default monitor, on Ctrl+Alt+2.
+        let nt40 = [
+            "-machine",
+            "pc",
+            "-cpu",
+            "pentium",
+            "-vga",
+            "cirrus",
+            "-boot",
+            "once=a",
+            "-m",
+            "128",
+            "-drive",
+            "file=nt40.qcow2.img,format=qcow2,index=0,media=disk",
+            "-net",
+            "nic,model=ne2k_pci",
+            "-net",
+            "user",
+        ];
+        assert_eq!(human_monitor(&strings(&nt40)), HumanMonitor::Added);
+        assert_eq!(human_monitor(&[]), HumanMonitor::Added);
+        for graphical in [
+            &["-display", "sdl"][..],
+            &["-display", "gtk,zoom-to-fit=on"],
+            &["-machine", "pc,graphics=on"],
+            // Values are not options, whatever they look like.
+            &["-name", "-monitor"],
+            &["-name", "-nographic", "-m", "64"],
+        ] {
+            assert_eq!(
+                human_monitor(&strings(graphical)),
+                HumanMonitor::Added,
+                "{graphical:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_monitor_the_vm_configures_or_disables_is_respected() {
+        for (args, expected) in [
+            (&["-monitor", "vc"][..], HumanMonitor::Configured),
+            (&["-monitor", "vc:800x600"], HumanMonitor::Configured),
+            (
+                &["-chardev", "vc,id=hmp", "-mon", "chardev=hmp,mode=readline"],
+                HumanMonitor::Configured,
+            ),
+            (&["-monitor", "none"], HumanMonitor::Disabled),
+            (&["-nodefaults", "-m", "64"], HumanMonitor::DefaultsDisabled),
+            // A monitor of its own wins over defaults switched off.
+            (&["-nodefaults", "-monitor", "vc"], HumanMonitor::Configured),
+            // A character device alone is not a monitor.
+            (&["-chardev", "vc,id=spare"], HumanMonitor::Added),
+            // `--option` and `-option=value` forms, which QEMU itself may not take, are read all the same.
+            (&["--monitor", "vc"], HumanMonitor::Configured),
+            (&["-monitor=vc"], HumanMonitor::Configured),
+            (&["--monitor=none"], HumanMonitor::Disabled),
+            (&["-mon=chardev=hmp"], HumanMonitor::Configured),
+            (&["--nodefaults"], HumanMonitor::DefaultsDisabled),
+        ] {
+            assert_eq!(human_monitor(&strings(args)), expected, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_headless_vm_gets_no_window_monitor() {
+        for args in [
+            &["-display", "none"][..],
+            &["-display", "none,gl=off"],
+            &["-display=none"],
+            &["--display", "none"],
+            &["-nographic"],
+            &["--nographic", "-m", "64"],
+            &["-machine", "pc,graphics=off"],
+            &["-M=pc,graphics=off"],
+        ] {
+            assert_eq!(
+                human_monitor(&strings(args)),
+                HumanMonitor::Headless,
+                "{args:?}"
+            );
+        }
+        // A monitor the VM asks for is its own, display or not.
+        assert_eq!(
+            human_monitor(&strings(&["-display", "none", "-monitor", "vc"])),
+            HumanMonitor::Configured
+        );
+    }
+
+    fn qemu_root(launcher: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("run.bat"), launcher).unwrap();
+        fs::write(root.path().join("disk.img"), b"x").unwrap();
+        root
+    }
+
+    fn planned(root: &Path) -> Vec<String> {
+        // The configured executable is the system the launcher asks for, so it is used as it is.
+        let plan = plan_qemu(
+            Path::new("C:\\qemu\\qemu-system-i386.exe"),
+            root.to_path_buf(),
+        )
+        .unwrap();
+        assert_eq!(plan.spawn.working_dir, root, "the VM's own directory");
+        assert!(plan.spawn.qmp_stdio);
+        assert_eq!(plan.graceful, GracefulStop::QmpPowerdown);
+        plan.spawn
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_launch_keeps_the_vm_arguments_and_adds_qmp_then_the_human_monitor() {
+        let root = qemu_root("qemu-system-i386 -m 128 -vga cirrus -hda disk.img\r\n");
+        assert_eq!(
+            planned(root.path()),
+            [
+                "-m", "128", "-vga", "cirrus", "-hda", "disk.img", "-qmp", "stdio", "-monitor",
+                "vc"
+            ]
+        );
+        // A launch profile, which takes precedence, gets the same.
+        fs::write(
+            root.path().join(QEMU_PROFILE_FILE),
+            r#"{"profileVersion":1,"system":"i386","args":["-m","64","-hda","disk.img"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            planned(root.path()),
+            [
+                "-m", "64", "-hda", "disk.img", "-qmp", "stdio", "-monitor", "vc"
+            ]
+        );
+        assert!(root.path().join("run.bat").is_file());
+    }
+
+    #[test]
+    fn the_launch_adds_no_monitor_beside_one_the_vm_has_or_turns_off() {
+        for (launcher, tail) in [
+            (
+                "qemu-system-i386 -hda disk.img -monitor vc",
+                &["-monitor", "vc", "-qmp", "stdio"][..],
+            ),
+            (
+                "qemu-system-i386 -hda disk.img -monitor none",
+                &["-monitor", "none", "-qmp", "stdio"],
+            ),
+            (
+                "qemu-system-i386 -hda disk.img -chardev vc,id=hmp,cols=80,rows=25 -mon chardev=hmp",
+                &[
+                    "-chardev",
+                    "vc,id=hmp,cols=80,rows=25",
+                    "-mon",
+                    "chardev=hmp",
+                    "-qmp",
+                    "stdio",
+                ],
+            ),
+            (
+                "qemu-system-i386 -hda disk.img -display none",
+                &["-display", "none", "-qmp", "stdio"],
+            ),
+            (
+                "qemu-system-i386 -hda disk.img -nodefaults",
+                &["-nodefaults", "-qmp", "stdio"],
+            ),
+        ] {
+            let root = qemu_root(launcher);
+            let args = planned(root.path());
+            assert_eq!(&args[2..], tail, "{launcher}");
+            let monitors = args
+                .iter()
+                .filter(|a| matches!(a.as_str(), "-monitor" | "-mon"))
+                .count();
+            assert!(monitors <= 1, "{launcher}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn only_monitors_on_qemus_own_window_are_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        let check = |args: &[&str]| check_qemu_arguments(&strings(args), root.path());
+        for allowed in [
+            &["-monitor", "vc"][..],
+            &["-monitor", "vc:1024x768"],
+            &["-monitor", "vc:80Cx24C"],
+            &["-monitor", "none"],
+            &["-chardev", "vc,id=hmp", "-mon", "chardev=hmp"],
+            &[
+                "-mon",
+                "hmp,mode=readline",
+                "-chardev",
+                "vc,id=hmp,width=640,height=480",
+            ],
+            &[
+                "-chardev",
+                "null,id=nowhere",
+                "-mon",
+                "chardev=nowhere,pretty=off",
+            ],
+            &["-chardev", "vc,id=spare"],
+        ] {
+            assert!(check(allowed).is_ok(), "{allowed:?}: {:?}", check(allowed));
+        }
+        for refused in [
+            &["-monitor", "stdio"][..],
+            &["-monitor", "tcp:127.0.0.1:4444,server,nowait"],
+            &["-monitor", "telnet::4444,server"],
+            &["-monitor", "file:C:\\x"],
+            &["-monitor", "pipe:x"],
+            &["-monitor", "chardev:hmp"],
+            &["-monitor", "vc:big"],
+            &["-monitor=vc"],
+            &["-monitor"],
+            &["-mon", "chardev=hmp"],
+            &["-chardev", "vc,id=hmp", "-mon", "chardev=hmp,mode=control"],
+            &["-chardev", "vc,id=hmp", "-mon", "chardev=other"],
+            &["-chardev", "stdio,id=hmp", "-mon", "chardev=hmp"],
+            &["-chardev", "socket,id=a,port=1"],
+            &["-chardev", "file,id=a,path=C:\\x"],
+            &["-chardev", "vc,id=a,logfile=C:\\x"],
+            &["-chardev", "vc"],
+            &["-chardev", "vc,id=compat_monitor1"],
+            &["-qmp", "stdio"],
+            &["-qmp-pretty", "stdio"],
+            &["-nographic"],
+        ] {
+            assert!(check(refused).is_err(), "{refused:?}");
+        }
+        let stdio = check(&["-monitor", "stdio"]).unwrap_err();
+        assert!(stdio.message.contains("-monitor vc"), "{}", stdio.message);
     }
 
     #[test]

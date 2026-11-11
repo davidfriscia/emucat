@@ -299,7 +299,9 @@ async fn qemu_runs_its_checked_launcher_and_powers_down_through_its_monitor() {
             "-vga",
             "cirrus",
             "-qmp",
-            "stdio"
+            "stdio",
+            "-monitor",
+            "vc"
         ]
     );
     assert!(
@@ -697,4 +699,199 @@ async fn a_working_copy_runs_only_in_the_mode_it_was_prepared_for() {
     agent
         .wait_state(request.session_id, AgentExecutionState::Stopped)
         .await;
+}
+
+impl Machine {
+    /// A QEMU working copy as a restore into it leaves one, with its own run script.
+    fn qemu_working_copy(
+        &self,
+        name: &str,
+        purpose: emucat_agent::protocol::WorkspacePurpose,
+        launcher: &str,
+    ) -> (Uuid, PathBuf) {
+        let workspace = Uuid::new_v4();
+        emucat_agent::workspaces::write_record(
+            &self.state_dir(),
+            &emucat_agent::workspaces::WorkspaceRecord {
+                workspace_id: workspace,
+                emulator_type: EmulatorType::Qemu,
+                vm_name: VmName::new(name).unwrap(),
+                source_version_id: Uuid::new_v4(),
+                manifest_sha256: None,
+                purpose: Some(purpose),
+            },
+        )
+        .unwrap();
+        let root =
+            emucat_agent::workspaces::workspace_base(&self.state_dir(), workspace).join(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("run.bat"), launcher).unwrap();
+        fs::write(root.join("disk.qcow2"), "not really a disk").unwrap();
+        fs::write(root.join("fake-behavior.txt"), "").unwrap();
+        (workspace, root)
+    }
+}
+
+/// Runs one QEMU session to its end, gracefully, and returns the command line it was started with.
+async fn qemu_session(
+    agent: &mut Agent,
+    request: VmLaunchRequest,
+    record: PathBuf,
+) -> (Vec<String>, String) {
+    let session = request.session_id;
+    agent
+        .manager
+        .handle(Message::ServerVmLaunch(request.clone()));
+    let running = agent
+        .wait_state(session, AgentExecutionState::Running)
+        .await;
+    assert!(running.graceful_stop_available, "QMP answered: {running:?}");
+    let record: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    agent.manager.handle(stop(&request, false));
+    let stopped = agent
+        .wait_state(session, AgentExecutionState::Stopped)
+        .await;
+    assert_eq!(stopped.exit_code, Some(0), "powered down over QMP");
+    assert!(agent.manager.active_sessions().is_empty());
+    (
+        args(&record),
+        record["workingDirectory"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// QEMU's human monitor on Ctrl+Alt+2 is kept in every mode, beside the agent's own QMP channel, and the
+/// VM's arguments, directory and run script are left as they were.
+#[tokio::test]
+async fn every_mode_keeps_qemus_human_monitor_beside_qmp() {
+    use emucat_agent::protocol::WorkspacePurpose;
+    let launcher =
+        "@echo off\r\nqemu-system-i386 -machine pc -m 128 -vga cirrus -hda disk.qcow2\r\n";
+    let expected = [
+        "-machine",
+        "pc",
+        "-m",
+        "128",
+        "-vga",
+        "cirrus",
+        "-hda",
+        "disk.qcow2",
+        "-qmp",
+        "stdio",
+        "-monitor",
+        "vc",
+    ];
+    let machine = Machine::new();
+    let local_root = machine.qemu_vm("nt40", launcher, "");
+    let mut agent = machine.manager(quick());
+
+    let local = launch(EmulatorType::Qemu, "nt40");
+    let record = machine.base(EmulatorType::Qemu).join("nt40.launch.json");
+    let (arguments, directory) = qemu_session(&mut agent, local, record).await;
+    assert_eq!(arguments, expected, "Local");
+    assert_eq!(directory, local_root.to_string_lossy(), "Local");
+    assert_eq!(
+        fs::read_to_string(local_root.join("run.bat")).unwrap(),
+        launcher
+    );
+
+    for (mode, purpose) in [
+        (
+            ExecutionMode::RemoteVolatile,
+            WorkspacePurpose::RemoteVolatile,
+        ),
+        (
+            ExecutionMode::RemoteSnapshot,
+            WorkspacePurpose::RemoteSnapshot,
+        ),
+    ] {
+        let (workspace, root) = machine.qemu_working_copy("nt40", purpose, launcher);
+        let request = VmLaunchRequest {
+            mode,
+            workspace_id: Some(workspace),
+            ..launch(EmulatorType::Qemu, "nt40")
+        };
+        let record = emucat_agent::workspaces::workspace_base(&machine.state_dir(), workspace)
+            .join("nt40.launch.json");
+        let (arguments, directory) = qemu_session(&mut agent, request, record).await;
+        assert_eq!(arguments, expected, "{mode:?}");
+        assert_eq!(directory, root.to_string_lossy(), "{mode:?}");
+        assert_eq!(fs::read_to_string(root.join("run.bat")).unwrap(), launcher);
+    }
+}
+
+/// A monitor the VM configures, or turns off, is left alone, as is a VM without a display.
+#[tokio::test]
+async fn a_monitor_the_vm_chooses_is_respected_in_every_mode() {
+    use emucat_agent::protocol::WorkspacePurpose;
+    let cases = [
+        (
+            "explicit",
+            "qemu-system-i386 -hda disk.qcow2 -monitor vc:800x600\r\n",
+            &[
+                "-hda",
+                "disk.qcow2",
+                "-monitor",
+                "vc:800x600",
+                "-qmp",
+                "stdio",
+            ][..],
+        ),
+        (
+            "chardev",
+            "qemu-system-i386 -hda disk.qcow2 -chardev vc,id=hmp -mon chardev=hmp,mode=readline\r\n",
+            &[
+                "-hda",
+                "disk.qcow2",
+                "-chardev",
+                "vc,id=hmp",
+                "-mon",
+                "chardev=hmp,mode=readline",
+                "-qmp",
+                "stdio",
+            ],
+        ),
+        (
+            "disabled",
+            "qemu-system-i386 -hda disk.qcow2 -monitor none\r\n",
+            &["-hda", "disk.qcow2", "-monitor", "none", "-qmp", "stdio"],
+        ),
+        (
+            "headless",
+            "qemu-system-i386 -hda disk.qcow2 -display none\r\n",
+            &["-hda", "disk.qcow2", "-display", "none", "-qmp", "stdio"],
+        ),
+    ];
+    let machine = Machine::new();
+    let mut agent = machine.manager(quick());
+    for (name, launcher, expected) in cases {
+        machine.qemu_vm(name, launcher, "");
+        let record = machine
+            .base(EmulatorType::Qemu)
+            .join(format!("{name}.launch.json"));
+        let (arguments, _) =
+            qemu_session(&mut agent, launch(EmulatorType::Qemu, name), record).await;
+        assert_eq!(arguments, expected, "Local {name}");
+
+        for (mode, purpose) in [
+            (
+                ExecutionMode::RemoteVolatile,
+                WorkspacePurpose::RemoteVolatile,
+            ),
+            (
+                ExecutionMode::RemoteSnapshot,
+                WorkspacePurpose::RemoteSnapshot,
+            ),
+        ] {
+            let (workspace, _) = machine.qemu_working_copy(name, purpose, launcher);
+            let request = VmLaunchRequest {
+                mode,
+                workspace_id: Some(workspace),
+                ..launch(EmulatorType::Qemu, name)
+            };
+            let record = emucat_agent::workspaces::workspace_base(&machine.state_dir(), workspace)
+                .join(format!("{name}.launch.json"));
+            let (arguments, _) = qemu_session(&mut agent, request, record).await;
+            assert_eq!(arguments, expected, "{mode:?} {name}");
+        }
+    }
 }
