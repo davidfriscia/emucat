@@ -646,6 +646,95 @@ main.container:has(> .page-wide) {
   }
 }
 
+/*
+ * Run and verify. The panel sizes itself by its own width, not the window's, because it appears both on the
+ * VM's page and inside the narrower run dialog. Wide enough, the three modes are one row with Now beside
+ * them, and the version, agent and actions follow under the modes. Narrower, everything stacks in reading
+ * order: the modes, the controls, then Now.
+ */
+.execution-panel {
+  container: execution / inline-size;
+}
+
+.execution-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem 1.5rem;
+}
+
+@container execution (min-width: 50rem) {
+  .execution-layout {
+    grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      'modes now'
+      'controls now';
+    align-items: start;
+  }
+
+  .execution-mode-area {
+    grid-area: modes;
+  }
+
+  .execution-controls {
+    grid-area: controls;
+  }
+
+  .execution-now {
+    grid-area: now;
+    padding-left: 1.5rem;
+    border-left: 1px solid var(--bs-border-color);
+  }
+}
+
+.execution-modes {
+  min-width: 0;
+  margin: 0;
+}
+
+.execution-mode-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.execution-mode-option {
+  display: flex;
+  flex: 1 1 8.5rem;
+  min-width: 0;
+}
+
+/* Each mode is a full-height button, at least as tall as a comfortable touch target. */
+.execution-mode-button {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.6rem;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.execution-mode-name {
+  font-weight: 600;
+}
+
+.execution-mode-tagline {
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+
+/* An unavailable mode looks it, and says so in words, not by its color alone. */
+.btn-check:disabled + .execution-mode-button {
+  border-style: dashed;
+}
+
+.execution-mode-option:has(.btn-check:focus-visible) .execution-mode-button {
+  outline: 2px solid var(--bs-focus-ring-color, currentColor);
+  outline-offset: 2px;
+}
+
 /* The run panel over a page is wider than a confirmation: it has two columns on large screens. */
 .run-dialog {
   max-width: 72rem;

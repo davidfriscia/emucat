@@ -45,3 +45,21 @@ describe('screenshot thumbnails', () => {
     return screen.findByRole('img', { name: 'No image' });
   });
 });
+
+describe('the execution panel', () => {
+  it('puts the modes and Now side by side when the panel is wide enough, and stacks them otherwise', () => {
+    expect(rule('.execution-panel').container).toBe('execution / inline-size');
+    expect(rule('.execution-layout')['grid-template-columns']).toBe('minmax(0, 1fr)');
+    const wide = /@container execution \(min-width: 50rem\) \{([\s\S]*?)\n\}/.exec(styles)?.[1];
+    expect(wide).toBeDefined();
+    const layout = rule('.execution-layout', wide);
+    expect(layout['grid-template-columns']).toBe('minmax(0, 3fr) minmax(16rem, 2fr)');
+    expect(layout['grid-template-areas']?.replace(/\s+/g, ' ')).toBe("'modes now' 'controls now'");
+  });
+
+  it('keeps the three modes on one wrapping row, with comfortable targets', () => {
+    expect(rule('.execution-mode-options')).toMatchObject({ display: 'flex', 'flex-wrap': 'wrap' });
+    expect(rule('.execution-mode-option').flex).toBe('1 1 8.5rem');
+    expect(rule('.execution-mode-button')['min-height']).toBe('2.75rem');
+  });
+});
