@@ -311,7 +311,8 @@ fn check_disposable(
         )),
         Err(crate::state::LineageProblem::DirectoryReplaced) if strict_directory => Err(failure(
             "local_copy_changed",
-            "The directory with this VM's name is not the copy the agent recorded: it was replaced              since. Nothing was changed",
+            "The directory with this VM's name is not the copy the agent recorded: it was replaced \
+             since. Nothing was changed",
         )),
         _ if replace.discard_local_changes => Ok(()),
         Err(_) => Err(failure(
