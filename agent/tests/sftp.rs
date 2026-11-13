@@ -929,3 +929,124 @@ async fn a_cancelled_download_stops_and_leaves_no_file() {
     assert_eq!(error.kind, Kind::Cancelled);
     assert!(!destination.exists());
 }
+
+/// Hands the agent's archive deletion this one real repository, as its configuration would.
+struct OneRepository(Uuid, Arc<SftpArchiveRepository>);
+
+impl emucat_agent::registration::RepositoryProvider for OneRepository {
+    fn open(
+        &self,
+        repository_id: Uuid,
+    ) -> emucat_agent::repository::RepositoryResult<Arc<dyn ArchiveRepository>> {
+        if repository_id == self.0 {
+            Ok(self.1.clone())
+        } else {
+            Err(emucat_agent::repository::RepositoryError::new(
+                Kind::NotConfigured,
+                "not configured",
+            ))
+        }
+    }
+
+    fn summary(
+        &self,
+        _repository_id: Uuid,
+    ) -> Option<emucat_agent::protocol::RepositoryConfigSummary> {
+        None
+    }
+
+    fn upload_attempts(&self, _repository_id: Uuid) -> u32 {
+        1
+    }
+
+    fn repository_ids(&self) -> Vec<Uuid> {
+        vec![self.0]
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker. Run by pnpm test:sftp"]
+async fn deleting_a_snapshot_archive_removes_that_object_only_and_can_be_repeated() {
+    use emucat_agent::archive_deletion::{delete_archive, derived_key};
+    use emucat_agent::emulators::{EmulatorType, VmName};
+    use emucat_agent::protocol::{ArchiveDelete, ArchiveDeleteOutcome};
+
+    let server = Server::start();
+    let repository = server.repository();
+    let cancel = CancelFlag::new();
+    let repository_id = Uuid::new_v4();
+    let contents = b"a disposable snapshot archive";
+    let mut request = ArchiveDelete {
+        operation_id: Uuid::new_v4(),
+        version_id: Uuid::new_v4(),
+        emulator_type: EmulatorType::Qemu,
+        vm_name: VmName::new("Clean Me").unwrap(),
+        repository_id,
+        archive_key: String::new(),
+        archive_size_bytes: contents.len() as u64,
+        archive_sha256: sha(contents),
+    };
+    let key = derived_key(&request);
+    request.archive_key = key.as_str().to_owned();
+
+    // The snapshot's archive, published as registration publishes it, and a neighbour that must stay.
+    for (target, bytes) in [
+        (key.clone(), &contents[..]),
+        (final_key("clean me"), b"keep"),
+    ] {
+        let staging = RepositoryKey::staging(Uuid::new_v4());
+        let file = server.local_file(&format!("{}.zip", Uuid::new_v4()), bytes);
+        repository
+            .upload(&staging, &file, no_progress(), &cancel)
+            .await
+            .unwrap();
+        repository.publish(&staging, &target).await.unwrap();
+    }
+    let before = server.remote_files();
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    let provider: Arc<dyn emucat_agent::registration::RepositoryProvider> =
+        Arc::new(OneRepository(repository_id, Arc::new(server.repository())));
+
+    // A key that is not this version's is never used, whatever the server sends.
+    let forged = ArchiveDelete {
+        archive_key: before
+            .iter()
+            .find(|name| *name != key.as_str())
+            .unwrap()
+            .clone(),
+        operation_id: Uuid::new_v4(),
+        ..request.clone()
+    };
+    let refused = delete_archive(&provider, &forged).await;
+    assert_eq!(refused.outcome, ArchiveDeleteOutcome::Failed);
+    assert_eq!(refused.code.as_deref(), Some("archive_key_mismatch"));
+    // Nor an object of another size than the one registered.
+    let resized = ArchiveDelete {
+        archive_size_bytes: contents.len() as u64 + 1,
+        operation_id: Uuid::new_v4(),
+        ..request.clone()
+    };
+    let refused = delete_archive(&provider, &resized).await;
+    assert_eq!(refused.code.as_deref(), Some("archive_mismatch"));
+    assert_eq!(server.remote_files(), before);
+
+    let result = delete_archive(&provider, &request).await;
+    assert_eq!(result.outcome, ArchiveDeleteOutcome::Deleted, "{result:?}");
+    assert_eq!(repository.stat(&key).await.unwrap(), None);
+    let after = server.remote_files();
+    assert_eq!(after.len(), 1);
+    assert_ne!(after[0], key.as_str());
+
+    // Asking again, as a retry after a lost answer would, finds nothing and changes nothing.
+    let again = delete_archive(
+        &provider,
+        &ArchiveDelete {
+            operation_id: Uuid::new_v4(),
+            ..request.clone()
+        },
+    )
+    .await;
+    assert_eq!(again.outcome, ArchiveDeleteOutcome::Absent, "{again:?}");
+    assert_eq!(server.remote_files(), after);
+}

@@ -19,11 +19,15 @@ import { join, resolve } from 'node:path';
 import {
   discoveryOperationSchema,
   discoveryStateResponseSchema,
+  localCopyRemovalSchema,
   pairingRequestReviewSchema,
   registrationOperationSchema,
   repositorySummarySchema,
   restoreOperationSchema,
   restoreOptionsResponseSchema,
+  versionDeletionListResponseSchema,
+  versionDeletionSchema,
+  versionTreeResponseSchema,
   type RegistrationOperation,
   type RestoreOperation,
 } from '@emucat/contracts';
@@ -1292,6 +1296,350 @@ describe('restore, public cover and VM details, end to end', () => {
       expect(files).not.toMatch(/\.(png|jpg|bmp|ppm)/i);
       expect(files).toMatch(/\.zip/);
     });
+  });
+
+  describe('storage cleanup', () => {
+    const VM = 'Clean Me';
+    const vmPath = `/admin/vms/qemu/${encodeURIComponent(VM)}`;
+    const destination = () => join(qemu, VM);
+    const remoteArchive = (versionId: string) =>
+      `/srv/sftp/repo/archives/qemu/clean me/${versionId}.zip`;
+    const remoteExists = (versionId: string) =>
+      docker(
+        'exec',
+        container,
+        'sh',
+        '-c',
+        `test -f '${remoteArchive(versionId)}' && echo yes || echo no`,
+      ) === 'yes';
+    let master: string;
+    let original: Record<string, string>;
+    /** A disposable directory beside the copy, which nothing here may touch. */
+    let neighbour: string;
+    let neighbourFiles: Record<string, string>;
+
+    const errorCode = (response: { json: <T>() => T }) =>
+      response.json<{ error: { code: string } }>().error.code;
+
+    async function restoreAndWait(versionId: string): Promise<void> {
+      const operation = await restore(VM, versionId);
+      const done = await restoreFinished(operation.id);
+      expect(done.state, JSON.stringify(done)).toBe('succeeded');
+    }
+
+    /** A snapshot of the copy this agent holds. It becomes what the copy is. */
+    async function snapshot(parentVersionId: string): Promise<string> {
+      const response = await admin.request({
+        method: 'POST',
+        url: `${vmPath}/snapshots`,
+        payload: { agentId, parentVersionId, requestId: randomUUID() },
+      });
+      expect(response.statusCode, response.body).toBe(202);
+      const { id } = registrationOperationSchema.parse(response.json());
+      const done = await waitFor(
+        async () => {
+          const operation = registrationOperationSchema.parse(
+            (await admin.get(`/admin/registrations/${id}`)).json(),
+          );
+          return TERMINAL.includes(operation.state) ? operation : null;
+        },
+        'the snapshot to finish',
+        120_000,
+      );
+      expect(done.state, JSON.stringify(done)).toBe('succeeded');
+      return done.versionId as string;
+    }
+
+    async function removeCopy(expectedVersionId: string | null, discardLocalChanges = false) {
+      const response = await admin.request({
+        method: 'POST',
+        url: '/admin/local-copy-removals',
+        payload: {
+          agentId,
+          emulatorType: 'qemu',
+          vmName: VM,
+          expectedVersionId,
+          discardLocalChanges,
+          requestId: randomUUID(),
+        },
+      });
+      expect(response.statusCode, response.body).toBe(202);
+      const { id } = localCopyRemovalSchema.parse(response.json());
+      return waitFor(
+        async () => {
+          const removal = localCopyRemovalSchema.parse(
+            (await admin.get(`/admin/local-copy-removals/${id}`)).json(),
+          );
+          return removal.state === 'requested' ? null : removal;
+        },
+        'the removal to finish',
+        60_000,
+      );
+    }
+
+    async function requestDeletion(versionId: string) {
+      return admin.request({
+        method: 'POST',
+        url: `${vmPath}/versions/${versionId}/deletion`,
+        payload: { versionId, requestId: randomUUID() },
+      });
+    }
+
+    async function deletionOf(versionId: string) {
+      const list = versionDeletionListResponseSchema.parse(
+        (await admin.get(`${vmPath}/version-deletions`)).json(),
+      );
+      return list.deletions.find((deletion) => deletion.versionId === versionId);
+    }
+
+    const deleted = (versionId: string, timeout = 60_000) =>
+      waitFor(
+        async () => {
+          const deletion = await deletionOf(versionId);
+          return deletion?.state === 'deleted' ? deletion : null;
+        },
+        'the snapshot to be deleted',
+        timeout,
+      );
+
+    async function treeIds(): Promise<string[]> {
+      const tree = versionTreeResponseSchema.parse((await admin.get(`${vmPath}/versions`)).json());
+      return tree.versions.map((version) => version.id);
+    }
+
+    /** A leaf snapshot nobody holds: restored, snapshotted, then the copy removed again. */
+    async function unusedLeaf(): Promise<string> {
+      await restoreAndWait(master);
+      const leaf = await snapshot(master);
+      const removal = await removeCopy(leaf);
+      expect(removal.state, JSON.stringify(removal)).toBe('succeeded');
+      return leaf;
+    }
+
+    beforeAll(async () => {
+      const root = await qemuVm(VM, 1);
+      original = await fingerprint(root);
+      master = (await register(VM, 'qemu', 'transfer')).versionId as string;
+      neighbour = await qemuVm('Clean Me Too', 1);
+      neighbourFiles = await fingerprint(neighbour);
+    }, LONG);
+
+    afterAll(async () => {
+      await rm(neighbour, { recursive: true, force: true });
+    });
+
+    it('never deletes the master', async () => {
+      const response = await requestDeletion(master);
+      expect(response.statusCode, response.body).toBe(409);
+      expect(errorCode(response)).toBe('master_cannot_be_deleted');
+      expect(remoteExists(master)).toBe(true);
+    });
+
+    let installed: string;
+
+    it(
+      'refuses to delete a snapshot that an agent holds',
+      async () => {
+        await restoreAndWait(master);
+        installed = await snapshot(master);
+        expect(await vmState(VM)).toMatchObject({ local_source_version_id: installed });
+        const response = await requestDeletion(installed);
+        expect(response.statusCode, response.body).toBe(409);
+        expect(errorCode(response)).toBe('snapshot_installed');
+        expect(remoteExists(installed)).toBe(true);
+      },
+      LONG,
+    );
+
+    it(
+      'keeps a copy that differs, and never follows a junction inside it',
+      async () => {
+        const outside = await mkdtemp(join(directory, 'outside-'));
+        await writeFile(join(outside, 'precious.txt'), 'do not touch');
+        const junction = join(destination(), 'linked');
+        execFileSync('cmd', ['/C', 'mklink', '/J', junction, outside], { stdio: 'ignore' });
+
+        const removal = await removeCopy(installed);
+        expect(removal.state, JSON.stringify(removal)).toBe('failed');
+        // The agent will not verify through a reparse point, so it cannot prove the copy unchanged.
+        expect(['local_copy_modified', 'local_copy_unverified', 'local_copy_unsafe']).toContain(
+          removal.error?.code,
+        );
+        expect(removal.recovery).toBeTruthy();
+        expect(existsSync(join(destination(), 'run.bat'))).toBe(true);
+        expect(await readFile(join(outside, 'precious.txt'), 'utf8')).toBe('do not touch');
+        expect(await vmState(VM)).toMatchObject({ local_source_version_id: installed });
+
+        // Put it back as it was. `rmdir` removes the junction itself, never what it points to.
+        execFileSync('cmd', ['/C', 'rmdir', junction], { stdio: 'ignore' });
+        expect(await readFile(join(outside, 'precious.txt'), 'utf8')).toBe('do not touch');
+        await rm(outside, { recursive: true, force: true });
+        expect(await fingerprint(destination())).toEqual(original);
+      },
+      LONG,
+    );
+
+    it(
+      'removes the local copy from the real page, and nothing else',
+      async () => {
+        const repositoryBefore = docker(
+          'exec',
+          container,
+          'sh',
+          '-c',
+          'cd /srv/sftp/repo && find . -type f | sort',
+        );
+        const page = await (await browser.newContext()).newPage();
+        try {
+          await signIn(page);
+          await page.goto(webUrl(vmPath));
+          await page.getByRole('button', { name: 'Remove the local copy on E2E restore' }).click();
+          const dialog = page.getByRole('dialog', { name: `Remove the local copy of ${VM}` });
+          await dialog.waitFor();
+          await expect(dialog.getByRole('textbox').count()).resolves.toBe(0);
+          await shot(page, 'remove-local-copy');
+          await dialog.getByRole('button', { name: 'Remove local copy' }).click();
+          await page
+            .getByRole('article', { name: 'Removal of the local copy on E2E restore' })
+            .getByText('Removed', { exact: true })
+            .waitFor({ timeout: 60_000 });
+        } finally {
+          await page.context().close();
+        }
+
+        expect(existsSync(destination())).toBe(false);
+        await assertNothingLeftBehind();
+        expect(await vmState(VM)).toBeUndefined();
+        // Another VM's directory, the archives, the master and the snapshot are all untouched.
+        expect(await fingerprint(neighbour)).toEqual(neighbourFiles);
+        expect(
+          docker('exec', container, 'sh', '-c', 'cd /srv/sftp/repo && find . -type f | sort'),
+        ).toBe(repositoryBefore);
+        expect(await treeIds()).toEqual(expect.arrayContaining([master, installed]));
+
+        // Local mode has nothing to run here now; a restore is offered again.
+        const options = restoreOptionsResponseSchema.parse(
+          (await admin.get(`${vmPath}/restore-options`)).json(),
+        );
+        expect(options.agents[0]).toMatchObject({
+          agentId,
+          eligible: true,
+          // No record at all, which is what a removed copy leaves.
+          local: { availability: 'none' },
+          remove: { eligible: false, reason: 'no_local_copy' },
+        });
+        // Discovery agrees: no copy, and nothing new to register.
+        const discovery = await discover('');
+        expect(discovery.vms.map((vm) => vm.vmName)).not.toContain(VM);
+      },
+      LONG,
+    );
+
+    it(
+      'permanently deletes the leaf snapshot from SFTP through the real page, and keeps its history',
+      async () => {
+        const page = await (await browser.newContext()).newPage();
+        try {
+          await signIn(page);
+          await page.goto(webUrl(vmPath));
+          const card = page.locator(`li[aria-labelledby="version-${installed}"] > .version-card`);
+          await card.getByRole('button', { name: /^Delete / }).click();
+          const dialog = page.getByRole('dialog', { name: 'Permanently delete this snapshot' });
+          await dialog.waitFor();
+          await expect(dialog.getByText(installed, { exact: true }).count()).resolves.toBe(1);
+          await shot(page, 'delete-snapshot');
+          await dialog.getByRole('button', { name: 'Permanently delete snapshot' }).click();
+          await dialog.waitFor({ state: 'detached' });
+        } finally {
+          await page.context().close();
+        }
+
+        const done = await deleted(installed);
+        expect(done).toMatchObject({ archiveOutcome: 'deleted', error: null });
+        expect(remoteExists(installed)).toBe(false);
+        expect(remoteExists(master)).toBe(true);
+        expect(await treeIds()).not.toContain(installed);
+        expect(await treeIds()).toContain(master);
+
+        // It can no longer be restored, and the version row it names stays for history.
+        const response = await admin.request({
+          method: 'POST',
+          url: '/admin/restores',
+          payload: { agentId, emulatorType: 'qemu', vmName: VM, versionId: installed },
+        });
+        expect(response.statusCode).toBeGreaterThanOrEqual(400);
+        const [rows] = await context.pool.execute<RowDataPacket[]>(
+          'SELECT id FROM vm_versions WHERE id = ?',
+          [installed],
+        );
+        expect(rows).toHaveLength(1);
+        // Asking again finds the same tombstone, and changes nothing.
+        const again = await requestDeletion(installed);
+        expect(again.statusCode, again.body).toBe(202);
+        expect(versionDeletionSchema.parse(again.json())).toMatchObject({
+          state: 'deleted',
+          archiveOutcome: 'deleted',
+          completedAt: done.completedAt,
+        });
+        expect(remoteExists(master)).toBe(true);
+      },
+      LONG,
+    );
+
+    it(
+      'records an archive that is already gone as already absent',
+      async () => {
+        const leaf = await unusedLeaf();
+        docker('exec', container, 'rm', remoteArchive(leaf));
+        const response = await requestDeletion(leaf);
+        expect(response.statusCode, response.body).toBe(202);
+        expect(await deleted(leaf)).toMatchObject({ archiveOutcome: 'already_absent' });
+        expect(await treeIds()).not.toContain(leaf);
+        expect(remoteExists(master)).toBe(true);
+      },
+      LONG,
+    );
+
+    it(
+      'keeps a deletion that the SFTP server interrupts, and finishes it on a retry',
+      async () => {
+        const leaf = await unusedLeaf();
+        docker('pause', container);
+        try {
+          const response = await requestDeletion(leaf);
+          expect(response.statusCode, response.body).toBe(202);
+          const failed = await waitFor(
+            async () => {
+              const deletion = await deletionOf(leaf);
+              return deletion?.error ? deletion : null;
+            },
+            'the attempt to fail',
+            90_000,
+          );
+          expect(failed.state).toBe('deleting');
+          // While it is deleting, nothing can start from it.
+          const restoring = await admin.request({
+            method: 'POST',
+            url: '/admin/restores',
+            payload: { agentId, emulatorType: 'qemu', vmName: VM, versionId: leaf },
+          });
+          expect(restoring.statusCode).toBe(409);
+        } finally {
+          docker('unpause', container);
+        }
+        expect(remoteExists(leaf)).toBe(true);
+
+        const retried = await admin.request({
+          method: 'POST',
+          url: `${vmPath}/versions/${leaf}/deletion/retry`,
+        });
+        expect(retried.statusCode, retried.body).toBe(202);
+        expect(await deleted(leaf)).toMatchObject({ archiveOutcome: 'deleted' });
+        expect(remoteExists(leaf)).toBe(false);
+        expect(remoteExists(master)).toBe(true);
+      },
+      LONG,
+    );
   });
 
   describe('what must not have happened', () => {
