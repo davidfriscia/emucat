@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
-import type { RestoreOperation, RestoreOptionsResponse } from '@emucat/contracts';
+import type { LocalCopyRemoval, RestoreOperation, RestoreOptionsResponse } from '@emucat/contracts';
 import { describe, expect, it } from 'vitest';
 import { adminVm, apiError, mockApi, renderAt, Reply, signedInAsAdmin } from './mock-api';
 
@@ -28,6 +28,8 @@ function agentOption(overrides: object = {}) {
       lastVerifiedAt: null,
     },
     replace: { eligible: false, reason: 'no_local_copy' },
+    running: false,
+    remove: { eligible: false, reason: 'no_local_copy' },
     cacheUsedBytes: 0,
     cacheMaxBytes: 1000,
     ...overrides,
@@ -91,6 +93,7 @@ function base(routes: Record<string, unknown> = {}) {
     [`GET ${VM_PATH}/media`]: { media: [] },
     [`GET ${OPTIONS_PATH}`]: options(),
     'GET /admin/restores': { operations: [] },
+    'GET /admin/local-copy-removals': { removals: [] },
     ...routes,
   });
 }
@@ -631,5 +634,172 @@ describe('the agent’s page', () => {
     expect(within(section).getAllByText('Extracting and verifying files').length).toBeGreaterThan(
       0,
     );
+  });
+});
+
+describe('removing a local copy', () => {
+  const REMOVAL_ID = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6010';
+  const holding = (contentStatus: 'verified' | 'modified' | 'unverified', remove = true) =>
+    options({
+      agents: [
+        agentOption({
+          eligible: false,
+          ineligibleReason: 'local_copy_exists',
+          replace: { eligible: true, reason: null },
+          remove: remove
+            ? { eligible: true, reason: null }
+            : { eligible: false, reason: 'vm_running' },
+          running: !remove,
+          local: {
+            availability: 'present',
+            contentStatus,
+            sourceVersionId: VERSION_ID,
+            lastVerifiedAt: contentStatus === 'verified' ? PAST : null,
+          },
+        }),
+      ] as RestoreOptionsResponse['agents'],
+    });
+  const removal = (overrides: Partial<LocalCopyRemoval> = {}): LocalCopyRemoval => ({
+    id: REMOVAL_ID,
+    agentId: AGENT_ID,
+    agentName: 'Study PC',
+    agentOnline: true,
+    emulatorType: 'qemu',
+    vmName: 'Win98',
+    expectedVersionId: VERSION_ID,
+    discardLocalChanges: false,
+    state: 'requested',
+    cleanupPending: false,
+    localDirectory: null,
+    error: null,
+    recovery: null,
+    requestedByDisplayName: 'Ada Admin',
+    createdAt: PAST,
+    updatedAt: PAST,
+    finishedAt: null,
+    ...overrides,
+  });
+  const openRemoval = async () => {
+    renderAt(VM_PATH);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Remove the local copy on Study PC' }),
+    );
+    return within(await screen.findByRole('dialog', { name: 'Remove the local copy of Win98' }));
+  };
+
+  it('says what is removed and what is not, and confirms with a button, not a typed name', async () => {
+    const api = base({
+      [`GET ${OPTIONS_PATH}`]: holding('verified'),
+      'POST /admin/local-copy-removals': removal(),
+    });
+    const dialog = await openRemoval();
+    expect(dialog.getByText('Agent', { selector: 'dt' }).nextElementSibling?.textContent).toBe(
+      'Study PC',
+    );
+    expect(dialog.getByText('Installed version').nextElementSibling?.textContent).toContain(
+      VERSION_ID,
+    );
+    expect(dialog.getByText('Location').nextElementSibling?.textContent).toBe(
+      'C:\\vms\\qemu\\Win98',
+    );
+    expect(dialog.getByText('Local changes').nextElementSibling?.textContent).toMatch(/^None/);
+    expect(dialog.getByText(/the master, snapshots, other agents’ copies/)).toBeTruthy();
+    expect(dialog.getByText(/remote modes stay available/)).toBeTruthy();
+    expect(dialog.queryByRole('textbox')).toBeNull();
+    expect(dialog.queryByRole('checkbox')).toBeNull();
+    const remove = dialog.getByRole('button', { name: 'Remove local copy' }) as HTMLButtonElement;
+    expect(remove.className).toMatch(/btn-danger/);
+    fireEvent.click(remove);
+    await waitFor(() => expect(api.callsTo('POST', '/admin/local-copy-removals')).toHaveLength(1));
+    const body = api.callsTo('POST', '/admin/local-copy-removals')[0]?.body as Record<
+      string,
+      unknown
+    >;
+    expect(body).toMatchObject({
+      agentId: AGENT_ID,
+      emulatorType: 'qemu',
+      vmName: 'Win98',
+      expectedVersionId: VERSION_ID,
+      discardLocalChanges: false,
+    });
+    expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    // Nothing that names a path or a directory is ever sent.
+    expect(Object.keys(body).sort()).toEqual([
+      'agentId',
+      'discardLocalChanges',
+      'emulatorType',
+      'expectedVersionId',
+      'requestId',
+      'vmName',
+    ]);
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Remove the local copy of Win98' })).toBeNull(),
+    );
+  });
+
+  it('requires acknowledging the loss of a modified copy’s changes, and says so on the button', async () => {
+    const api = base({
+      [`GET ${OPTIONS_PATH}`]: holding('modified'),
+      'POST /admin/local-copy-removals': removal({ discardLocalChanges: true }),
+    });
+    const dialog = await openRemoval();
+    expect(dialog.getByText(/changes that are in no snapshot/)).toBeTruthy();
+    const remove = dialog.getByRole('button', { name: 'Remove local copy' }) as HTMLButtonElement;
+    expect(remove.disabled).toBe(true);
+    fireEvent.click(dialog.getByLabelText(/local changes, and screenshots not yet synchronized/));
+    expect(dialog.queryByRole('button', { name: 'Remove local copy' })).toBeNull();
+    fireEvent.click(dialog.getByRole('button', { name: 'Discard changes and remove local copy' }));
+    await waitFor(() => expect(api.callsTo('POST', '/admin/local-copy-removals')).toHaveLength(1));
+    expect(api.callsTo('POST', '/admin/local-copy-removals')[0]?.body).toMatchObject({
+      discardLocalChanges: true,
+    });
+  });
+
+  it('lets the agent check an unverified copy first, without requiring the acknowledgement', async () => {
+    base({ [`GET ${OPTIONS_PATH}`]: holding('unverified') });
+    const dialog = await openRemoval();
+    expect(dialog.getByText(/the agent checks it first/)).toBeTruthy();
+    expect(
+      (dialog.getByRole('button', { name: 'Remove local copy' }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it('shows why a copy cannot be removed now', async () => {
+    base({ [`GET ${OPTIONS_PATH}`]: holding('verified', false) });
+    renderAt(VM_PATH);
+    const button = (await screen.findByRole('button', {
+      name: 'Remove the local copy on Study PC',
+    })) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toMatch(/This VM is running on this agent/);
+  });
+
+  it('offers no removal where there is no copy', async () => {
+    base();
+    renderAt(VM_PATH);
+    await screen.findByRole('button', { name: 'Restore…' });
+    expect(screen.queryByRole('button', { name: /Remove the local copy/ })).toBeNull();
+  });
+
+  it('shows each removal with what happened, and how to recover from a failure', async () => {
+    base({
+      'GET /admin/local-copy-removals': {
+        removals: [
+          removal({
+            state: 'failed',
+            error: { code: 'local_copy_modified', message: 'The copy differs from its version.' },
+            recovery: 'Snapshot it first, or acknowledge discarding its changes.',
+            finishedAt: PAST,
+          }),
+        ],
+      },
+    });
+    renderAt(VM_PATH);
+    const card = await screen.findByRole('article', {
+      name: 'Removal of the local copy on Study PC',
+    });
+    expect(within(card).getByText('Not removed')).toBeTruthy();
+    expect(within(card).getByText('local_copy_modified')).toBeTruthy();
+    expect(within(card).getByText(/Snapshot it first/)).toBeTruthy();
   });
 });

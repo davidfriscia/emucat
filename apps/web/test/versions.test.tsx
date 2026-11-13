@@ -41,6 +41,11 @@ function node(
     createdByAgentName: 'Study PC',
     createdByDisplayName: 'Ada Admin',
     holders: [],
+    deletion: null,
+    deletable:
+      parent === null
+        ? { eligible: false, reason: 'master_cannot_be_deleted' }
+        : { eligible: true, reason: null },
     ...overrides,
   };
 }
@@ -110,6 +115,8 @@ function restoreOptions(): RestoreOptionsResponse {
           lastVerifiedAt: null,
         },
         replace: { eligible: false, reason: 'no_local_copy' },
+        running: false,
+        remove: { eligible: false, reason: 'no_local_copy' },
         cacheUsedBytes: 0,
         cacheMaxBytes: 1000,
       },
@@ -176,6 +183,7 @@ function base(routes: Record<string, unknown> = {}) {
     'GET /admin/restores': { operations: [] },
     [`GET ${VM_PATH}/versions`]: branchingTree(),
     [`GET ${VM_PATH}/workspaces`]: { workspaces: [] },
+    'GET /admin/local-copy-removals': { removals: [] },
     ...routes,
   });
 }
@@ -615,5 +623,134 @@ describe('the public VM page', () => {
     expect(
       (dialog.getByRole('radio', { name: 'Remote Volatile' }) as HTMLInputElement).checked,
     ).toBe(true);
+  });
+});
+
+describe('deleting a snapshot', () => {
+  /** A has a child, B is installed, C is a leaf nobody uses. */
+  function deletableTree() {
+    const tree = branchingTree();
+    const [master, a, b, c] = tree.versions as [VersionNode, VersionNode, VersionNode, VersionNode];
+    tree.versions = [
+      master,
+      { ...a, deletable: { eligible: false, reason: 'snapshot_has_descendants' } },
+      { ...b, deletable: { eligible: false, reason: 'snapshot_installed' } },
+      c,
+    ];
+    return tree;
+  }
+  const deletion = () => ({
+    versionId: SNAP_C,
+    emulatorType: 'qemu',
+    vmName: 'Win98',
+    snapshotName: 'Win98_202601010003',
+    parentVersionId: SNAP_A,
+    repositoryName: 'NAS',
+    archiveSizeBytes: 2048,
+    archiveSha256: SHA,
+    versionCreatedAt: '2026-01-01T00:03:00.000Z',
+    state: 'deleting',
+    archiveOutcome: null,
+    attempts: 1,
+    nextRetryAt: null,
+    error: null,
+    requestedByDisplayName: 'Ada Admin',
+    requestedAt: '2026-01-02T00:00:00.000Z',
+    completedAt: null,
+  });
+  const item = (tree: HTMLElement, label: string) =>
+    within(tree)
+      .getAllByRole('treeitem')
+      .find((element) => element.getAttribute('aria-labelledby')?.endsWith(label)) as HTMLElement;
+
+  it('is never offered for the master, and says why other snapshots cannot be deleted', async () => {
+    base({ [`GET ${VM_PATH}/versions`]: deletableTree() });
+    const tree = await history();
+    const master = item(tree, MASTER);
+    const a = item(tree, SNAP_A);
+    const b = item(tree, SNAP_B);
+    const c = item(tree, SNAP_C);
+    expect(within(master).queryByRole('button', { name: /^Delete Master/ })).toBeNull();
+    const deleteA = within(a).getByRole('button', { name: 'Delete Win98_202601010001' });
+    expect((deleteA as HTMLButtonElement).disabled).toBe(true);
+    expect(deleteA.getAttribute('aria-describedby')).toBeTruthy();
+    expect(within(a).getByText(/Other versions were created from this snapshot/)).toBeTruthy();
+    const deleteB = within(b).getByRole('button', { name: 'Delete Win98_202601010002' });
+    expect((deleteB as HTMLButtonElement).disabled).toBe(true);
+    expect(within(b).getByText(/holds a persistent copy of this snapshot/)).toBeTruthy();
+    const deleteC = within(c).getByRole('button', { name: 'Delete Win98_202601010003' });
+    expect((deleteC as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('names the exact version, warns that it cannot be undone, and sends only its ID', async () => {
+    const api = base({
+      [`GET ${VM_PATH}/versions`]: deletableTree(),
+      [`POST ${VM_PATH}/versions/${SNAP_C}/deletion`]: deletion(),
+    });
+    const tree = await history();
+    fireEvent.click(within(tree).getByRole('button', { name: 'Delete Win98_202601010003' }));
+    const dialog = within(
+      await screen.findByRole('dialog', { name: 'Permanently delete this snapshot' }),
+    );
+    const fact = (term: string) =>
+      dialog.getByText(term, { selector: 'dt' }).nextElementSibling?.textContent;
+    expect(fact('Version ID')).toBe(SNAP_C);
+    expect(fact('VM')).toBe('Win98');
+    expect(fact('Snapshot')).toBe('Win98_202601010003');
+    expect(fact('Parent')).toContain('Win98_202601010001');
+    expect(fact('Parent')).toContain(SNAP_A);
+    expect(fact('Archive size')).toBe('2.0 KiB');
+    expect(fact('Repository')).toMatch(/^NAS/);
+    expect(dialog.getByRole('alert').textContent).toMatch(/cannot be undone/);
+    expect(dialog.queryByRole('textbox')).toBeNull();
+    fireEvent.click(dialog.getByRole('button', { name: 'Permanently delete snapshot' }));
+    await waitFor(() =>
+      expect(api.callsTo('POST', `${VM_PATH}/versions/${SNAP_C}/deletion`)).toHaveLength(1),
+    );
+    const body = api.callsTo('POST', `${VM_PATH}/versions/${SNAP_C}/deletion`)[0]?.body as Record<
+      string,
+      string
+    >;
+    expect(body.versionId).toBe(SNAP_C);
+    expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Object.keys(body).sort()).toEqual(['requestId', 'versionId']);
+  });
+
+  it('marks a snapshot being deleted as unusable, with its last failure and a retry', async () => {
+    const tree = deletableTree();
+    tree.versions[3] = {
+      ...(tree.versions[3] as VersionNode),
+      available: false,
+      deletable: { eligible: false, reason: null },
+      deletion: {
+        requestedAt: '2026-01-02T00:00:00.000Z',
+        attempts: 2,
+        error: { code: 'repository_unreachable', message: 'The SSH server did not answer.' },
+      },
+    };
+    const api = base({
+      [`GET ${VM_PATH}/versions`]: tree,
+      [`POST ${VM_PATH}/versions/${SNAP_C}/deletion/retry`]: deletion(),
+    });
+    const c = item(await history(), SNAP_C);
+    expect(within(c).getByText('Being deleted')).toBeTruthy();
+    expect(within(c).queryByRole('button', { name: /^Delete/ })).toBeNull();
+    expect(
+      (within(c).getByRole('button', { name: 'Restore…' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (
+        within(c).getByRole('button', {
+          name: 'Run Win98_202601010003 in Remote Volatile',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(within(c).getByText('repository_unreachable')).toBeTruthy();
+    fireEvent.click(
+      within(c).getByRole('button', { name: 'Retry deleting Win98_202601010003 now' }),
+    );
+    await waitFor(() =>
+      expect(api.callsTo('POST', `${VM_PATH}/versions/${SNAP_C}/deletion/retry`)).toHaveLength(1),
+    );
   });
 });
