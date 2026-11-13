@@ -203,7 +203,7 @@ private key: archives go directly between agent and repository. See the [protoco
 | Route                                              | What it does                                                                                                                                        |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /admin/registrations`                        | Starts one: `agentId`, `repositoryId`, `emulatorType`, `vmName`, `mode`, `discoveryOperationId`, and `confirmDestructive: true` for a transfer. 202 |
-| `GET /admin/registrations`                         | The latest 100, newest first. `?agentId=` narrows it                                                                                                |
+| `GET /admin/registrations`                         | A page of operations, newest first, 100 by default. Views, filters and cursors are below                                                            |
 | `GET /admin/registrations/:operationId`            | One operation: its state, progress, archive, local copy, error and recovery guidance                                                                |
 | `POST /admin/registrations/:operationId/cancel`    | Until the master exists. Otherwise 409 `registration_committed`                                                                                     |
 | `POST /admin/registrations/:operationId/reconcile` | Tries a failed commit again, from the metadata the agent already reported. Safe to repeat                                                           |
@@ -222,6 +222,31 @@ private key: archives go directly between agent and repository. See the [protoco
 
 `POST /admin/registrations/:operationId/retry-cleanup` tries again to remove a local VM, after a screenshot blocked it. It only applies to
 a transfer in `partial_success` with the code `transfer_blocked_media`, with the agent online, and the agent checks everything again.
+
+`POST /admin/registrations/:operationId/acknowledge` records that an administrator has dealt with a `partial_success`, so that it leaves
+the operations needing attention. It changes nothing else, and repeating it changes nothing. Anything but a partial success is refused
+with 409 `registration_not_acknowledgeable`. Retrying a removal clears the acknowledgement.
+
+### Listing registrations
+
+Every parameter is optional, and an unknown one is refused with 400. See [decision 0043](decisions/0043-registration-history-and-discovery-page.md).
+
+| Parameter                      | Meaning                                                                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `view`                         | `all` (default); `attention`: running, or a partial success nobody has acknowledged; `history`: every operation that ended |
+| `agentId`                      | One agent                                                                                                                  |
+| `emulatorType`, `vmName`       | One emulator; one VM exactly, case-insensitive                                                                             |
+| `q`                            | Part of a VM name, case-insensitive. `%` and `_` match only themselves                                                     |
+| `mode`                         | `copy`, `transfer` or `snapshot`                                                                                           |
+| `state`                        | One or more states, comma-separated: `state=failed,cancelled`                                                              |
+| `createdFrom`, `createdBefore` | ISO 8601 instants: created at or after, and strictly before                                                                |
+| `limit`                        | 1 to 100. Default 100                                                                                                      |
+| `cursor`                       | The `nextCursor` of the previous page. Anything else is refused with 400                                                   |
+
+The response is `{ operations, nextCursor }`, and for `view=attention` also `total`, the number of matching operations in all. Order is
+`createdAt` descending, then `id`: a page never repeats or skips a row, even while new operations are created. Each operation also carries
+`acknowledgedAt` and `acknowledgedByDisplayName`, `parentSnapshotName` (`null` when the parent is the master), and `versionDeletion`
+(`deleting` or `deleted` once storage cleanup has deleted the version it created).
 
 ## Restores
 

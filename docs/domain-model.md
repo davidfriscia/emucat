@@ -161,6 +161,10 @@ agent, the VM's identity, the repository, the mode, and a version UUID and archi
 are in [decision 0015](decisions/0015-registration-state-machine.md). A failed attempt owns nothing: trying again is a new
 operation, with a new version UUID.
 
+Operations are never deleted. Whether one still needs an administrator is `attention_marker`: set while it runs, and for a
+`partial_success` until someone acknowledges it (`acknowledged_at`, `acknowledged_by_user_id`). Everything else is history, listed
+newest first with keyset pagination. See [decision 0043](decisions/0043-registration-history-and-discovery-page.md).
+
 An archive is a complete standalone ZIP of the VM's directory, ending with a deterministic manifest. Media are excluded. See
 [decision 0014](decisions/0014-archive-and-manifest.md).
 
