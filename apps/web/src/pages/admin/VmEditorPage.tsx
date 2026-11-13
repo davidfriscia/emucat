@@ -1,3 +1,4 @@
+import { useCaptureGalleryRefresh } from '../../components/CaptureScreenshot';
 import {
   publicVmRoute,
   VM_DESCRIPTION_MAX_LENGTH,
@@ -178,6 +179,10 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
     [emulatorType, vmName],
   );
   const media = useAsync(loadMedia);
+  const refreshCapturedMedia = useCallback(() => {
+    void fetchVmMedia({ emulatorType, vmName }).then(media.setData, () => undefined);
+  }, [emulatorType, vmName, media.setData]);
+  useCaptureGalleryRefresh({ emulatorType, vmName }, refreshCapturedMedia);
   // The version history chooses a version and mode in the run panel, which stays the one place to run.
   const [preselect, setPreselect] = useState<RunPreselection | null>(null);
   const runToken = useRef(0);

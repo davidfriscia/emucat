@@ -1,3 +1,4 @@
+import { captureOperationSchema, captureStatusSchema } from '@emucat/contracts';
 import {
   adminCatalogResponseSchema,
   adminMediaListResponseSchema,
@@ -827,4 +828,23 @@ export function resumeWorkspace(
     method: 'POST',
     body: { confirmVmName },
   });
+}
+
+export function fetchCaptureStatus(sessionId: string, signal?: AbortSignal) {
+  return requestJson('/admin/sessions/' + sessionId + '/screenshots', captureStatusSchema, {
+    signal,
+  });
+}
+export function captureScreenshot(sessionId: string, requestId: string) {
+  return requestJson('/admin/sessions/' + sessionId + '/screenshots', captureOperationSchema, {
+    method: 'POST',
+    body: { requestId },
+  });
+}
+export function retryCapture(sessionId: string, operationId: string) {
+  return requestJson(
+    '/admin/sessions/' + sessionId + '/screenshots/' + operationId + '/retry',
+    captureOperationSchema,
+    { method: 'POST', body: {} },
+  );
 }

@@ -1,3 +1,4 @@
+import { useCaptureGalleryRefresh } from '../../components/CaptureScreenshot';
 import {
   adminVmRoute,
   vmPathParamsSchema,
@@ -91,6 +92,10 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
     [emulatorType, vmName],
   );
   const { state, reload, setData } = useAsync(load);
+  const refreshCapturedMedia = useCallback(() => {
+    void fetchVmMedia({ emulatorType, vmName }).then(setData, () => undefined);
+  }, [emulatorType, vmName, setData]);
+  useCaptureGalleryRefresh({ emulatorType, vmName }, refreshCapturedMedia);
 
   if (state.status === 'loading') return <LoadingState label="Loading media" />;
   if (state.status === 'error') {

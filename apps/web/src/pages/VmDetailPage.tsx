@@ -1,3 +1,4 @@
+import { useCaptureGalleryRefresh } from '../components/CaptureScreenshot';
 import {
   adminVmRoute,
   EMULATOR_LABELS,
@@ -335,7 +336,11 @@ function VmDetail({ identity }: { identity: VmIdentity }) {
     (signal: AbortSignal) => fetchPublicVm({ emulatorType, vmName }, signal),
     [emulatorType, vmName],
   );
-  const { state, reload } = useAsync(load);
+  const { state, reload, setData } = useAsync(load);
+  const refreshCapturedMedia = useCallback(() => {
+    void fetchPublicVm({ emulatorType, vmName }).then(setData, () => undefined);
+  }, [emulatorType, vmName, setData]);
+  useCaptureGalleryRefresh({ emulatorType, vmName }, refreshCapturedMedia);
   const { state: auth } = useAuth();
   const isAdmin = auth.status === 'authenticated' && auth.session.user.role === 'admin';
 

@@ -1,3 +1,4 @@
+import { CaptureScreenshot } from './CaptureScreenshot';
 import {
   EMULATOR_LABELS,
   isSessionActive,
@@ -283,6 +284,7 @@ export function SessionCard({ session, onChange }: { session: VmSession; onChang
           </div>
         ) : null}
         <FormError error={error} />
+        {session.emulatorType === 'qemu' ? <CaptureScreenshot session={session} /> : null}
         {active ? (
           <div className="d-flex flex-wrap gap-2">
             {canStop ? (
@@ -1145,6 +1147,12 @@ export function VmExecutionSection({
         ) : null}
         {history.length > 0 ? (
           <div className="mt-3">
+            {history
+              .filter((item) => item.emulatorType === 'qemu' && !isSessionActive(item.state))
+              .slice(0, 3)
+              .map((item) => (
+                <CaptureScreenshot key={item.id} session={item} />
+              ))}
             <h3 className="h6">Session history</h3>
             <div className="table-responsive">
               <table className="table table-sm small mb-0">
