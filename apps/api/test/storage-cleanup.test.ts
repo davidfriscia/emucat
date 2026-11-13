@@ -502,6 +502,7 @@ describe('deleting a snapshot', () => {
     const node = (await tree(w)).versions.find((item) => item.id === a);
     expect(node?.deletion).toMatchObject({ attempts: 1, error: null });
     expect(node?.deletable).toEqual({ eligible: false, reason: null });
+    expect(node?.available).toBe(false);
     expect((await restoreOptions(w)).versions.map((item) => item.versionId)).not.toContain(a);
     await w.context.pool.execute(
       "UPDATE agent_vm_state SET execution_state = 'absent' WHERE agent_id = ?",
