@@ -20,14 +20,14 @@ row" or "delete a directory":
 
 What the assessment established, and what this record relies on:
 
-| Question                                           | Answer in the code                                                                                      |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Is an archive shared between versions?             | No. `uq_vm_versions_archive` is unique, and the key is `archives/{emulator}/{vm}/{version_id}.zip`      |
-| Can identical bytes be cached for two versions?    | Yes: the agent's archive cache is content-addressed. Deleting one version's object leaves the cache     |
-| Can a version row be updated or deleted?           | No update (trigger). A delete would be refused by history's foreign keys, which must stay               |
-| Who can delete an archive?                         | Only an agent, through `ArchiveRepository::delete`, which already exists and treats "missing" as done  |
-| What removes a directory safely on the agent?      | The transfer cleanup's quarantine rename (`.emucat-removing-{operation}`) and identity-checked removal |
-| What says a VM is in use on the agent?             | The execution manager (sessions, `unknown` included) and the shared operation slot                      |
+| Question                                        | Answer in the code                                                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Is an archive shared between versions?          | No. `uq_vm_versions_archive` is unique, and the key is `archives/{emulator}/{vm}/{version_id}.zip`     |
+| Can identical bytes be cached for two versions? | Yes: the agent's archive cache is content-addressed. Deleting one version's object leaves the cache    |
+| Can a version row be updated or deleted?        | No update (trigger). A delete would be refused by history's foreign keys, which must stay              |
+| Who can delete an archive?                      | Only an agent, through `ArchiveRepository::delete`, which already exists and treats "missing" as done  |
+| What removes a directory safely on the agent?   | The transfer cleanup's quarantine rename (`.emucat-removing-{operation}`) and identity-checked removal |
+| What says a VM is in use on the agent?          | The execution manager (sessions, `unknown` included) and the shared operation slot                     |
 
 ## Decision 1: removing a persistent local copy is a durable operation
 
@@ -64,12 +64,12 @@ requested ──agent removed it──▶ succeeded            (cleanup_pending 
 
 A journal per operation under `local-removals/`, written before anything moves:
 
-| Phase      | What has happened                                                                 | After a restart                                                                                       |
-| ---------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `checking` | Nothing                                                                           | Reported as `agent_restarted`: nothing was removed                                                    |
+| Phase      | What has happened                                                                  | After a restart                                                                                     |
+| ---------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `checking` | Nothing                                                                            | Reported as `agent_restarted`: nothing was removed                                                  |
 | `moving`   | The directory's path and volume/file ID are recorded; the rename may have happened | The disk decides: moved aside with that identity → `removing`; still in place → nothing was removed |
-| `removing` | Moved aside, lineage and manifest forgotten                                       | Deleting resumes                                                                                      |
-| `reported` | The answer is recorded and repeated until the server closes it                    | Repeated                                                                                              |
+| `removing` | Moved aside, lineage and manifest forgotten                                        | Deleting resumes                                                                                    |
+| `reported` | The answer is recorded and repeated until the server closes it                     | Repeated                                                                                            |
 
 1. The operation claims the agent's single operation slot (`agent_busy` otherwise) and marks the VM busy, so nothing can
    launch, restore, snapshot, verify or discard it until it has finished, whatever the server sends.
@@ -104,16 +104,16 @@ VM's path again, so it can never delete a newly restored copy or another directo
 
 **Leaf only.** A snapshot can be deleted if, at the moment its deletion is recorded, and under the locks below:
 
-| Rule                                                                                           | Refusal                     |
-| ---------------------------------------------------------------------------------------------- | --------------------------- |
-| It is a snapshot. The master is the root of the tree and is never deleted                      | `master_cannot_be_deleted`  |
-| It has no child that is not deleted (a child being deleted still counts)                       | `snapshot_has_descendants`  |
-| No active restore restores it or replaces a copy of it                                         | `snapshot_in_use`           |
-| No active registration has it as its parent (a snapshot or a Remote Snapshot publication)      | `snapshot_in_use`           |
+| Rule                                                                                            | Refusal                    |
+| ----------------------------------------------------------------------------------------------- | -------------------------- |
+| It is a snapshot. The master is the root of the tree and is never deleted                       | `master_cannot_be_deleted` |
+| It has no child that is not deleted (a child being deleted still counts)                        | `snapshot_has_descendants` |
+| No active restore restores it or replaces a copy of it                                          | `snapshot_in_use`          |
+| No active registration has it as its parent (a snapshot or a Remote Snapshot publication)       | `snapshot_in_use`          |
 | No active working copy has it as its base or source (remote sessions and manual working copies) | `snapshot_in_use`          |
-| No active session runs it, and no active verification compares with it                         | `snapshot_in_use`           |
-| No agent records a present persistent copy of it                                               | `snapshot_installed`        |
-| An online agent is authorized and configured for its repository                                | `repository_unavailable`    |
+| No active session runs it, and no active verification compares with it                          | `snapshot_in_use`          |
+| No agent records a present persistent copy of it                                                | `snapshot_installed`       |
+| An online agent is authorized and configured for its repository                                 | `repository_unavailable`   |
 
 There is deliberately no cascade, no reparenting, no branch deletion, no automatic replacement of installed copies and
 no garbage collection. An installed copy has to be replaced or removed first, explicitly.
@@ -164,15 +164,15 @@ answer had already deleted. A failure leaves the tombstone in `deleting` with th
 removes the catalog's knowledge of the version before the repository has confirmed, and nothing makes it selectable
 again: once deletion has begun, the archive may already be gone.
 
-| Failure                                         | What happens                                                                                     |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| Repository unreachable before deleting          | `deleting`, with the error. Retried                                                              |
-| Connection lost during the delete               | The agent's second look decides. Otherwise a failure, retried; the next attempt finds it absent |
-| Archive deleted, then the API crashed           | The tombstone is still `deleting`; the next attempt finds it absent and finishes                 |
-| The transaction recording the tombstone failed  | Nothing was recorded and nothing was sent: the version is unchanged                              |
-| Repeated delete requests                        | They find the same tombstone                                                                     |
-| A restore, session or snapshot racing it        | One of the two is refused, as above                                                              |
-| An agent that reconnects with stale versions    | Only existing rows are updated, and a tombstoned version is never offered or accepted again      |
+| Failure                                        | What happens                                                                                    |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Repository unreachable before deleting         | `deleting`, with the error. Retried                                                             |
+| Connection lost during the delete              | The agent's second look decides. Otherwise a failure, retried; the next attempt finds it absent |
+| Archive deleted, then the API crashed          | The tombstone is still `deleting`; the next attempt finds it absent and finishes                |
+| The transaction recording the tombstone failed | Nothing was recorded and nothing was sent: the version is unchanged                             |
+| Repeated delete requests                       | They find the same tombstone                                                                    |
+| A restore, session or snapshot racing it       | One of the two is refused, as above                                                             |
+| An agent that reconnects with stale versions   | Only existing rows are updated, and a tombstoned version is never offered or accepted again     |
 
 An agent that comes back holding a persistent copy of a deleted snapshot (recorded `absent` at the time) keeps it, can
 launch it, replace it or remove it, and cannot snapshot from it, since its parent no longer exists.

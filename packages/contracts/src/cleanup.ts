@@ -55,7 +55,8 @@ const REMOVAL_RECOVERY: Partial<Record<string, string>> = {
     'The VM is running on this agent, or may be. Stop it, or dismiss its session, then try again. Nothing was removed.',
   operation_in_progress:
     'Something else is working on this VM on that agent. Wait for it to finish. Nothing was removed.',
-  agent_busy: 'The agent is busy with another operation. Wait for it to finish. Nothing was removed.',
+  agent_busy:
+    'The agent is busy with another operation. Wait for it to finish. Nothing was removed.',
   local_copy_missing:
     'There is no local copy of this VM on that agent any more. Reload the page. Nothing was removed.',
   local_copy_changed:
