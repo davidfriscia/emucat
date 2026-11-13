@@ -468,6 +468,58 @@ fn snapshot_and_working_copy_messages_match_the_shared_fixtures() {
 }
 
 #[test]
+fn storage_cleanup_messages_match_the_shared_fixtures() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in ["cleanupServerMessages", "cleanupAgentMessages"] {
+        let examples = wire[key].as_array().unwrap();
+        assert!(!examples.is_empty());
+        for example in examples {
+            let envelope: Envelope = serde_json::from_value(example.clone())
+                .unwrap_or_else(|error| panic!("{example}: {error}"));
+            let round_trip = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(round_trip["type"], example["type"]);
+            assert_eq!(round_trip["payload"], example["payload"], "{example}");
+        }
+    }
+}
+
+#[test]
+fn the_sync_of_an_older_agent_means_it_can_neither_remove_nor_delete() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    let envelope: Envelope = serde_json::from_value(wire["cleanupOlderAgentSync"].clone()).unwrap();
+    let round_trip = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(round_trip["payload"]["capabilities"]["removeLocal"], false);
+    assert_eq!(
+        round_trip["payload"]["capabilities"]["deleteArchives"],
+        false
+    );
+    assert_eq!(round_trip["payload"]["removals"], serde_json::json!([]));
+}
+
+#[test]
+fn a_cleanup_command_with_a_path_is_refused_and_still_answerable() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    let examples = wire["cleanupRefusedByTheAgent"].as_array().unwrap();
+    assert!(!examples.is_empty());
+    for example in examples {
+        assert!(
+            serde_json::from_value::<Envelope>(example.clone()).is_err(),
+            "{example}"
+        );
+        match decode(&example.to_string()) {
+            Decoded::InvalidPayload {
+                message_type,
+                operation_id,
+            } => {
+                assert_eq!(Some(message_type.as_str()), example["type"].as_str());
+                assert!(operation_id.is_some(), "{example}");
+            }
+            other => panic!("{example}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn a_snapshot_command_must_name_its_parent_and_nothing_else_can() {
     let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
     let examples = wire["snapshotRefusedByTheAgent"].as_array().unwrap();

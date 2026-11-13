@@ -16,9 +16,11 @@ import {
   fetchWorkspaces,
   launchWorkspace,
   preserveWorkspace,
+  retrySnapshotDeletion,
 } from '../api';
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
+import { DeleteSnapshotDialog, deletionReasonText } from './Cleanup';
 import { ConfirmDialog } from './Dialogs';
 import { VmLaunchDialog, WORKSPACE_STATE_TEXT, type RunPreselection } from './Execution';
 import { RestoreDialog } from './Restore';
@@ -46,6 +48,7 @@ function newRequestId(): string {
 
 /** What the agent verified, said plainly: the server never reads an archive itself. */
 function verificationText(node: VersionNode): string {
+  if (node.deletion) return 'Being deleted, so it can no longer be restored, run or snapshotted';
   if (!node.available) return 'Repository disabled, so it cannot be restored now';
   return node.manifest
     ? `Verified by the agent when published: ${node.manifest.fileCount} files, ${formatBytes(node.manifest.totalUncompressedBytes)}`
@@ -72,6 +75,8 @@ function VersionItem({
   onRestore,
   onSnapshot,
   onRun,
+  onDelete,
+  onRetryDelete,
 }: {
   entry: VersionTreeEntry;
   vm: VmIdentity;
@@ -81,8 +86,12 @@ function VersionItem({
   onRestore: (versionId: string) => void;
   onSnapshot: (node: VersionNode, agentId: string, agentName: string) => void;
   onRun: (node: VersionNode, mode: ExecutionMode) => void;
+  onDelete: (node: VersionNode) => void;
+  onRetryDelete: (node: VersionNode) => void;
 }) {
   const { node, depth, children } = entry;
+  const deleteReason = deletionReasonText(node);
+  const deleteHelpId = `version-delete-help-${node.id}`;
   const [expanded, setExpanded] = useState(true);
   const headingId = `version-${node.id}`;
   const canRestore = node.available && (restoreOptions?.agents.some((a) => a.online) ?? false);
@@ -116,6 +125,7 @@ function VersionItem({
             >
               {node.kind === 'master' ? 'Root' : 'Snapshot'}
             </span>
+            {node.deletion ? <span className="badge text-bg-danger">Being deleted</span> : null}
             <span className="small text-body-secondary vm-identity" title={node.id}>
               {shortId(node.id)}
             </span>
@@ -146,6 +156,29 @@ function VersionItem({
             ) : null}
           </dl>
           <p className="small text-body-secondary mb-1">{verificationText(node)}</p>
+          {node.deletion ? (
+            <div className="small mb-1" role="status">
+              Deletion requested {formatTime(node.deletion.requestedAt)}; an agent configured for{' '}
+              {node.repositoryName} deletes its archive, and the snapshot then leaves the history.
+              {node.deletion.error ? (
+                <div className="alert alert-warning small mb-0 mt-1">
+                  The last attempt failed (
+                  <span className="vm-identity">{node.deletion.error.code}</span>):{' '}
+                  {node.deletion.error.message} It is tried again automatically.
+                  <div className="mt-1">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-secondary theme-button"
+                      aria-label={`Retry deleting ${nameOf(node)} now`}
+                      onClick={() => onRetryDelete(node)}
+                    >
+                      Retry now
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           {node.holders.length > 0 ? (
             <ul className="list-inline small mb-1">
               {node.holders.map((holder) => (
@@ -195,7 +228,25 @@ function VersionItem({
                 Create snapshot from {holder.agentName}…
               </button>
             ))}
+            {node.kind === 'snapshot' && !node.deletion ? (
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-danger"
+                disabled={!node.deletable.eligible}
+                aria-label={`Delete ${nameOf(node)}`}
+                aria-describedby={deleteReason ? deleteHelpId : undefined}
+                aria-haspopup="dialog"
+                onClick={() => onDelete(node)}
+              >
+                Delete snapshot…
+              </button>
+            ) : null}
           </div>
+          {node.kind === 'snapshot' && !node.deletion && deleteReason ? (
+            <p id={deleteHelpId} className="small text-body-secondary mt-1 mb-0">
+              Cannot be deleted now: {deleteReason}
+            </p>
+          ) : null}
         </div>
       </div>
       {children.length > 0 && expanded ? (
@@ -210,6 +261,8 @@ function VersionItem({
               onRestore={onRestore}
               onSnapshot={onSnapshot}
               onRun={onRun}
+              onDelete={onDelete}
+              onRetryDelete={onRetryDelete}
             />
           ))}
         </ul>
@@ -390,13 +443,16 @@ export function VmVersionHistory({
   const [running, setRunning] = useState<RunPreselection | null>(null);
   const [snapshotting, setSnapshotting] = useState<SnapshotRequest | null>(null);
   const [snapshotOperation, setSnapshotOperation] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<VersionNode | null>(null);
+  const [retryError, setRetryError] = useState<unknown>(null);
   const runToken = useRef(0);
 
   // Only Milestone 7's manual working copies are managed here. Remote sessions belong to the run panel.
   const manual = (workspaces.data?.workspaces ?? []).filter((item) => item.purpose === 'manual');
   const busy =
     snapshotOperation !== null ||
-    manual.some((item) => item.state === 'preparing' || item.state === 'discarding');
+    manual.some((item) => item.state === 'preparing' || item.state === 'discarding') ||
+    (tree.data?.versions.some((version) => version.deletion !== null) ?? false);
   if (busy !== fastPoll) setFastPoll(busy);
 
   const refresh = () => {
@@ -436,6 +492,19 @@ export function VmVersionHistory({
     runToken.current += 1;
     setRunning({ versionId: node.id, mode, token: runToken.current });
   };
+  const retryDelete = async (node: VersionNode) => {
+    setRetryError(null);
+    try {
+      await retrySnapshotDeletion(identity, node.id);
+      refresh();
+    } catch (failure) {
+      setRetryError(failure);
+    }
+  };
+  const parentOf = (node: VersionNode) => {
+    const parent = tree.data?.versions.find((version) => version.id === node.parentVersionId);
+    return parent ? versionLabel(parent) : null;
+  };
 
   return (
     <div className="version-history">
@@ -446,6 +515,7 @@ export function VmVersionHistory({
           onFinished={refresh}
         />
       ) : null}
+      <FormError error={retryError} />
       {!built.ok ? (
         <div className="alert alert-danger small" role="alert">
           The version history is inconsistent ({built.problem.replaceAll('_', ' ')}), so it is not
@@ -476,6 +546,8 @@ export function VmVersionHistory({
                 })
               }
               onRun={run}
+              onDelete={setDeleting}
+              onRetryDelete={(node) => void retryDelete(node)}
             />
           </ul>
         </>
@@ -515,6 +587,18 @@ export function VmVersionHistory({
           onSnapshotFirst={(request) => {
             setRestoring(null);
             setSnapshotting(request);
+          }}
+        />
+      ) : null}
+      {deleting ? (
+        <DeleteSnapshotDialog
+          vm={identity}
+          node={deleting}
+          parentLabel={parentOf(deleting)}
+          onClose={() => setDeleting(null)}
+          onStarted={() => {
+            setDeleting(null);
+            refresh();
           }}
         />
       ) : null}

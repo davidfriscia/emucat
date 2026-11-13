@@ -223,6 +223,12 @@ The temporary copies of remote sessions, and Milestone 7's manual working copies
 
 A restore that replaces the persistent copy extracts the new version into staging, renames the current directory to `.emucat-replaced-{operation}` beside it, renames the new one into place, records its lineage and only then deletes the old one. Each step is journaled: after a crash the agent finishes a swap whose new directory is in place, moves the old directory back if the new one is not, and otherwise leaves both alone and reports it. See [the launcher guide](launcher.md#replacing-a-persistent-copy).
 
+## Removing local copies and deleting archives
+
+When an administrator removes this agent's persistent copy of a VM, the agent finds it from its own base path, as a plain directory with the VM's name, and checks again that nothing runs or works on it, that it is the version the page showed, and, unless the administrator acknowledged discarding changes, that it matches that version and that every screenshot has reached the server. It then renames it to `.emucat-removing-{operation}` in the same base path, forgets its lineage and manifest, and deletes it; links and junctions inside are removed, never followed. Each step is journaled under `local-removals` in the state directory, so a removal a crash interrupted is resolved on the next start: nothing was removed, or the moved-aside directory is deleted. Files that cannot be deleted yet are retried at each start and connection; the copy is already gone for every purpose. Nothing else is ever deleted from a base path this way.
+
+When an administrator deletes a snapshot, one agent configured for its repository deletes its archive. It derives the archive's key from the VM and version itself, refuses a key that differs and an object of another size, and reports the archive gone only after looking again. A missing archive is reported as such, and a failure is retried by the server. See [decision 0041](decisions/0041-storage-cleanup.md).
+
 ## Running and verifying VMs
 
 An administrator can launch a VM the agent holds, stop it, and verify its copy against the master, from the VM's page. The agent builds every command line itself, never runs a batch file, tracks the emulator by its PID and creation time, and refuses to restore, remove or verify a VM while it may be running. Everything is in [the launcher guide](launcher.md).

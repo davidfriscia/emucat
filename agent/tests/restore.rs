@@ -934,6 +934,10 @@ struct Store {
     hold_download: Option<Arc<tokio::sync::Notify>>,
     /// Damages what a download writes, as many times as this says.
     corrupt_downloads: u32,
+    /// Keys deleted, in order. Only archive deletion (decision 0041) ever deletes.
+    deleted: Vec<String>,
+    /// Pretends a delete succeeded while the object stays, as a repository that lost it would.
+    ignore_deletes: bool,
 }
 
 #[derive(Clone, Default)]
@@ -1083,8 +1087,17 @@ impl ArchiveRepository for MemoryRepository {
         async move { panic!("a restore never publishes to the repository") }.boxed()
     }
 
-    fn delete<'a>(&'a self, _key: &'a RepositoryKey) -> BoxFuture<'a, RepositoryResult<()>> {
-        async move { panic!("a restore never deletes from the repository") }.boxed()
+    fn delete<'a>(&'a self, key: &'a RepositoryKey) -> BoxFuture<'a, RepositoryResult<()>> {
+        async move {
+            self.take_failure("delete")?;
+            let mut store = self.store.lock().unwrap();
+            store.deleted.push(key.as_str().to_owned());
+            if !store.ignore_deletes {
+                store.objects.remove(key.as_str());
+            }
+            Ok(())
+        }
+        .boxed()
     }
 }
 
@@ -1248,6 +1261,10 @@ impl Harness {
     }
 
     fn assert_nothing_left_behind(&self) {
+        assert!(
+            self.repository.store.lock().unwrap().deleted.is_empty(),
+            "a restore never deletes from the repository"
+        );
         let leftovers: Vec<_> = fs::read_dir(&self.base)
             .unwrap()
             .flatten()
@@ -3164,4 +3181,674 @@ fn replacing_a_directory_checks_every_identity_and_keeps_the_old_one_beside_it()
         replacement.current_identity
     ));
     assert!(!aside.exists());
+}
+
+// Removing a persistent local copy (decision 0041), and deleting an archive from the repository.
+
+impl Harness {
+    fn remove_request(
+        &self,
+        expected: Option<Uuid>,
+        discard_local_changes: bool,
+    ) -> emucat_agent::protocol::LocalCopyRemove {
+        emucat_agent::protocol::LocalCopyRemove {
+            operation_id: Uuid::new_v4(),
+            emulator_type: EmulatorType::Qemu,
+            vm_name: self.vm_name.clone(),
+            expected_version_id: expected,
+            discard_local_changes,
+        }
+    }
+
+    fn aside(&self, operation_id: Uuid) -> PathBuf {
+        self.base.join(format!(".emucat-removing-{operation_id}"))
+    }
+
+    fn write_removal_journal(&self, value: &serde_json::Value) {
+        let directory = self.state.join("local-removals");
+        fs::create_dir_all(&directory).unwrap();
+        let id = value["request"]["operationId"].as_str().unwrap();
+        fs::write(
+            directory.join(format!("{id}.journal")),
+            serde_json::to_vec_pretty(value).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn archive_request(&self) -> emucat_agent::protocol::ArchiveDelete {
+        emucat_agent::protocol::ArchiveDelete {
+            operation_id: Uuid::new_v4(),
+            version_id: self.version,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: self.vm_name.clone(),
+            repository_id: REPOSITORY,
+            archive_key: archive_key(&self.vm_name, self.version),
+            archive_size_bytes: self.archive.len() as u64,
+            archive_sha256: sha256(&self.archive),
+        }
+    }
+
+    fn archive_present(&self) -> bool {
+        self.repository
+            .store
+            .lock()
+            .unwrap()
+            .objects
+            .contains_key(&archive_key(&self.vm_name, self.version))
+    }
+}
+
+fn remove(operations: &AgentOperations, request: &emucat_agent::protocol::LocalCopyRemove) {
+    operations.handle(Message::ServerLocalCopyRemove(request.clone()));
+}
+
+async fn removal(
+    operations: &AgentOperations,
+    operation_id: Uuid,
+) -> emucat_agent::protocol::LocalCopyRemoveResult {
+    let message = next_message(operations, |message| {
+        matches!(message, Message::AgentLocalCopyRemoveResult(result) if result.operation_id == operation_id)
+    })
+    .await;
+    match message {
+        Message::AgentLocalCopyRemoveResult(result) => result,
+        _ => unreachable!(),
+    }
+}
+
+fn close_removal(operations: &AgentOperations, operation_id: Uuid) {
+    operations.handle(Message::ServerLocalCopyRemoveAck(
+        emucat_agent::protocol::LocalCopyRemoveAck {
+            operation_id,
+            outcome: emucat_agent::protocol::LocalCopyRemoveAckOutcome::Closed,
+        },
+    ));
+}
+
+fn removal_report(
+    operations: &AgentOperations,
+    operation_id: Uuid,
+) -> Option<emucat_agent::protocol::LocalCopyRemoveResult> {
+    operations
+        .pending_reports()
+        .into_iter()
+        .find_map(|message| match message {
+            Message::AgentLocalCopyRemoveResult(result) if result.operation_id == operation_id => {
+                Some(result)
+            }
+            _ => None,
+        })
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir(to).unwrap();
+    for item in fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(item.file_name());
+        if item.file_type().unwrap().is_dir() {
+            copy_tree(&item.path(), &target);
+        } else {
+            fs::copy(item.path(), target).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_restored_copy_is_removed_and_forgotten_while_the_repository_keeps_its_archive() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    // Another VM's directory beside it, as a workspace or a manual copy would be: never touched.
+    let neighbour = harness.base.join("Win98-workspace");
+    fs::create_dir(&neighbour).unwrap();
+    fs::write(neighbour.join("keep.txt"), b"keep").unwrap();
+    assert!(read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).is_some());
+
+    let request = harness.remove_request(Some(harness.version), false);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert!(result.removed, "{result:?}");
+    assert!(!result.cleanup_pending);
+    assert_eq!(result.code, None);
+    assert_eq!(
+        result.local_directory.as_deref(),
+        Some(harness.destination().to_string_lossy().as_ref())
+    );
+    assert!(!harness.destination().exists());
+    assert!(!harness.aside(request.operation_id).exists());
+    harness.assert_nothing_left_behind();
+    assert_eq!(fs::read(neighbour.join("keep.txt")).unwrap(), b"keep");
+    assert!(read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).is_none());
+    assert!(harness.archive_present(), "the repository is never touched");
+    assert!(
+        sync_of(&operations)
+            .local_copies
+            .iter()
+            .all(|copy| copy.vm_name != harness.vm_name),
+        "the copy is no longer reported"
+    );
+
+    // Until it is closed, the answer is repeated and the sync lists it as reported.
+    assert!(removal_report(&operations, request.operation_id).is_some());
+    let sync = sync_of(&operations);
+    assert_eq!(sync.removals.len(), 1);
+    assert_eq!(
+        sync.removals[0].phase,
+        emucat_agent::protocol::LocalRemovalPhase::Reported
+    );
+    close_removal(&operations, request.operation_id);
+    assert!(operations.open_removals().is_empty());
+    assert!(removal_report(&operations, request.operation_id).is_none());
+
+    // The name is free again: a new restore starts a copy with a lineage of its own.
+    harness.restored(&operations).await;
+    harness.assert_matches_source();
+    assert!(read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).is_some());
+}
+
+#[tokio::test]
+async fn a_new_connection_hears_that_this_agent_can_remove_and_delete() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let sync = sync_of(&operations);
+    assert!(sync.capabilities.remove_local);
+    assert!(sync.capabilities.delete_archives);
+    assert!(sync.removals.is_empty());
+}
+
+#[tokio::test]
+async fn a_modified_copy_is_removed_only_when_its_changes_may_be_discarded() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    fs::write(
+        harness.destination().join("a/b/c.bin"),
+        b"changed by the guest",
+    )
+    .unwrap();
+
+    let request = harness.remove_request(Some(harness.version), false);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert!(!result.removed);
+    assert_eq!(
+        result.code.as_deref(),
+        Some("local_copy_modified"),
+        "{result:?}"
+    );
+    assert_eq!(
+        fs::read(harness.destination().join("a/b/c.bin")).unwrap(),
+        b"changed by the guest"
+    );
+    harness.assert_nothing_left_behind();
+    close_removal(&operations, request.operation_id);
+    assert!(operations.open_removals().is_empty());
+
+    let request = harness.remove_request(Some(harness.version), true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert!(result.removed, "{result:?}");
+    assert!(!harness.destination().exists());
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn a_stale_page_or_a_replaced_directory_is_never_removed() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+
+    // The page believed another version was installed. Discarding changes does not change that.
+    let request = harness.remove_request(Some(Uuid::new_v4()), true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert_eq!(
+        result.code.as_deref(),
+        Some("local_copy_changed"),
+        "{result:?}"
+    );
+    harness.assert_matches_source();
+    close_removal(&operations, request.operation_id);
+
+    // Same files, other directory: a copy put there by hand is not the one the lineage names.
+    let elsewhere = harness.base.join("moved-by-hand");
+    fs::rename(harness.destination(), &elsewhere).unwrap();
+    copy_tree(&elsewhere, &harness.destination());
+    let request = harness.remove_request(Some(harness.version), true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert_eq!(
+        result.code.as_deref(),
+        Some("local_copy_changed"),
+        "{result:?}"
+    );
+    harness.assert_matches_source();
+    assert!(elsewhere.join("run.bat").exists());
+    close_removal(&operations, request.operation_id);
+}
+
+#[tokio::test]
+async fn nothing_is_removed_where_there_is_no_copy_or_only_a_file() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let request = harness.remove_request(None, true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert_eq!(
+        result.code.as_deref(),
+        Some("local_copy_missing"),
+        "{result:?}"
+    );
+    close_removal(&operations, request.operation_id);
+
+    fs::write(harness.destination(), b"not a directory").unwrap();
+    let request = harness.remove_request(None, true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert!(!result.removed);
+    assert!(result.code.is_some());
+    assert_eq!(fs::read(harness.destination()).unwrap(), b"not a directory");
+}
+
+#[tokio::test]
+async fn a_running_vm_keeps_its_copy() {
+    let harness = Harness::new();
+    {
+        let operations = harness.operations();
+        harness.restored(&operations).await;
+        operations.shutdown();
+    }
+    harness.leave_unknown_session();
+    let operations = harness.operations();
+    let request = harness.remove_request(Some(harness.version), true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert!(!result.removed);
+    assert_eq!(result.code.as_deref(), Some("vm_running"), "{result:?}");
+    harness.assert_matches_source();
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn a_copy_being_restored_is_not_removed_and_a_removal_holds_off_other_work() {
+    let harness = Harness::new();
+    let hold = harness.repository.hold_downloads();
+    let operations = harness.operations();
+    let restore = harness.request();
+    start(&operations, &restore);
+    next_message(&operations, |message| {
+        matches!(
+            message,
+            Message::AgentRestoreProgress(progress) if progress.stage == RestoreStage::Downloading
+        )
+    })
+    .await;
+    let request = harness.remove_request(None, true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert_eq!(
+        result.code.as_deref(),
+        Some("operation_in_progress"),
+        "{result:?}"
+    );
+    hold.notify_one();
+    outcome(&operations)
+        .await
+        .expect("the restore is unaffected");
+    harness.assert_matches_source();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_junction_inside_the_copy_is_removed_without_touching_its_target() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    let outside = TempDir::new().unwrap();
+    fs::write(outside.path().join("precious.txt"), b"precious").unwrap();
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(harness.destination().join("linked"))
+        .arg(outside.path())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot create a junction");
+
+    let request = harness.remove_request(Some(harness.version), true);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    // Refused as unsafe, or removed as a link: either way, what it points to stays.
+    if result.removed {
+        assert!(!harness.destination().exists());
+        harness.assert_nothing_left_behind();
+    } else {
+        assert_eq!(
+            result.code.as_deref(),
+            Some("local_copy_unsafe"),
+            "{result:?}"
+        );
+        assert!(harness.destination().join("run.bat").exists());
+    }
+    assert_eq!(
+        fs::read(outside.path().join("precious.txt")).unwrap(),
+        b"precious"
+    );
+}
+
+#[tokio::test]
+async fn a_repeated_command_removes_once_and_repeats_its_answer() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    let request = harness.remove_request(Some(harness.version), false);
+    remove(&operations, &request);
+    let first = removal(&operations, request.operation_id).await;
+    assert!(first.removed);
+
+    // The answer was lost, and the server asks again: the same answer, and nothing else is done.
+    fs::create_dir(harness.destination()).unwrap();
+    fs::write(
+        harness.destination().join("new.txt"),
+        b"a directory that took the name",
+    )
+    .unwrap();
+    remove(&operations, &request);
+    let again = removal(&operations, request.operation_id).await;
+    assert_eq!(again, first);
+    assert!(harness.destination().join("new.txt").exists());
+
+    // A stray answer before any result, or for an unknown operation, changes nothing.
+    close_removal(&operations, Uuid::new_v4());
+    close_removal(&operations, request.operation_id);
+    assert!(operations.open_removals().is_empty());
+    // Closed: asking again is not answered and does nothing.
+    assert!(harness.destination().join("new.txt").exists());
+}
+
+fn removal_journal(
+    harness: &Harness,
+    request: &emucat_agent::protocol::LocalCopyRemove,
+    phase: &str,
+    identity: Option<emucat_agent::packaging::DirectoryIdentity>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "request": request,
+        "phase": phase,
+        "directory": identity.map(|_| harness.destination()),
+        "identity": identity,
+        "report": null,
+        "closed": false,
+    })
+}
+
+#[tokio::test]
+async fn a_restart_before_anything_moved_keeps_the_copy() {
+    let harness = Harness::new();
+    {
+        let operations = harness.operations();
+        harness.restored(&operations).await;
+        operations.shutdown();
+    }
+    let identity = directory_identity(&harness.destination()).unwrap();
+    let checking = harness.remove_request(Some(harness.version), false);
+    harness.write_removal_journal(&removal_journal(&harness, &checking, "checking", None));
+    let moving = harness.remove_request(Some(harness.version), false);
+    harness.write_removal_journal(&removal_journal(
+        &harness,
+        &moving,
+        "moving",
+        Some(identity),
+    ));
+
+    let operations = harness.operations();
+    for operation_id in [checking.operation_id, moving.operation_id] {
+        let report = removal_report(&operations, operation_id).expect("reported");
+        assert!(!report.removed);
+        assert_eq!(
+            report.code.as_deref(),
+            Some("agent_restarted"),
+            "{report:?}"
+        );
+    }
+    harness.assert_matches_source();
+    harness.assert_nothing_left_behind();
+    assert!(read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).is_some());
+}
+
+#[tokio::test]
+async fn a_restart_after_the_move_finishes_the_removal() {
+    let harness = Harness::new();
+    {
+        let operations = harness.operations();
+        harness.restored(&operations).await;
+        operations.shutdown();
+    }
+    let identity = directory_identity(&harness.destination()).unwrap();
+    let request = harness.remove_request(Some(harness.version), false);
+    fs::rename(harness.destination(), harness.aside(request.operation_id)).unwrap();
+    harness.write_removal_journal(&removal_journal(
+        &harness,
+        &request,
+        "moving",
+        Some(identity),
+    ));
+
+    let operations = harness.operations();
+    let report = removal_report(&operations, request.operation_id).expect("reported");
+    assert!(report.removed, "{report:?}");
+    assert!(!harness.aside(request.operation_id).exists());
+    harness.assert_nothing_left_behind();
+    assert!(read_local_state(&harness.state, EmulatorType::Qemu, &harness.vm_name).is_none());
+}
+
+#[tokio::test]
+async fn a_restart_while_deleting_finishes_and_a_partial_deletion_is_completed() {
+    let harness = Harness::new();
+    {
+        let operations = harness.operations();
+        harness.restored(&operations).await;
+        operations.shutdown();
+    }
+    let identity = directory_identity(&harness.destination()).unwrap();
+    let request = harness.remove_request(Some(harness.version), false);
+    let aside = harness.aside(request.operation_id);
+    fs::rename(harness.destination(), &aside).unwrap();
+    fs::remove_file(aside.join("disk.qcow2")).unwrap();
+    harness.write_removal_journal(&removal_journal(
+        &harness,
+        &request,
+        "removing",
+        Some(identity),
+    ));
+
+    let operations = harness.operations();
+    let report = removal_report(&operations, request.operation_id).expect("reported");
+    assert!(report.removed, "{report:?}");
+    assert!(!report.cleanup_pending);
+    assert!(!aside.exists());
+    harness.assert_nothing_left_behind();
+}
+
+#[tokio::test]
+async fn after_a_restart_a_directory_that_is_not_the_moved_copy_is_never_deleted() {
+    let harness = Harness::new();
+    {
+        let operations = harness.operations();
+        harness.restored(&operations).await;
+        operations.shutdown();
+    }
+    let identity = directory_identity(&harness.destination()).unwrap();
+    let request = harness.remove_request(Some(harness.version), false);
+    // The copy went elsewhere, and something else has the moved-aside name and the VM's name.
+    fs::rename(harness.destination(), harness.base.join("elsewhere")).unwrap();
+    let impostor = harness.aside(request.operation_id);
+    fs::create_dir(&impostor).unwrap();
+    fs::write(impostor.join("other.txt"), b"other").unwrap();
+    fs::create_dir(harness.destination()).unwrap();
+    fs::write(harness.destination().join("new.txt"), b"new").unwrap();
+    harness.write_removal_journal(&removal_journal(
+        &harness,
+        &request,
+        "moving",
+        Some(identity),
+    ));
+
+    let operations = harness.operations();
+    let report = removal_report(&operations, request.operation_id).expect("reported");
+    assert!(!report.removed);
+    assert_eq!(
+        report.code.as_deref(),
+        Some("local_copy_missing"),
+        "{report:?}"
+    );
+    assert!(impostor.join("other.txt").exists());
+    assert!(harness.destination().join("new.txt").exists());
+    assert!(harness.base.join("elsewhere/run.bat").exists());
+
+    // Even in the last phase, a directory with another identity is left alone.
+    let request = harness.remove_request(Some(harness.version), false);
+    let impostor = harness.aside(request.operation_id);
+    fs::create_dir(&impostor).unwrap();
+    fs::write(impostor.join("other.txt"), b"other").unwrap();
+    harness.write_removal_journal(&removal_journal(
+        &harness,
+        &request,
+        "removing",
+        Some(identity),
+    ));
+    drop(operations);
+    let operations = harness.operations();
+    let report = removal_report(&operations, request.operation_id).expect("reported");
+    assert!(impostor.join("other.txt").exists(), "{report:?}");
+}
+
+#[tokio::test]
+async fn an_invalid_removal_is_answered() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let operation_id = Uuid::new_v4();
+    operations.refuse_invalid_removal(operation_id);
+    let result = removal(&operations, operation_id).await;
+    assert!(!result.removed);
+    assert_eq!(result.code.as_deref(), Some("invalid_request"));
+}
+
+async fn archive_deleted(
+    operations: &AgentOperations,
+    request: &emucat_agent::protocol::ArchiveDelete,
+) -> emucat_agent::protocol::ArchiveDeleteResult {
+    operations.handle(Message::ServerArchiveDelete(request.clone()));
+    let message = next_message(operations, |message| {
+        matches!(message, Message::AgentArchiveDeleteResult(result) if result.operation_id == request.operation_id)
+    })
+    .await;
+    match message {
+        Message::AgentArchiveDeleteResult(result) => result,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn an_archive_is_deleted_once_and_then_found_absent() {
+    use emucat_agent::protocol::ArchiveDeleteOutcome;
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let result = archive_deleted(&operations, &harness.archive_request()).await;
+    assert_eq!(result.outcome, ArchiveDeleteOutcome::Deleted, "{result:?}");
+    assert_eq!(result.version_id, harness.version);
+    assert!(!harness.archive_present());
+
+    // A retry after a lost answer: nothing at the key is success too.
+    let result = archive_deleted(&operations, &harness.archive_request()).await;
+    assert_eq!(result.outcome, ArchiveDeleteOutcome::Absent, "{result:?}");
+    assert_eq!(
+        harness.repository.store.lock().unwrap().deleted,
+        vec![archive_key(&harness.vm_name, harness.version)]
+    );
+}
+
+#[tokio::test]
+async fn an_archive_is_only_deleted_at_the_key_derived_from_the_version() {
+    use emucat_agent::protocol::ArchiveDeleteOutcome;
+    let harness = Harness::new();
+    let operations = harness.operations();
+    // Another object the request points at instead: never deleted.
+    let other = Uuid::new_v4();
+    let other_key = archive_key(&harness.vm_name, other);
+    harness
+        .repository
+        .store
+        .lock()
+        .unwrap()
+        .objects
+        .insert(other_key.clone(), harness.archive.clone());
+    for key in [
+        other_key.clone(),
+        "../../etc/passwd".to_owned(),
+        String::new(),
+    ] {
+        let request = emucat_agent::protocol::ArchiveDelete {
+            archive_key: key,
+            ..harness.archive_request()
+        };
+        let result = archive_deleted(&operations, &request).await;
+        assert_eq!(result.outcome, ArchiveDeleteOutcome::Failed);
+        assert_eq!(result.code.as_deref(), Some("archive_key_mismatch"));
+    }
+    let store = harness.repository.store.lock().unwrap();
+    assert!(store.deleted.is_empty());
+    assert!(store.objects.contains_key(&other_key));
+}
+
+#[tokio::test]
+async fn an_object_of_another_size_or_an_unconfirmed_delete_is_not_success() {
+    use emucat_agent::protocol::ArchiveDeleteOutcome;
+    let harness = Harness::new();
+    let operations = harness.operations();
+    let request = emucat_agent::protocol::ArchiveDelete {
+        archive_size_bytes: harness.archive.len() as u64 + 1,
+        ..harness.archive_request()
+    };
+    let result = archive_deleted(&operations, &request).await;
+    assert_eq!(result.outcome, ArchiveDeleteOutcome::Failed);
+    assert_eq!(result.code.as_deref(), Some("archive_mismatch"));
+    assert!(harness.archive_present());
+    assert!(harness.repository.store.lock().unwrap().deleted.is_empty());
+
+    harness.repository.store.lock().unwrap().ignore_deletes = true;
+    let result = archive_deleted(&operations, &harness.archive_request()).await;
+    assert_eq!(result.outcome, ArchiveDeleteOutcome::Failed);
+    assert_eq!(result.code.as_deref(), Some("archive_delete_unconfirmed"));
+}
+
+#[tokio::test]
+async fn repository_failures_while_deleting_keep_their_codes() {
+    use emucat_agent::protocol::ArchiveDeleteOutcome;
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness
+        .repository
+        .fail("stat", RepositoryError::new(Kind::Unreachable, "down"));
+    let result = archive_deleted(&operations, &harness.archive_request()).await;
+    assert_eq!(result.outcome, ArchiveDeleteOutcome::Failed);
+    assert_eq!(result.code.as_deref(), Some(Kind::Unreachable.code()));
+    assert!(harness.archive_present());
+
+    harness
+        .repository
+        .fail("delete", RepositoryError::new(Kind::PermissionDenied, "no"));
+    let result = archive_deleted(&operations, &harness.archive_request()).await;
+    assert_eq!(result.code.as_deref(), Some(Kind::PermissionDenied.code()));
+    assert!(harness.archive_present());
+
+    let request = emucat_agent::protocol::ArchiveDelete {
+        repository_id: Uuid::new_v4(),
+        ..harness.archive_request()
+    };
+    let result = archive_deleted(&operations, &request).await;
+    assert_eq!(result.code.as_deref(), Some(Kind::NotConfigured.code()));
+
+    // Once the repository answers again, the retry succeeds.
+    let result = archive_deleted(&operations, &harness.archive_request()).await;
+    assert_eq!(result.outcome, ArchiveDeleteOutcome::Deleted);
 }

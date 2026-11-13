@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LOCAL_REMOVAL_SYNC_PHASES, REMOVAL_INELIGIBLE_REASONS } from './cleanup.js';
 import { emulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
@@ -240,6 +241,10 @@ export const restoreSyncPayloadSchema = z.object({
     cacheUsedBytes: safeSizeSchema,
     /** Whether the agent can replace a persistent copy safely (decision 0040). Older agents do not say. */
     replaceLocal: z.boolean().optional(),
+    /** Whether the agent can remove a persistent copy (decision 0041). Older agents do not say. */
+    removeLocal: z.boolean().optional(),
+    /** Whether the agent can delete a version's archive from a repository (decision 0041). */
+    deleteArchives: z.boolean().optional(),
   }),
   localCopies: z
     .array(
@@ -253,6 +258,11 @@ export const restoreSyncPayloadSchema = z.object({
     .max(RESTORE_LOCAL_COPIES_MAX),
   /** The working copies this agent holds, for any purpose. Older agents do not say. */
   workspaces: z.array(z.uuid()).max(256).optional(),
+  /** The local copy removals the agent has journaled and not yet closed (decision 0041). */
+  removals: z
+    .array(z.object({ operationId: z.uuid(), phase: z.enum(LOCAL_REMOVAL_SYNC_PHASES) }))
+    .max(256)
+    .optional(),
 });
 export type RestoreSyncPayload = z.infer<typeof restoreSyncPayloadSchema>;
 
@@ -429,6 +439,13 @@ export const restoreAgentOptionSchema = z.object({
   replace: z.object({
     eligible: z.boolean(),
     reason: z.enum(RESTORE_INELIGIBLE_REASONS).nullable(),
+  }),
+  /** Whether a session of this VM is active on this agent, `unknown` included. */
+  running: z.boolean(),
+  /** Whether the persistent copy can be removed now, when there is one (decision 0041). */
+  remove: z.object({
+    eligible: z.boolean(),
+    reason: z.enum(REMOVAL_INELIGIBLE_REASONS).nullable(),
   }),
   cacheUsedBytes: safeSizeSchema.nullable(),
   cacheMaxBytes: safeSizeSchema.nullable(),

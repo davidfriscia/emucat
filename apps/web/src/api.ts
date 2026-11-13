@@ -89,6 +89,15 @@ import {
   type UpdateVmMetadataRequest,
   type VmIdentity,
   type VmVisibility,
+  localCopyRemovalListResponseSchema,
+  localCopyRemovalSchema,
+  versionDeletionListResponseSchema,
+  versionDeletionSchema,
+  type CreateLocalCopyRemovalRequest,
+  type LocalCopyRemoval,
+  type LocalCopyRemovalListResponse,
+  type VersionDeletion,
+  type VersionDeletionListResponse,
 } from '@emucat/contracts';
 
 /**
@@ -756,6 +765,57 @@ export function retryPublication(workspaceId: string): Promise<RemoteSession> {
     method: 'POST',
     body: {},
   });
+}
+
+/** Asks one agent to remove its persistent copy of a VM (decision 0041). Nothing else is touched. */
+export function removeLocalCopy(request: CreateLocalCopyRemovalRequest): Promise<LocalCopyRemoval> {
+  return requestJson('/admin/local-copy-removals', localCopyRemovalSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function fetchLocalCopyRemovals(
+  filter: { agentId?: string; emulatorType?: EmulatorType; vmName?: string },
+  signal?: AbortSignal,
+): Promise<LocalCopyRemovalListResponse> {
+  return requestJson(
+    `/admin/local-copy-removals${queryString(filter)}`,
+    localCopyRemovalListResponseSchema,
+    { signal },
+  );
+}
+
+/** Permanently deletes a leaf snapshot. The confirmation names its immutable ID. */
+export function deleteSnapshot(
+  vm: VmIdentity,
+  versionId: string,
+  requestId: string,
+): Promise<VersionDeletion> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${versionId}/deletion`,
+    versionDeletionSchema,
+    { method: 'POST', body: { versionId, requestId } },
+  );
+}
+
+export function retrySnapshotDeletion(vm: VmIdentity, versionId: string): Promise<VersionDeletion> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${versionId}/deletion/retry`,
+    versionDeletionSchema,
+    { method: 'POST' },
+  );
+}
+
+export function fetchVersionDeletions(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<VersionDeletionListResponse> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/version-deletions`,
+    versionDeletionListResponseSchema,
+    { signal },
+  );
 }
 
 /** Lets a held remote session go on, once its emulator is known not to run. */

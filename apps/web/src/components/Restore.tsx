@@ -1,5 +1,6 @@
 import {
   EMULATOR_LABELS,
+  isLocalRemovalTerminal,
   isRestoreCancellable,
   isRestoreTerminal,
   type RegistrationOperation,
@@ -12,9 +13,16 @@ import {
 } from '@emucat/contracts';
 import { useCallback, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
-import { cancelRestore, fetchRestoreOptions, fetchRestores, startRestore } from '../api';
+import {
+  cancelRestore,
+  fetchLocalCopyRemovals,
+  fetchRestoreOptions,
+  fetchRestores,
+  startRestore,
+} from '../api';
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
+import { RemovalCard, removalReasonText, RemoveLocalCopyDialog } from './Cleanup';
 import { InfoDialog } from './Dialogs';
 import { useModalDialog } from './Gallery';
 import {
@@ -779,21 +787,37 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
     (signal: AbortSignal) => fetchRestoreOptions({ emulatorType, vmName }, signal),
     [emulatorType, vmName],
   );
+  const loadRemovals = useCallback(
+    (signal: AbortSignal) => fetchLocalCopyRemovals({ emulatorType, vmName }, signal),
+    [emulatorType, vmName],
+  );
   const [fastPoll, setFastPoll] = useState(false);
   const operations = usePolledData(loadOperations, fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS);
   const options = usePolledData(loadOptions, fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+  const removals = usePolledData(loadRemovals, fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [removing, setRemoving] = useState<RestoreAgentOption | null>(null);
+  const removeButtons = useRef(new Map<string, HTMLButtonElement>());
   const [snapshotFirst, setSnapshotFirst] = useState<SnapshotRequest | null>(null);
   const [snapshotOperation, setSnapshotOperation] = useState<RegistrationOperation | null>(null);
   const restoreButton = useRef<HTMLButtonElement>(null);
 
   const list = operations.data?.operations ?? [];
-  const active = list.some((operation) => !isRestoreTerminal(operation.state));
+  const removalList = removals.data?.removals ?? [];
+  const active =
+    list.some((operation) => !isRestoreTerminal(operation.state)) ||
+    removalList.some((removal) => !isLocalRemovalTerminal(removal.state) || removal.cleanupPending);
   if (active !== fastPoll) setFastPoll(active);
 
   const refresh = () => {
     operations.refresh();
     options.refresh();
+    removals.refresh();
+  };
+  const closeRemoval = () => {
+    const agentId = removing?.agentId;
+    setRemoving(null);
+    if (agentId) removeButtons.current.get(agentId)?.focus();
   };
   const closeDialog = () => {
     setDialogOpen(false);
@@ -859,6 +883,9 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
                   <th scope="col">Persistent copy</th>
                   <th scope="col">Version</th>
                   <th scope="col">Restore</th>
+                  <th scope="col">
+                    <span className="visually-hidden">Remove</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -887,6 +914,25 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
                             ? `Not now: ${INELIGIBLE_TEXT[reason]}`
                             : 'Not now'}
                       </td>
+                      <td className="text-end">
+                        {agent.local.availability === 'present' ? (
+                          <button
+                            ref={(element) => {
+                              if (element) removeButtons.current.set(agent.agentId, element);
+                              else removeButtons.current.delete(agent.agentId);
+                            }}
+                            type="button"
+                            className="btn btn-sm btn-outline-danger"
+                            disabled={!agent.remove.eligible}
+                            title={removalReasonText(agent) ?? undefined}
+                            aria-label={`Remove the local copy on ${agent.agentName}`}
+                            aria-haspopup="dialog"
+                            onClick={() => setRemoving(agent)}
+                          >
+                            Remove local copy…
+                          </button>
+                        ) : null}
+                      </td>
                     </tr>
                   );
                 })}
@@ -896,6 +942,14 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
         ) : null}
         {master && !canRestore && options.data ? (
           <p className="small text-body-secondary">No agent can restore this VM right now.</p>
+        ) : null}
+        {removalList.length > 0 ? (
+          <>
+            <h3 className="h6 mt-3">Local copy removals</h3>
+            {removalList.slice(0, HISTORY_ROWS).map((removal) => (
+              <RemovalCard key={removal.id} removal={removal} />
+            ))}
+          </>
         ) : null}
         {list.length > 0 ? (
           <>
@@ -916,6 +970,18 @@ export function VmRestoreSection({ vm }: { vm: VmIdentity }) {
           onSnapshotFirst={(request) => {
             setDialogOpen(false);
             setSnapshotFirst(request);
+          }}
+        />
+      ) : null}
+      {removing ? (
+        <RemoveLocalCopyDialog
+          vm={identity}
+          agent={removing}
+          nameVersion={nameVersion}
+          onClose={closeRemoval}
+          onStarted={() => {
+            closeRemoval();
+            refresh();
           }}
         />
       ) : null}

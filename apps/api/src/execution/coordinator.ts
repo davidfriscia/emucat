@@ -29,6 +29,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import { lockUsableVersion, NOT_DELETED } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
 
 /** What the coordinator needs from the hub, which owns the sockets. */
@@ -365,7 +366,8 @@ export class ExecutionCoordinator {
            WHERE version.emulator_type = ? AND version.vm_name = ? AND version.kind = 'master'
            LIMIT 1) AS repository_id,
          (SELECT COUNT(*) FROM vm_versions AS version
-           WHERE version.emulator_type = ? AND version.vm_name = ?) AS versions,
+           WHERE version.emulator_type = ? AND version.vm_name = ? AND ${NOT_DELETED('version')})
+           AS versions,
          (SELECT COUNT(*) FROM vm_versions AS version
            JOIN agent_repositories AS ar
              ON ar.repository_id = version.repository_id AND ar.agent_id = ?
@@ -447,16 +449,21 @@ export class ExecutionCoordinator {
          (SELECT COUNT(*) FROM restore_operations
            WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1) +
          (SELECT COUNT(*) FROM vm_verifications
+           WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1) +
+         (SELECT COUNT(*) FROM local_copy_removals
            WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1) AS vm_work,
          (SELECT COUNT(*) FROM registration_operations WHERE agent_id = ? AND active_marker = 1) +
          (SELECT COUNT(*) FROM restore_operations WHERE agent_id = ? AND active_marker = 1) +
-         (SELECT COUNT(*) FROM vm_verifications WHERE agent_id = ? AND active_marker = 1) AS work`,
+         (SELECT COUNT(*) FROM vm_verifications WHERE agent_id = ? AND active_marker = 1) +
+         (SELECT COUNT(*) FROM local_copy_removals WHERE agent_id = ? AND active_marker = 1) AS work`,
       [
         ...[agentId, vm.emulatorType, vm.vmName],
         ...[agentId, vm.emulatorType, vm.vmName],
         ...[agentId, vm.emulatorType, vm.vmName],
         ...[agentId, vm.emulatorType, vm.vmName],
         ...[agentId, vm.emulatorType, vm.vmName],
+        ...[agentId, vm.emulatorType, vm.vmName],
+        agentId,
         agentId,
         agentId,
         agentId,
@@ -900,12 +907,14 @@ export class ExecutionCoordinator {
            ON s.agent_id = ? AND s.emulator_type = version.emulator_type
           AND s.vm_name = version.vm_name AND s.local_source_version_id = version.id
          WHERE version.emulator_type = ? AND version.vm_name = ?
-           AND (version.kind = 'master' OR s.agent_id IS NOT NULL)
+           AND (version.kind = 'master' OR s.agent_id IS NOT NULL) AND ${NOT_DELETED('version')}
          ORDER BY s.agent_id IS NULL, version.created_at
          LIMIT 1`,
         [agentId, emulatorType, vmName],
       );
       const version = versions[0];
+      // Compared against it, so it must not be deleted meanwhile (decision 0041).
+      if (version) await lockUsableVersion(connection, version.id as string);
       const canonicalName = (version?.vm_name as string | undefined) ?? vmName;
       const facts = await this.facts(connection, agentId, { emulatorType, vmName: canonicalName });
       const reason = this.verifyIneligible(agentId, version !== undefined, {

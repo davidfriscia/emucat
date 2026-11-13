@@ -32,6 +32,7 @@ import {
 } from '../auth/guards.js';
 import { vmExists } from '../catalog/repository.js';
 import { ApiError } from '../errors.js';
+import type { VersionDeletionCoordinator } from '../cleanup/version-deletions.js';
 import type { RegistrationCoordinator } from '../registration/coordinator.js';
 import { versionTree } from '../versions/tree.js';
 import type { WorkspaceCoordinator } from '../workspaces/coordinator.js';
@@ -47,6 +48,7 @@ export function registerAdminVersionRoutes(
   dependencies: BrowserDependencies,
   registrations: RegistrationCoordinator,
   workspaces: WorkspaceCoordinator,
+  deletions: VersionDeletionCoordinator | null = null,
 ): void {
   const { pool, session, cookie, publicOrigin } = dependencies;
 
@@ -69,7 +71,7 @@ export function registerAdminVersionRoutes(
         async (request): Promise<VersionTreeResponse> => {
           const vm = request.params as VmIdentity;
           await requireVm(vm);
-          return versionTree(pool, vm);
+          return versionTree(pool, vm, deletions);
         },
       );
 

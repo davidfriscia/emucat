@@ -25,6 +25,7 @@ import {
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import type { DiscoveryRecord } from '../agents/discovery.js';
+import { lockUsableVersion } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
 import { recordHealthResult } from './repositories.js';
 
@@ -277,8 +278,11 @@ export class RegistrationCoordinator {
       const [restores] = await connection.execute<RowDataPacket[]>(
         `SELECT 'restore' AS kind FROM restore_operations WHERE agent_id = ? AND active_marker = 1
          UNION ALL
-         SELECT 'verification' FROM vm_verifications WHERE agent_id = ? AND active_marker = 1`,
-        [agentId, agentId],
+         SELECT 'verification' FROM vm_verifications WHERE agent_id = ? AND active_marker = 1
+         UNION ALL
+         SELECT 'local copy removal' FROM local_copy_removals
+           WHERE agent_id = ? AND active_marker = 1`,
+        [agentId, agentId, agentId],
       );
       if (restores.length > 0) {
         throw new ApiError(
@@ -418,14 +422,17 @@ export class RegistrationCoordinator {
       repositoryId = parent.repository_id as string;
       if (!parent.enabled) throw refuseSnapshot('repository_disabled');
       if (!parent.authorized) throw refuseSnapshot('repository_not_authorized');
+      // A deleted parent can have no children (decision 0041).
+      await lockUsableVersion(connection, parentVersionId);
 
       const [busy] = await connection.execute<RowDataPacket[]>(
         `SELECT 1 FROM restore_operations WHERE agent_id = ? AND active_marker = 1
          UNION ALL SELECT 1 FROM vm_verifications WHERE agent_id = ? AND active_marker = 1
          UNION ALL SELECT 1 FROM registration_operations WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 1 FROM local_copy_removals WHERE agent_id = ? AND active_marker = 1
          UNION ALL SELECT 1 FROM registration_operations
            WHERE emulator_type = ? AND vm_name = ? AND active_marker = 1`,
-        [agentId, agentId, agentId, vm.emulatorType, canonicalName],
+        [agentId, agentId, agentId, agentId, vm.emulatorType, canonicalName],
       );
       if (busy.length > 0) throw refuseSnapshot('operation_in_progress');
       // Unknown sessions count: an emulator that may be running describes no moment of its disks.

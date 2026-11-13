@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { agentVersionSchema } from './agents.js';
 import {
+  archiveDeletePayloadSchema,
+  archiveDeleteResultPayloadSchema,
+  localCopyRemoveAckPayloadSchema,
+  localCopyRemovePayloadSchema,
+  localCopyRemoveResultPayloadSchema,
+} from './cleanup.js';
+import {
   discoveryErrorPayloadSchema,
   discoveryRequestPayloadSchema,
   discoveryResultPayloadSchema,
@@ -175,6 +182,14 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.workspace_discard_result'),
     payload: workspaceDiscardResultPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.local_copy_remove_result'),
+    payload: localCopyRemoveResultPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.archive_delete_result'),
+    payload: archiveDeleteResultPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -236,6 +251,18 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.workspace_discard'),
     payload: workspaceDiscardPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.local_copy_remove'),
+    payload: localCopyRemovePayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.local_copy_remove_ack'),
+    payload: localCopyRemoveAckPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.archive_delete'),
+    payload: archiveDeletePayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

@@ -293,6 +293,11 @@ impl AgentOperations {
             snapshots: true,
         })];
         messages.push(self.restores.sync_message());
+        // Leftovers of a removed copy are deleted again on each connection, off the connection's task.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let restores = Arc::clone(&self.restores);
+            tokio::task::spawn_blocking(move || restores.retry_removal_leftovers());
+        }
         messages.push(
             self.execution
                 .sync_message(self.restores.open_verifications()),
@@ -351,13 +356,36 @@ impl AgentOperations {
             | Message::ServerRestoreCancel(_)
             | Message::ServerRestoreAck(_)
             | Message::ServerVmVerify(_)
-            | Message::ServerVmVerifyAck(_)) => self.restores.handle(message),
+            | Message::ServerVmVerifyAck(_)
+            | Message::ServerLocalCopyRemove(_)
+            | Message::ServerLocalCopyRemoveAck(_)) => self.restores.handle(message),
+            Message::ServerArchiveDelete(request) => self.delete_archive(request),
             message @ (Message::ServerVmLaunch(_)
             | Message::ServerVmStop(_)
             | Message::ServerVmExecutionAck(_)) => self.execution.handle(message),
             Message::ServerWorkspaceDiscard(discard) => self.discard_workspace(discard),
             _ => {}
         }
+    }
+
+    /// Deletes one version's archive from a repository, when the server says the version is deleted
+    /// (decision 0041). It reads nothing local and claims no operation slot: every step is idempotent, and
+    /// the server asks again until it has an answer.
+    fn delete_archive(&self, request: crate::protocol::ArchiveDelete) {
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let repositories = Arc::clone(&inner.config.repositories);
+            let result = crate::archive_deletion::delete_archive(&repositories, &request).await;
+            if let Some(code) = &result.code {
+                tracing::warn!(version_id = %request.version_id, %code, "Archive not deleted");
+            }
+            inner.send(Message::AgentArchiveDeleteResult(result));
+        });
+    }
+
+    /// A removal that failed validation is answered as a refused one, so that it does not hang.
+    pub fn refuse_invalid_removal(&self, operation_id: Uuid) {
+        self.restores.refuse_invalid_removal(operation_id);
     }
 
     /// Removes a working copy the server asked about, unless anything runs or works on its VM here. The
@@ -486,6 +514,11 @@ impl AgentOperations {
         for flag in self.inner.running.lock().expect("poisoned").values() {
             flag.cancel();
         }
+    }
+
+    /// The local copy removals this agent has not closed yet, for tests and diagnostics.
+    pub fn open_removals(&self) -> Vec<Uuid> {
+        self.restores.open_removals()
     }
 
     /// The restores this agent has not closed yet, for tests and diagnostics.

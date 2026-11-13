@@ -13,6 +13,7 @@ import {
 } from '@emucat/contracts';
 import type { RowDataPacket } from 'mysql2/promise';
 import { expect } from 'vitest';
+import type { BrowserDependencies } from '../src/routes/browser.js';
 import type { RemoteSessionOptions } from '../src/workspaces/coordinator.js';
 import {
   envelope,
@@ -55,6 +56,11 @@ export interface Capabilities {
   modes?: string[];
   /** Whether the agent says it replaces a persistent copy safely. */
   replaceLocal?: boolean;
+  /** Whether the agent says it removes a persistent copy, and deletes archives (decision 0041). */
+  removeLocal?: boolean;
+  deleteArchives?: boolean;
+  /** The removals the agent lists as journaled. */
+  removals?: { operationId: string; phase: string }[];
 }
 
 export async function barrier(agent: TestAgent): Promise<void> {
@@ -65,10 +71,12 @@ export async function barrier(agent: TestAgent): Promise<void> {
 export async function world(
   capabilities: Capabilities = {},
   remoteSessions: Partial<RemoteSessionOptions> = {},
+  overrides: Partial<BrowserDependencies> = {},
 ): Promise<World> {
   const context = await startBrowserApp({
     pairingRateLimits: GENEROUS_RATE_LIMITS,
     remoteSessions,
+    ...overrides,
   });
   worlds.push(context);
   await context.app.listen({ host: '127.0.0.1', port: 0 });
@@ -126,9 +134,16 @@ export async function resync(w: World, capabilities: Capabilities = {}): Promise
         ...(capabilities.replaceLocal === undefined
           ? {}
           : { replaceLocal: capabilities.replaceLocal }),
+        ...(capabilities.removeLocal === undefined
+          ? {}
+          : { removeLocal: capabilities.removeLocal }),
+        ...(capabilities.deleteArchives === undefined
+          ? {}
+          : { deleteArchives: capabilities.deleteArchives }),
       },
       localCopies: [],
       ...(capabilities.workspaces === null ? {} : { workspaces: capabilities.workspaces ?? [] }),
+      ...(capabilities.removals ? { removals: capabilities.removals } : {}),
     }),
   );
   agent.send(
