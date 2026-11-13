@@ -400,6 +400,29 @@ async fn real_qemu_keeps_its_human_monitor_in_every_mode() {
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(agent.manager.active_sessions(), vec![request.session_id]);
 
+        let output = machine
+            .directory
+            .path()
+            .join(format!("{}.ppm", Uuid::new_v4()));
+        let manager = agent.manager.clone();
+        let capture = emucat_agent::capture::CaptureCommand {
+            operation_id: Uuid::new_v4(),
+            session_id: request.session_id,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: request.vm_name.clone(),
+        };
+        let destination = output.clone();
+        tokio::task::spawn_blocking(move || manager.capture_screen(&capture, destination))
+            .await
+            .unwrap()
+            .unwrap();
+        emucat_agent::capture::validate_ppm(&output).unwrap();
+        println!(
+            "real {:?} screendump: {} bytes, {}",
+            request.mode,
+            fs::metadata(&output).unwrap().len(),
+            output.display()
+        );
         agent.manager.handle(stop(&request, true));
         let stopped = agent
             .wait_state(request.session_id, AgentExecutionState::Stopped)

@@ -90,6 +90,15 @@ fn speak_qmp(behavior: &Behavior) {
                     std::process::exit(0);
                 }
             }
+            Some("screendump") => {
+                let filename = value["arguments"]["filename"].as_str().unwrap();
+                match std::fs::write(filename, b"P6\n2 1\n255\n\xff\0\0\0\xff\0") {
+                    Ok(()) => say(serde_json::json!({"return": {}})),
+                    Err(error) => say(
+                        serde_json::json!({"error": {"class": "GenericError", "desc": error.to_string()}}),
+                    ),
+                }
+            }
             Some("quit") => {
                 say(serde_json::json!({"return": {}}));
                 std::process::exit(0);

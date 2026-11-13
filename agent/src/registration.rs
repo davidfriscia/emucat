@@ -160,6 +160,7 @@ pub struct AgentOperations {
     inner: Arc<Inner>,
     restores: Arc<RestoreManager>,
     execution: Arc<ExecutionManager>,
+    captures: Arc<crate::capture::CaptureManager>,
     /// One session reads this at a time.
     outbound: tokio::sync::Mutex<mpsc::Receiver<Message>>,
 }
@@ -223,6 +224,11 @@ impl AgentOperations {
             outbound.clone(),
             stopping.clone(),
         )?;
+        let captures = crate::capture::CaptureManager::load(
+            config.state_dir.clone(),
+            execution.clone(),
+            config.media.clone(),
+        )?;
         let inner = Arc::new(Inner {
             config,
             outbound,
@@ -267,6 +273,7 @@ impl AgentOperations {
             inner,
             restores,
             execution,
+            captures,
             outbound: tokio::sync::Mutex::new(receiver),
         }))
     }
@@ -312,6 +319,7 @@ impl AgentOperations {
         let mut reports = self.pending_registration_reports();
         reports.extend(self.restores.pending_reports());
         reports.extend(self.execution.pending_reports());
+        reports.extend(self.captures.reports());
         reports
     }
 
@@ -347,6 +355,9 @@ impl AgentOperations {
     /// Acts on a message for this module. Anything else is ignored.
     pub fn handle(&self, message: Message) {
         match message {
+            Message::ServerQemuCapture(request) => self.captures.start(request),
+            Message::ServerQemuCaptureAck(ack) => self.captures.acknowledge(ack),
+            Message::ServerQemuCaptureRetry(retry) => self.captures.retry(retry),
             Message::ServerRegistrationRequest(request) => self.inner.start(request),
             Message::ServerRegistrationCancel(cancel) => self.inner.cancel(&cancel),
             Message::ServerRegistrationAck(ack) => self.inner.acknowledged(ack),

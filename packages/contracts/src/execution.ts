@@ -93,6 +93,7 @@ export const vmExecutionStatusPayloadSchema = z.object({
   stopRequested: z.boolean(),
   /** Whether this run of the agent can ask the emulator to stop, rather than only end it. */
   gracefulStopAvailable: z.boolean(),
+  screenshotAvailable: z.boolean().optional(),
   code: errorCodeSchema.nullable(),
   message: errorMessageSchema.nullable(),
 });
@@ -114,6 +115,7 @@ export const executionSyncPayloadSchema = z.object({
       )
       .max(2),
     modes: z.array(executionModeSchema).max(3),
+    qemuScreenshot: z.boolean().optional(),
   }),
   /** Verifications the agent has not closed yet. */
   verifications: z.array(z.uuid()).max(256),

@@ -362,6 +362,9 @@ impl MediaApi for HttpMediaApi {
                 .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
                 .header(reqwest::header::CONTENT_LENGTH, entry.stamp.size_bytes)
                 .header("x-emucat-source-path", percent_encode(&entry.source_path));
+            if let Some(id) = entry.capture_id {
+                request = request.header("x-emucat-capture-id", id.to_string());
+            }
             if !captured_at.is_empty() {
                 request = request.header("x-emucat-captured-at", captured_at);
             }
@@ -383,6 +386,13 @@ impl MediaApi for HttpMediaApi {
 /// What a transfer needs from synchronization, in order to prove that nothing would be lost. Implemented
 /// here, and by a stand-in in tests of the registration workflow.
 pub trait MediaPreservation: Send + Sync {
+    fn enqueue_capture(&self, _id: Uuid, _vm: &VmIdentity, _hash: &str, _stamp: MediaStamp) {}
+    fn capture_error(&self, _id: Uuid, _vm: &VmIdentity) -> Option<EntryError> {
+        None
+    }
+    fn retry_capture(&self, _id: Uuid, _vm: &VmIdentity) {}
+    fn forget_capture(&self, _id: Uuid, _vm: &VmIdentity) {}
+
     /// The server's answer about these hashes. This is the only proof a transfer accepts.
     fn acknowledged<'a>(
         &'a self,
@@ -745,7 +755,7 @@ impl MediaSync {
                 .filter(|entry| {
                     let key = vm_key(entry.emulator_type, &entry.vm_name);
                     entry.state == EntryState::RetryWait
-                        && state.registered.contains_key(&key)
+                        && (entry.capture_id.is_some() || state.registered.contains_key(&key))
                         && !state.held.contains(&key)
                 })
                 .map(|entry| entry.next_attempt_ms)
@@ -1048,14 +1058,24 @@ impl MediaSync {
         }
         let mut questions: BTreeMap<String, (VmIdentity, BTreeSet<String>)> = BTreeMap::new();
         {
-            let state = self.lock();
+            let mut state = self.lock();
             for entry in state.queue.due(u64::MAX) {
+                if entry.capture_id.is_some() {
+                    state.asked.insert((
+                        vm_key(entry.emulator_type, &entry.vm_name),
+                        entry.source_path.clone(),
+                    ));
+                    continue;
+                }
                 let key = vm_key(entry.emulator_type, &entry.vm_name);
                 if state
                     .asked
                     .contains(&(key.clone(), entry.source_path.clone()))
                     || state.held.contains(&key)
                 {
+                    continue;
+                }
+                if entry.capture_id.is_some() {
                     continue;
                 }
                 let Some(vm) = state.registered.get(&key) else {
@@ -1177,7 +1197,11 @@ impl MediaSync {
     }
 
     async fn upload_one(&self, entry: &QueueEntry) -> UploadOutcome {
-        let Some(base) = self.base_path(entry.emulator_type).map(Path::to_path_buf) else {
+        let Some(base) = entry
+            .capture_id
+            .map(|_| self.config.state_dir.clone())
+            .or_else(|| self.base_path(entry.emulator_type).map(Path::to_path_buf))
+        else {
             return UploadOutcome::FileChanged;
         };
         let (vm_name, emulator, source_path, stamp) = (
@@ -1187,7 +1211,13 @@ impl MediaSync {
             entry.stamp,
         );
         // Everything is checked again here, since time has passed since the scan.
+        let capture_id = entry.capture_id;
         let opened = tokio::task::spawn_blocking(move || {
+            if let Some(id) = capture_id {
+                let root = crate::capture::checked_directory(&base, id)
+                    .map_err(MediaFileProblem::Unsafe)?;
+                return open_media_file(&root, "ready.ppm", stamp);
+            }
             let root = resolve_vm_root(&base, &vm_name, emulator)
                 .map_err(|_| MediaFileProblem::Changed)?;
             open_media_file(&root, &source_path, stamp)
@@ -1246,6 +1276,20 @@ impl MediaSync {
         if !current {
             return;
         }
+        let is_capture = state
+            .queue
+            .get(emulator, &vm_name, &source_path)
+            .is_some_and(|entry| entry.capture_id.is_some());
+        let outcome = match outcome {
+            UploadOutcome::Failed(failure) if is_capture && attempt >= 5 => {
+                let error = failure.entry_error();
+                state
+                    .queue
+                    .mark_failed(emulator, &vm_name, &source_path, error);
+                return;
+            }
+            other => other,
+        };
         match outcome {
             UploadOutcome::Uploaded => {
                 tracing::info!(
@@ -1345,6 +1389,48 @@ impl MediaSync {
 }
 
 impl MediaPreservation for MediaSync {
+    fn enqueue_capture(&self, id: Uuid, vm: &VmIdentity, hash: &str, stamp: MediaStamp) {
+        let mut state = self.lock();
+        let label = crate::capture::source_label(id);
+        state
+            .queue
+            .record(vm.emulator_type, &vm.vm_name, &label, hash, stamp);
+        state.queue.tag_capture(vm.emulator_type, &vm.vm_name, id);
+        state.status_version += 1;
+        drop(state);
+        self.wake.notify_one();
+    }
+    fn capture_error(&self, id: Uuid, vm: &VmIdentity) -> Option<EntryError> {
+        let state = self.lock();
+        let entry = state.queue.get(
+            vm.emulator_type,
+            &vm.vm_name,
+            &crate::capture::source_label(id),
+        )?;
+        if matches!(entry.state, EntryState::Failed | EntryState::Blocked) || entry.attempts >= 5 {
+            entry.last_error.clone()
+        } else {
+            None
+        }
+    }
+    fn retry_capture(&self, id: Uuid, vm: &VmIdentity) {
+        let mut state = self.lock();
+        state.queue.reset_capture(vm.emulator_type, &vm.vm_name, id);
+        state.asked.remove(&(
+            vm_key(vm.emulator_type, &vm.vm_name),
+            crate::capture::source_label(id),
+        ));
+        drop(state);
+        self.wake.notify_one();
+    }
+    fn forget_capture(&self, id: Uuid, vm: &VmIdentity) {
+        self.lock().queue.remove(
+            vm.emulator_type,
+            &vm.vm_name,
+            &crate::capture::source_label(id),
+        );
+    }
+
     fn acknowledged<'a>(
         &'a self,
         vm: &'a VmIdentity,

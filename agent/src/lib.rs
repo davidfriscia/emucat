@@ -39,6 +39,7 @@
 pub mod archive_cache;
 pub mod archive_deletion;
 pub mod archives;
+pub mod capture;
 pub mod cli;
 pub mod config;
 pub mod connectivity;

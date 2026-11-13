@@ -51,6 +51,8 @@ pub struct QueueEntry {
     pub emulator_type: EmulatorType,
     pub vm_name: VmName,
     pub source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<Uuid>,
     pub sha256: String,
     pub stamp: MediaStamp,
     pub state: EntryState,
@@ -234,6 +236,7 @@ impl MediaQueue {
                 emulator_type: emulator,
                 vm_name: vm_name.clone(),
                 source_path: source_path.to_owned(),
+                capture_id: None,
                 sha256: sha256.to_owned(),
                 stamp,
                 state: EntryState::Pending,
@@ -278,7 +281,8 @@ impl MediaQueue {
             .entries
             .iter()
             .filter(|(key, entry)| {
-                key.starts_with(&prefix)
+                entry.capture_id.is_none()
+                    && key.starts_with(&prefix)
                     && entry.state != EntryState::Uploading
                     && !present.contains(&entry.source_path)
             })
@@ -297,9 +301,35 @@ impl MediaQueue {
     /// Forgets everything about VMs this agent is no longer responsible for.
     pub fn retain_vms(&mut self, registered: &BTreeSet<String>) {
         let before = self.entries.len();
-        self.entries
-            .retain(|_, entry| registered.contains(&vm_key(entry.emulator_type, &entry.vm_name)));
+        self.entries.retain(|_, entry| {
+            entry.capture_id.is_some()
+                || registered.contains(&vm_key(entry.emulator_type, &entry.vm_name))
+        });
         if self.entries.len() != before {
+            self.dirty = true;
+        }
+    }
+
+    pub fn reset_capture(&mut self, emulator: EmulatorType, vm_name: &VmName, id: Uuid) {
+        if let Some(entry) = self.entries.get_mut(&entry_key(
+            emulator,
+            vm_name,
+            &crate::capture::source_label(id),
+        )) {
+            entry.state = EntryState::Pending;
+            entry.attempts = 0;
+            entry.next_attempt_ms = 0;
+            entry.last_error = None;
+            self.dirty = true;
+        }
+    }
+    pub fn tag_capture(&mut self, emulator: EmulatorType, vm_name: &VmName, id: Uuid) {
+        if let Some(entry) = self.entries.get_mut(&entry_key(
+            emulator,
+            vm_name,
+            &crate::capture::source_label(id),
+        )) {
+            entry.capture_id = Some(id);
             self.dirty = true;
         }
     }

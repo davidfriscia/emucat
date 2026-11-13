@@ -1,3 +1,9 @@
+import {
+  captureCommandSchema,
+  captureReportSchema,
+  captureAckSchema,
+  captureRetrySchema,
+} from './capture.js';
 import { z } from 'zod';
 import { agentVersionSchema } from './agents.js';
 import {
@@ -114,6 +120,7 @@ const emptyPayloadSchema = z.object({}).strict();
 export const agentMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({ type: z.literal('agent.hello'), payload: agentHelloPayloadSchema }),
   envelopeSchema.extend({ type: z.literal('agent.heartbeat'), payload: emptyPayloadSchema }),
+  envelopeSchema.extend({ type: z.literal('agent.qemu_capture'), payload: captureReportSchema }),
   envelopeSchema.extend({
     type: z.literal('agent.discovery_result'),
     payload: discoveryResultPayloadSchema,
@@ -200,6 +207,12 @@ export type AgentMessage = z.infer<typeof agentMessageSchema>;
 export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({ type: z.literal('server.welcome'), payload: serverWelcomePayloadSchema }),
   envelopeSchema.extend({ type: z.literal('server.heartbeat_ack'), payload: emptyPayloadSchema }),
+  envelopeSchema.extend({ type: z.literal('server.qemu_capture'), payload: captureCommandSchema }),
+  envelopeSchema.extend({ type: z.literal('server.qemu_capture_ack'), payload: captureAckSchema }),
+  envelopeSchema.extend({
+    type: z.literal('server.qemu_capture_retry'),
+    payload: captureRetrySchema,
+  }),
   envelopeSchema.extend({ type: z.literal('server.error'), payload: serverErrorPayloadSchema }),
   envelopeSchema.extend({
     type: z.literal('server.discovery_request'),

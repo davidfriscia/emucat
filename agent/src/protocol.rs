@@ -122,6 +122,14 @@ pub enum Message {
     AgentVmVerifyResult(VmVerifyResult),
     #[serde(rename = "server.vm_launch")]
     ServerVmLaunch(VmLaunchRequest),
+    #[serde(rename = "server.qemu_capture")]
+    ServerQemuCapture(crate::capture::CaptureCommand),
+    #[serde(rename = "server.qemu_capture_ack")]
+    ServerQemuCaptureAck(crate::capture::CaptureAck),
+    #[serde(rename = "server.qemu_capture_retry")]
+    ServerQemuCaptureRetry(crate::capture::CaptureRetry),
+    #[serde(rename = "agent.qemu_capture")]
+    AgentQemuCapture(crate::capture::CaptureReport),
     #[serde(rename = "server.vm_stop")]
     ServerVmStop(VmStopRequest),
     #[serde(rename = "server.vm_execution_ack")]
@@ -819,7 +827,11 @@ pub fn decode(text: &str) -> Decoded {
 fn is_known_type(message_type: &str) -> bool {
     matches!(
         message_type,
-        "agent.hello"
+        "server.qemu_capture"
+            | "server.qemu_capture_ack"
+            | "server.qemu_capture_retry"
+            | "agent.qemu_capture"
+            | "agent.hello"
             | "agent.heartbeat"
             | "agent.discovery_result"
             | "agent.discovery_error"
@@ -967,6 +979,8 @@ pub struct VmExecutionStatus {
     pub stop_requested: bool,
     /// Whether a graceful stop can be asked for at the moment.
     pub graceful_stop_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_available: Option<bool>,
     pub code: Option<String>,
     pub message: Option<String>,
 }
@@ -982,6 +996,8 @@ pub struct ExecutionEmulator {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qemu_screenshot: Option<bool>,
     pub emulators: Vec<ExecutionEmulator>,
     pub modes: Vec<ExecutionMode>,
 }

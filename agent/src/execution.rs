@@ -117,6 +117,7 @@ pub struct ExecutionManager {
     live: Mutex<HashMap<Uuid, Live>>,
     /// Says whether a registration, restore or verification is working on a VM.
     busy: OnceLock<ActivityProbe>,
+    captures: Mutex<HashMap<Uuid, VmIdentity>>,
     stopping: CancelFlag,
 }
 
@@ -173,6 +174,7 @@ impl ExecutionManager {
             journals: Mutex::new(journals),
             live: Mutex::new(HashMap::new()),
             busy: OnceLock::new(),
+            captures: Mutex::default(),
             stopping,
         });
         manager.reconcile();
@@ -245,6 +247,11 @@ impl ExecutionManager {
             exit_code: journal.exit_code,
             stop_requested: journal.stop_requested_at.is_some(),
             graceful_stop_available,
+            screenshot_available: Some(
+                journal.state == AgentExecutionState::Running
+                    && journal.request.emulator_type == EmulatorType::Qemu
+                    && live.get(&session_id).is_some_and(|live| live.qmp.is_some()),
+            ),
             code: journal.code.clone(),
             message: journal.message.clone(),
         }
@@ -360,6 +367,7 @@ impl ExecutionManager {
 
     pub fn capabilities(&self) -> ExecutionCapabilities {
         ExecutionCapabilities {
+            qemu_screenshot: Some(true),
             emulators: self
                 .config
                 .emulators
@@ -433,6 +441,15 @@ impl ExecutionManager {
     /// Why a VM must not be touched by anything destructive now, if it must not. The process is asked
     /// directly, rather than trusting the last recorded state.
     pub fn activity(&self, vm: &VmIdentity) -> Option<String> {
+        if self
+            .captures
+            .lock()
+            .expect("poisoned")
+            .values()
+            .any(|held| held == vm)
+        {
+            return Some("A screenshot capture is finishing".to_owned());
+        }
         let sessions: Vec<Journal> = self
             .journals
             .lock()
@@ -474,6 +491,59 @@ impl ExecutionManager {
             .filter(|journal| journal.is_active())
             .map(|journal| journal.request.session_id)
             .collect()
+    }
+
+    /// Runs only on the blocking pool. The capture claim also protects remote cleanup after exit.
+    pub fn capture_screen(
+        self: &Arc<Self>,
+        request: &crate::capture::CaptureCommand,
+        filename: PathBuf,
+    ) -> Result<(), String> {
+        let mut captures = self.captures.lock().expect("poisoned");
+        if captures.contains_key(&request.session_id) {
+            return Err("A capture is already active".to_owned());
+        }
+        let journal = self
+            .journal(request.session_id)
+            .ok_or("The session is unknown")?;
+        if journal.request.emulator_type != EmulatorType::Qemu
+            || journal.request.vm_name != request.vm_name
+            || journal.state != AgentExecutionState::Running
+        {
+            return Err("The exact QEMU session is not running or is stopping".to_owned());
+        }
+        let (process, qmp) = {
+            let live = self.live.lock().expect("poisoned");
+            let live = live
+                .get(&request.session_id)
+                .ok_or("The session has no verified process")?;
+            if journal.process.as_ref() != Some(live.process.identity()) {
+                return Err("Process identity mismatch".to_owned());
+            }
+            (
+                live.process.clone(),
+                live.qmp
+                    .clone()
+                    .ok_or("QMP is unavailable after agent restart; start a new session")?,
+            )
+        };
+        if !matches!(process.poll(), Ok(WaitOutcome::Running)) {
+            return Err("QEMU exited".to_owned());
+        }
+        captures.insert(request.session_id, journal.identity());
+        drop(captures);
+        let result = qmp
+            .execute(
+                crate::qmp::Command::Screendump { filename },
+                Duration::from_secs(10),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        self.captures
+            .lock()
+            .expect("poisoned")
+            .remove(&request.session_id);
+        result
     }
 
     pub fn shutdown(&self) {
@@ -771,6 +841,7 @@ impl ExecutionManager {
 
     fn stop(self: &Arc<Self>, request: VmStopRequest) {
         let session_id = request.session_id;
+        let captures = self.captures.lock().expect("poisoned");
         let Some(journal) = self.journal(session_id) else {
             tracing::warn!(%session_id, "A stop request for a session this agent does not know");
             return;
@@ -811,6 +882,7 @@ impl ExecutionManager {
             journal.message = None;
         });
 
+        drop(captures);
         let this = Arc::clone(self);
         tokio::spawn(async move {
             if request.force {

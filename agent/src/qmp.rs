@@ -47,7 +47,7 @@ pub enum QmpError {
 }
 
 struct Connection {
-    input: Box<dyn Write + Send>,
+    input: mpsc::SyncSender<Value>,
     replies: mpsc::Receiver<Value>,
 }
 
@@ -62,7 +62,22 @@ impl std::fmt::Debug for QmpChannel {
 }
 
 impl QmpChannel {
-    pub fn start(input: impl Write + Send + 'static, output: impl Read + Send + 'static) -> Self {
+    pub fn start(
+        mut input: impl Write + Send + 'static,
+        output: impl Read + Send + 'static,
+    ) -> Self {
+        // Even an emulator that stops reading stdin must not hold a caller beyond its deadline.
+        let (writer, requests) = mpsc::sync_channel::<Value>(1);
+        std::thread::spawn(move || {
+            for request in requests {
+                if writeln!(input, "{request}")
+                    .and_then(|_| input.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let (sender, receiver) = mpsc::sync_channel(32);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(output);
@@ -87,7 +102,7 @@ impl QmpChannel {
         });
         Self {
             connection: Mutex::new(Connection {
-                input: Box::new(input),
+                input: writer,
                 replies: receiver,
             }),
         }
@@ -96,7 +111,7 @@ impl QmpChannel {
     pub fn execute(&self, command: Command, timeout: Duration) -> Result<Value, QmpError> {
         let deadline = Instant::now() + timeout;
         // Include time waiting for another command in this command's deadline.
-        let mut connection = loop {
+        let connection = loop {
             if let Ok(connection) = self.connection.try_lock() {
                 break connection;
             }
@@ -107,8 +122,13 @@ impl QmpChannel {
         };
         while connection.replies.try_recv().is_ok() {}
         let id = Uuid::new_v4().to_string();
-        writeln!(connection.input, "{}", command.request(&id))?;
-        connection.input.flush()?;
+        connection
+            .input
+            .try_send(command.request(&id))
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => QmpError::Timeout,
+                mpsc::TrySendError::Disconnected(_) => QmpError::Disconnected,
+            })?;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let reply =
