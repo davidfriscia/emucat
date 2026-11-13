@@ -366,3 +366,13 @@ session cookie, and a user's session cannot open this endpoint.
 - Credential rotation over the authenticated channel.
 - More control commands, each validated by the agent against local rules, such as `VmName`, whatever the server
   sends: deleting versions.
+
+## Typed QEMU screenshot operations
+
+Execution capabilities optionally advertise `qemuScreenshot`; session reports optionally include
+`screenshotAvailable`. Older agents default to unavailable. `server.qemu_capture` names operation/session/VM
+identities only. `agent.qemu_capture` reports capturing/uploading/failed, hash, uncertainty and an error.
+Reports repeat after welcome and on heartbeat. `server.qemu_capture_ack` names the operation, hash and
+committed media ID; only this permits spool cleanup. `server.qemu_capture_retry` has a monotonically
+numbered attempt (1?3) and never reexecutes QMP. These additive messages retain protocol version 1.
+See [decision 0042](decisions/0042-qemu-monitor-capture.md).

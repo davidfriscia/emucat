@@ -1,3 +1,5 @@
+import { captureOperationSchema } from '@emucat/contracts';
+import { decodePpm } from '../src/media/decode.js';
 /**
  * Running VMs and verifying local copies with nothing simulated: the compiled agent, the real API on a
  * real database, a real OpenSSH server in a container, the real web app, a real browser, and the real
@@ -119,6 +121,31 @@ describe('running and verifying VMs, end to end', () => {
   let context: BrowserTestContext;
   let server: FastifyInstance;
   let admin: TestClient;
+  let holdCaptureUploads = false;
+  async function publishedCapture(sessionId: string) {
+    return waitFor(
+      async () => {
+        const response = await admin.get('/admin/sessions/' + sessionId + '/screenshots');
+        const capture = response.json().operation;
+        if (capture?.state === 'failed') throw new Error(JSON.stringify(capture));
+        return capture?.state === 'completed' ? captureOperationSchema.parse(capture) : undefined;
+      },
+      'a committed QEMU capture',
+      60_000,
+    );
+  }
+  async function captureRemote(sessionId: string) {
+    const response = await admin.request({
+      method: 'POST',
+      url: '/admin/sessions/' + sessionId + '/screenshots',
+      payload: { requestId: randomUUID() },
+    });
+    expect(response.statusCode, response.body + ' Agent: ' + daemon?.output().slice(-6000)).toBe(
+      202,
+    );
+    return publishedCapture(sessionId);
+  }
+
   let port: number;
   let directory: string;
   let configPath: string;
@@ -371,7 +398,19 @@ describe('running and verifying VMs, end to end', () => {
       30_000,
     );
 
-    context = await startBrowserApp({ pairingRateLimits: GENEROUS_RATE_LIMITS });
+    context = await startBrowserApp(
+      { pairingRateLimits: GENEROUS_RATE_LIMITS },
+      {
+        extraRoutes: (api) => {
+          api.addHook('onRequest', async (request, reply) => {
+            if (holdCaptureUploads && request.headers['x-emucat-capture-id'])
+              return reply.code(503).send({
+                error: { code: 'media_busy', message: 'Test upload gate', requestId: request.id },
+              });
+          });
+        },
+      },
+    );
     admin = await signedInAdmin(context);
     server = context.app;
     await server.listen({ host: '127.0.0.1', port: 0 });
@@ -539,10 +578,7 @@ describe('running and verifying VMs, end to end', () => {
       root = join(qemu, VM);
       await mkdir(join(root, 'nested'), { recursive: true });
       // A real launcher, parsed by the agent and never run. SeaBIOS finds no disk, and waits.
-      await writeFile(
-        join(root, 'run.bat'),
-        '@echo off\r\nqemu-system-i386 -m 16 -nodefaults -display none\r\n',
-      );
+      await writeFile(join(root, 'run.bat'), '@echo off\r\nqemu-system-i386 -m 16 -vga std\r\n');
       await writeFile(join(root, 'disk.qcow2'), randomBytes(256 * 1024));
       await writeFile(join(root, 'nested', 'notes.txt'), 'original\n');
       await ensureAgentOnline();
@@ -646,6 +682,38 @@ describe('running and verifying VMs, end to end', () => {
         });
         expect(session.pid).toBeGreaterThan(0);
         launched = true;
+        await section.getByRole('button', { name: 'Capture screenshot', exact: true }).click();
+        await section
+          .getByText('Screenshot published.', { exact: true })
+          .waitFor({ timeout: 60_000 });
+        const capture = await publishedCapture(session.id);
+        const original = await admin.get(
+          '/admin/vms/qemu/' + encodeURIComponent(VM) + '/media/' + capture.mediaId + '/original',
+        );
+        expect(original.statusCode).toBe(200);
+        const raster = decodePpm(original.rawPayload, {
+          maxPixels: 40_000_000,
+          maxDimension: 16384,
+        });
+        expect(raster.width).toBeGreaterThan(0);
+        expect(new Set(raster.data).size).toBeGreaterThan(1);
+        expect(
+          (
+            await admin.get(
+              '/admin/vms/qemu/' +
+                encodeURIComponent(VM) +
+                '/media/' +
+                capture.mediaId +
+                '/thumbnail',
+            )
+          ).statusCode,
+        ).toBe(200);
+        await section.getByRole('link', { name: 'Open screenshot', exact: true }).waitFor();
+        await page
+          .getByRole('button', { name: /View emucat-capture-.*at full resolution/ })
+          .first()
+          .waitFor({ timeout: 30_000 });
+        await shot(page, 'qemu-capture-published');
 
         await page.goto(webUrl('/admin/catalog'));
         await page
@@ -891,10 +959,7 @@ describe('running and verifying VMs, end to end', () => {
     beforeAll(async () => {
       root = join(qemu, VM);
       await mkdir(join(root, 'nested'), { recursive: true });
-      await writeFile(
-        join(root, 'run.bat'),
-        '@echo off\r\nqemu-system-i386 -m 16 -nodefaults -display none\r\n',
-      );
+      await writeFile(join(root, 'run.bat'), '@echo off\r\nqemu-system-i386 -m 16 -vga std\r\n');
       await writeFile(join(root, 'disk.qcow2'), randomBytes(128 * 1024));
       await writeFile(join(root, 'nested', 'notes.txt'), 'master\n');
       await ensureAgentOnline();
@@ -947,8 +1012,33 @@ describe('running and verifying VMs, end to end', () => {
 
         await writeFile(join(temporary, 'nested', 'notes.txt'), 'changed by the guest\n');
         await writeFile(join(temporary, 'guest.log'), 'written while it ran\n');
-        await forceStop(session);
-        const done = await workspaceIn(workspace.id, ['discarded', 'lost'], 60_000);
+        holdCaptureUploads = true;
+        let done: RemoteSession;
+        try {
+          const response = await admin.request({
+            method: 'POST',
+            url: '/admin/sessions/' + session.id + '/screenshots',
+            payload: { requestId: randomUUID() },
+          });
+          expect(response.statusCode, response.body).toBe(202);
+          await waitFor(
+            async () => {
+              const capture = (
+                await admin.get('/admin/sessions/' + session.id + '/screenshots')
+              ).json().operation;
+              if (capture?.state === 'failed') throw new Error(JSON.stringify(capture));
+              return capture?.state === 'uploading' && capture.sha256 ? capture : undefined;
+            },
+            'a finalized capture blocked at upload',
+            60_000,
+          );
+          await forceStop(session);
+          done = await workspaceIn(workspace.id, ['discarded', 'lost'], 60_000);
+        } finally {
+          holdCaptureUploads = false;
+        }
+        const captured = await publishedCapture(session.id);
+        expect(captured.mediaId).toBeTruthy();
         expect(done, JSON.stringify(done)).toMatchObject({
           state: 'discarded',
           snapshotVersionId: null,
@@ -956,6 +1046,7 @@ describe('running and verifying VMs, end to end', () => {
         });
         expect(existsSync(temporary)).toBe(false);
         expect(existsSync(join(stateDirectory(), 'workspaces', workspace.id))).toBe(false);
+        expect((await publishedCapture(session.id)).mediaId).toBe(captured.mediaId);
         expect(repositoryArchives(), 'nothing was published').toEqual(archivesBefore);
         expect((await tree()).versions).toHaveLength(versionsBefore);
         expect(await fingerprint(root)).toEqual(persistent);
@@ -1004,9 +1095,11 @@ describe('running and verifying VMs, end to end', () => {
         const temporary = workspace.localDirectory as string;
         expect(await readFile(join(temporary, 'nested', 'notes.txt'), 'utf8')).toBe('snapshot\n');
         await writeFile(join(temporary, 'guest.log'), 'written while it ran\n');
+        const captured = await captureRemote(session.id);
         await forceStop(session);
         await workspaceIn(workspace.id, ['discarded'], 60_000);
         expect(existsSync(temporary)).toBe(false);
+        expect((await publishedCapture(session.id)).mediaId).toBe(captured.mediaId);
         await page
           .getByRole('heading', { name: 'Recent remote sessions' })
           .waitFor({ timeout: 30_000 });
@@ -1030,6 +1123,7 @@ describe('running and verifying VMs, end to end', () => {
         await writeFile(join(temporary, 'guest.log'), 'kept\n');
         // Nothing is published while it runs.
         const versionsWhileRunning = (await tree()).versions.length;
+        const captured = await captureRemote(session.id);
         await forceStop(session);
         const done = await workspaceIn(
           workspace.id,
@@ -1041,6 +1135,7 @@ describe('running and verifying VMs, end to end', () => {
           abandonedAt: null,
           publishAttempts: 1,
         });
+        expect((await publishedCapture(session.id)).mediaId).toBe(captured.mediaId);
         published = done.snapshotVersionId as string;
         expect(published).toBeTruthy();
         const versions = (await tree()).versions;

@@ -168,7 +168,7 @@ No server has been installed from it yet.
 - **"Remote" means the version, not the display.** Remote Volatile and Remote Snapshot run the emulator on the agent's computer, from a temporary copy of a version obtained from the repository; nothing is streamed. Launching is implemented in the Windows agent only. See [the launcher guide](docs/launcher.md).
 - **Storage cleanup is deliberately narrow.** One agent's persistent copy can be removed, and a leaf snapshot can be deleted, one at a time and only when nothing uses it. A master, a registered VM, a snapshot with children and a branch cannot be deleted; nothing cascades, reparents, garbage-collects or applies a retention policy, and deleting the agents' cached ZIPs is left to the cache's own limit. A snapshot whose repository cannot be reached stays "being deleted", unusable, until an agent can delete its archive. See [decision 0041](docs/decisions/0041-storage-cleanup.md).
 - **Replacing a persistent copy is conservative.** A copy known to differ from its version is replaced only when the administrator says to discard its changes; otherwise the agent verifies it first and refuses if anything differs, and a copy whose lineage it cannot prove counts as changed.
-- **Screenshots taken during a remote session are not synchronized,** and go with its temporary copy. A Remote Snapshot whose publication failed keeps its temporary copy, and its disk space, until it is published or abandoned.
+- **Manually created screenshots during a remote session are not synchronized,** and go with its temporary copy. A Remote Snapshot whose publication failed keeps its temporary copy, and its disk space, until it is published or abandoned.
 - **Some QEMU launchers need a profile.** A `run.bat` that is more than one plain QEMU command, or that forwards a port on every interface, is refused until an `emucat-launch.json` describes the VM.
 - **A graceful QEMU stop needs a guest that handles ACPI.** Otherwise it times out, and a forced stop is the administrator's choice. After an agent restart, QEMU can only be force-stopped.
 - **Verification reads the whole VM,** and reports only its final counts. A VM that has been run is expected to verify as modified.
@@ -206,3 +206,7 @@ No server has been installed from it yet.
 ## License
 
 Not yet specified.
+
+Administrators can capture running QEMU screenshots from the session card in all three execution modes.
+Requested captures use a durable agent spool and publish through the existing VM gallery. After agent
+restart, start a new session to regain QMP capture. See [the media guide](docs/media.md#requested-qemu-captures).

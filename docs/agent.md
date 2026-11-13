@@ -294,3 +294,19 @@ Problems reaching the repository are in the [repository guide](repositories.md#t
 | The copy says "not verified"                      | Normal after the agent reconnects. A VM can change while nothing is watching, so verified only lasts until then                                                           |
 | The copy says it differs from the master          | Its names or sizes no longer match what was restored, which is expected of a VM that has been used. Nothing happens automatically                                         |
 | `.emucat-restoring-…` in discovery's skipped list | An operation is running, or the case above. Discovery never treats it as a VM                                                                                             |
+
+## On-demand QEMU screenshots
+
+The agent journals captures in its managed state directory, independently of VM roots and remote
+workspaces. Keep this directory private to the agent account. Eight unpublished/uncertain 64 MiB slots
+are reserved; new captures fail explicitly when full. Failed images are retained. The existing media
+queue uploads finalized PPMs; five transient attempts per cycle and up to three administrator retries
+are supported for captures. Never delete an unpublished spool image to resolve capacity silently.
+After restart, complete pending/ready images can recover, but the running VM loses capture capability
+because QMP stdio cannot reconnect. Start a new VM session to capture a new frame.
+See [decision 0042](decisions/0042-qemu-monitor-capture.md).
+
+For focused Windows lifecycle tests, rebuild the standalone fixture first with
+`cargo build --example fake_emulator` from `agent`. Those tests copy `target/debug/examples/fake_emulator.exe`;
+an older fixture cannot negotiate the ID-correlated QMP channel. `cargo test --all-targets` can build an
+example test harness without refreshing that standalone executable.

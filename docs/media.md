@@ -213,3 +213,16 @@ Remote agents must use HTTPS. Plain HTTP is accepted only for a server on the sa
 | `vm_not_assigned`                                 | The server says another agent holds this VM       | Nothing to do on this agent                                  |
 | Files in `queue.damaged`                          | The queue could not be read, and was rebuilt      | Safe to delete                                               |
 | "Media files with no database row" in the API log | A crash after publishing, or a restored database  | See [recovery](#recovery-and-cleanup)                        |
+
+## Requested QEMU captures
+
+Administrators can choose **Capture screenshot** on a running QEMU session card. The action reports
+capturing, uploading and publication, then refreshes the gallery and offers Open screenshot. A public
+VM publishes the image publicly; capture does not replace its main cover. Capture may be unavailable
+after agent restart, while offline, or while another capture is active; the interface explains why.
+
+Requested captures use an agent-owned spool and the existing media pipeline in all three execution
+modes. They survive remote workspace cleanup. Manually created remote screenshots remain unsynchronized.
+Identical frames may resolve to the same image; each request still completes separately. A failed
+upload preserves its image and offers a bounded retained-image retry. See
+[decision 0042](decisions/0042-qemu-monitor-capture.md).

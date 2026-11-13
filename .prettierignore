@@ -3,3 +3,5 @@ coverage
 var
 agent/target
 pnpm-lock.yaml
+# Separate Git checkouts are checked independently, including their generated Rust artifacts.
+.claude/worktrees/

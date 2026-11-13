@@ -46,3 +46,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0039](0039-version-history-is-administrative.md) | Version history is for administrators only                                    |
 | [0040](0040-temporary-remote-sessions.md)         | Remote modes run a temporary copy, and finish on their own                    |
 | [0041](0041-storage-cleanup.md)                   | A local copy is removed on request, and only a leaf snapshot is ever deleted  |
+| [0042](0042-qemu-monitor-capture.md)              | Typed QMP stdio commands and durable on-demand screenshots                    |

@@ -336,3 +336,15 @@ Administrators only, with the session and CSRF token. No response holds a creden
 | `/admin/vms/:emulatorType/:vmName` | Administrator | VM detail: metadata, visibility, cover, gallery, master, local copies, restore |
 | `…/media`                          | Administrator | Media management                                                               |
 | `/account`, `/settings`            | Signed in     | Password, sessions, theme                                                      |
+
+## QEMU screenshot capture
+
+Administrator session and CSRF protected, under `/api/v1/admin`:
+
+- `GET /sessions/:sessionId/screenshots`: availability, explanation and latest operation.
+- `POST /sessions/:sessionId/screenshots`: strict `{ requestId: UUID }`; returns 202 and the durable operation.
+- `GET /sessions/:sessionId/screenshots/:operationId`: durable status, hash and committed media ID.
+- `POST /sessions/:sessionId/screenshots/:operationId/retry`: strict `{}`; at most three retained-image retries.
+
+No commands or paths are accepted. Completion requires committed media for the correct VM. A recovered
+QEMU session without its original stdio channel cannot capture. See [decision 0042](decisions/0042-qemu-monitor-capture.md).

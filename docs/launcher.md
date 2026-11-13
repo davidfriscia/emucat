@@ -269,3 +269,11 @@ start_grace_seconds = 3
 | `local_copy_modified`           | Snapshot the copy first, or tick Discard any changes                |
 | `local_copy_changed`            | The copy is not the version the page showed. Reload                 |
 | `snapshot_parent_mismatch`      | The copy comes from another version. Reload, and choose that one    |
+
+## Graphical QEMU screenshot action
+
+Running QEMU sessions can expose a typed Capture screenshot action. The existing `-qmp stdio` and
+conditional graphical `-monitor vc` are retained; launch profiles do not gain permission to supply
+other monitor transports. Stdio supports argument-bearing commands with response IDs, but cannot
+be recovered after agent restart. Existing shutdown semantics and 86Box launching are unchanged.
+See [decision 0042](decisions/0042-qemu-monitor-capture.md).

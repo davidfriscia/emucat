@@ -423,6 +423,30 @@ async fn real_qemu_keeps_its_human_monitor_in_every_mode() {
             fs::metadata(&output).unwrap().len(),
             output.display()
         );
+        let command = emucat_agent::capture::CaptureCommand {
+            operation_id: Uuid::new_v4(),
+            session_id: request.session_id,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: request.vm_name.clone(),
+        };
+        let invalid = machine
+            .directory
+            .path()
+            .join(Uuid::new_v4().to_string())
+            .join("missing.ppm");
+        let manager = agent.manager.clone();
+        let refused =
+            tokio::task::spawn_blocking(move || manager.capture_screen(&command, invalid))
+                .await
+                .unwrap()
+                .unwrap_err();
+        assert!(refused.message.contains("QEMU refused screenshot capture"));
+        assert!(
+            !refused
+                .message
+                .contains(machine.directory.path().to_string_lossy().as_ref())
+        );
+        println!("real {:?} error response: {}", request.mode, refused);
         agent.manager.handle(stop(&request, true));
         let stopped = agent
             .wait_state(request.session_id, AgentExecutionState::Stopped)
