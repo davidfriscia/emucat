@@ -68,6 +68,11 @@ export function Layout() {
                     </NavLink>
                   </li>
                   <li className="nav-item">
+                    <NavLink to="/admin/registrations" className={navLinkClass} onClick={closeMenu}>
+                      Registrations
+                    </NavLink>
+                  </li>
+                  <li className="nav-item">
                     <NavLink to="/admin/repositories" className={navLinkClass} onClick={closeMenu}>
                       Repositories
                     </NavLink>

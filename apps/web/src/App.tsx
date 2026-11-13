@@ -7,6 +7,7 @@ import { AgentDetailPage } from './pages/admin/AgentDetailPage';
 import { AgentsPage } from './pages/admin/AgentsPage';
 import { CatalogManagementPage } from './pages/admin/CatalogManagementPage';
 import { DashboardPage } from './pages/admin/DashboardPage';
+import { RegistrationsPage } from './pages/admin/RegistrationsPage';
 import { RepositoriesPage } from './pages/admin/RepositoriesPage';
 import { VmEditorPage } from './pages/admin/VmEditorPage';
 import { VmMediaPage } from './pages/admin/VmMediaPage';
@@ -36,6 +37,7 @@ export function App() {
                 <Route path="catalog" element={<CatalogManagementPage />} />
                 <Route path="agents" element={<AgentsPage />} />
                 <Route path="agents/:agentId" element={<AgentDetailPage />} />
+                <Route path="registrations" element={<RegistrationsPage />} />
                 <Route path="repositories" element={<RepositoriesPage />} />
                 <Route path="vms/:emulatorType/:vmName" element={<VmEditorPage />} />
                 <Route path="vms/:emulatorType/:vmName/media" element={<VmMediaPage />} />

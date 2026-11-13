@@ -1,8 +1,10 @@
-import type {
-  AgentSummary,
-  DiscoveryOperation,
-  RegistrationOperation,
-  RepositorySummary,
+import {
+  isRegistrationTerminal,
+  registrationNeedsAttention,
+  type AgentSummary,
+  type DiscoveryOperation,
+  type RegistrationOperation,
+  type RepositorySummary,
 } from '@emucat/contracts';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -105,6 +107,8 @@ function discovery(): DiscoveryOperation {
       },
     ],
     skipped: [],
+    expiresAt: null,
+    fromCurrentConnection: true,
   };
 }
 
@@ -136,6 +140,10 @@ function operation(overrides: Partial<RegistrationOperation> = {}): Registration
     updatedAt: WHEN,
     committedAt: null,
     finishedAt: null,
+    acknowledgedAt: null,
+    acknowledgedByDisplayName: null,
+    parentSnapshotName: null,
+    versionDeletion: null,
     ...overrides,
   };
 }
@@ -156,8 +164,27 @@ function routes(overrides: Record<string, unknown> = {}) {
     [`GET ${AGENT_PATH}`]: agent(),
     [`GET ${AGENT_PATH}/discovery`]: { operation: discovery() },
     'GET /admin/repositories': { repositories: [repository()] },
-    'GET /admin/registrations': { operations: [] as RegistrationOperation[] },
+    'GET /admin/registrations': listing([] as RegistrationOperation[]),
     ...overrides,
+  };
+}
+
+/** The listing as the server answers each view: what needs attention, or what has ended. */
+function listing(operations: RegistrationOperation[]) {
+  return (call: { query: URLSearchParams }) => {
+    const view = call.query.get('view') ?? 'all';
+    const selected = operations.filter((item) =>
+      view === 'attention'
+        ? registrationNeedsAttention(item)
+        : view === 'history'
+          ? isRegistrationTerminal(item.state)
+          : true,
+    );
+    return {
+      operations: selected,
+      nextCursor: null,
+      ...(view === 'attention' ? { total: selected.length } : {}),
+    };
   };
 }
 
@@ -182,66 +209,155 @@ describe('the discovery list', () => {
     ).toBe(false);
   });
 
-  it('offers nothing for a VM that is already registered', async () => {
+  it('keeps registered VMs behind a toggle, linked to the catalog and offering nothing', async () => {
     mockApi(routes());
     renderAt(AGENT_PATH);
-    const heading = await screen.findByRole('heading', { name: 'Already' });
-    const card = within(articleOf(heading));
+    await screen.findByRole('heading', { name: 'Win98' });
+    expect(screen.queryByRole('heading', { name: 'Already' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 1 already registered VM' }));
+    const card = within(articleOf(screen.getByRole('heading', { name: 'Already' })));
     expect(card.getByText('Already registered')).toBeTruthy();
     expect(card.queryByRole('button')).toBeNull();
+    expect(card.getByRole('link', { name: 'Open Already in the catalog' })).toBeTruthy();
   });
 
+  it('says so when every VM found is already registered', async () => {
+    const report = discovery();
+    report.vms = report.vms.map((vm) => ({ ...vm, registered: true }));
+    mockApi(routes({ [`GET ${AGENT_PATH}/discovery`]: { operation: report } }));
+    renderAt(AGENT_PATH);
+    expect(
+      await screen.findByRole('heading', { name: 'Every VM found is already registered' }),
+    ).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Copy to remote' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Show 2 already registered VMs' })).toBeTruthy();
+  });
+
+  /** The VM's card in the discovery list, rather than an operation's card with the same name. */
   const discoveredCard = async () => {
-    await screen.findByRole('heading', { name: 'Registrations' });
+    await screen.findAllByRole('heading', { name: 'Win98' });
     const heading = screen
       .getAllByRole('heading', { name: 'Win98' })
       .find((element) => element.closest('.media-grid'));
     return within(articleOf(heading as HTMLElement));
   };
 
-  it('stops offering a VM as soon as it is registered, without another scan', async () => {
-    mockApi(
+  it('follows a registration from not registered to registered, without another scan', async () => {
+    // What the server says now: first the operation runs, then it commits, then it has ended and the
+    // catalog has the VM. The report is only ever read again, never scanned again.
+    let phase: 'running' | 'committed' | 'ended' = 'running';
+    const running = operation();
+    const committed = operation({ state: 'cleaning_local', archive: ARCHIVE, committedAt: WHEN });
+    const ended = operation({
+      state: 'succeeded',
+      archive: ARCHIVE,
+      localCopy: 'preserved',
+      committedAt: WHEN,
+      finishedAt: WHEN,
+    });
+    const api = mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [
-            operation({
-              state: 'succeeded',
-              archive: ARCHIVE,
-              localCopy: 'preserved',
-              committedAt: WHEN,
-              finishedAt: WHEN,
-            }),
-          ],
+        'GET /admin/registrations': (call: { query: URLSearchParams }) =>
+          listing([phase === 'running' ? running : phase === 'committed' ? committed : ended])(
+            call,
+          ),
+        [`GET ${AGENT_PATH}/discovery`]: () => {
+          const report = discovery();
+          if (phase === 'ended') report.vms[0]!.registered = true;
+          return { operation: report };
         },
       }),
     );
     renderAt(AGENT_PATH);
-    const card = await discoveredCard();
+    let card = await discoveredCard();
+    expect(await card.findByText('Registration running')).toBeTruthy();
+    expect(card.queryByRole('button')).toBeNull();
+
+    phase = 'committed';
+    const inUnregisteredList = () =>
+      screen
+        .queryAllByRole('heading', { name: 'Win98' })
+        .filter((element) => element.closest('.media-grid'));
+    // Committed: the master exists, so it leaves the VMs that can be registered at once.
+    await waitFor(() => expect(inUnregisteredList()).toEqual([]), { timeout: 4000 });
+    expect(screen.getByRole('button', { name: 'Show 2 already registered VMs' })).toBeTruthy();
+    const reads = api.callsTo('GET', `${AGENT_PATH}/discovery`).length;
+    phase = 'ended';
+    // Once it has ended, the report is read again and the server's own answer takes over.
+    await waitFor(
+      () => {
+        expect(api.callsTo('GET', `${AGENT_PATH}/discovery`).length).toBeGreaterThan(reads);
+        expect(screen.queryByRole('region', { name: 'Needs attention' })).toBeNull();
+      },
+      { timeout: 4000 },
+    );
+    expect(inUnregisteredList()).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Show 2 already registered VMs' }));
+    card = await discoveredCard();
     expect(card.getByText('Already registered')).toBeTruthy();
     expect(card.queryByRole('button')).toBeNull();
-  });
+    expect(api.callsTo('POST', `${AGENT_PATH}/discovery`)).toEqual([]);
+    // The ended registration is now a row of the recent history, not a card.
+    const recent = await screen.findByRole('region', { name: 'Recent registrations' });
+    expect(within(recent).getByText('Registered')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Needs attention' })).toBeNull();
+  }, 15_000);
 
   it('offers a VM again after a registration that failed', async () => {
     mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [
-            operation({
-              state: 'failed',
-              error: { code: 'source_changed', message: 'It changed.' },
-              finishedAt: WHEN,
-            }),
-          ],
-        },
+        'GET /admin/registrations': listing([
+          operation({
+            state: 'failed',
+            error: { code: 'source_changed', message: 'It changed.' },
+            finishedAt: WHEN,
+          }),
+        ]),
       }),
     );
     renderAt(AGENT_PATH);
+    await screen.findByRole('region', { name: 'Recent registrations' });
     const card = await discoveredCard();
     await waitFor(() =>
       expect(
         (card.getByRole('button', { name: 'Copy to remote' }) as HTMLButtonElement).disabled,
       ).toBe(false),
     );
+    // A failure that changed nothing is history, not something needing attention.
+    expect(screen.queryByRole('region', { name: 'Needs attention' })).toBeNull();
+  });
+
+  it('offers nothing from a report that has expired, or that predates a reconnection', async () => {
+    const expired = { ...discovery(), expiresAt: '2026-01-31T15:45:00.000Z' };
+    mockApi(routes({ [`GET ${AGENT_PATH}/discovery`]: { operation: expired } }));
+    const { unmount } = renderAt(AGENT_PATH);
+    expect(await screen.findByText(/This report has expired/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Copy to remote' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Win98' })).toBeTruthy();
+    unmount();
+    resetApiState();
+
+    const replaced = { ...discovery(), fromCurrentConnection: false };
+    mockApi(routes({ [`GET ${AGENT_PATH}/discovery`]: { operation: replaced } }));
+    renderAt(AGENT_PATH);
+    expect(await screen.findByText(/reconnected since this report was made/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Transfer to remote' })).toBeNull();
+  });
+
+  it('expires a report while the page is open', async () => {
+    const soon = { ...discovery(), expiresAt: new Date(Date.now() + 300).toISOString() };
+    mockApi(routes({ [`GET ${AGENT_PATH}/discovery`]: { operation: soon } }));
+    renderAt(AGENT_PATH);
+    expect(await screen.findByRole('button', { name: 'Copy to remote' })).toBeTruthy();
+    expect(await screen.findByText(/This report has expired/, {}, { timeout: 3000 })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Copy to remote' })).toBeNull();
+  });
+
+  it('says when no discovery has run yet', async () => {
+    mockApi(routes({ [`GET ${AGENT_PATH}/discovery`]: { operation: null } }));
+    renderAt(AGENT_PATH);
+    expect(await screen.findByRole('heading', { name: 'No discovery yet' })).toBeTruthy();
+    expect(screen.getByText(/No discovery has run since the server started/)).toBeTruthy();
   });
 
   it('disables the actions without a repository, and says what to do', async () => {
@@ -264,11 +380,72 @@ describe('the discovery list', () => {
   });
 
   it('shows a running registration, and disables starting another', async () => {
-    mockApi(routes({ 'GET /admin/registrations': { operations: [operation()] } }));
+    mockApi(routes({ 'GET /admin/registrations': listing([operation()]) }));
     renderAt(AGENT_PATH);
     expect(await screen.findByText('Registration running')).toBeTruthy();
-    const heading = screen.getByRole('heading', { name: 'Already' });
-    expect(articleOf(heading)).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Needs attention' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Show 1 already registered VM' })).toBeTruthy();
+  });
+});
+
+describe('the page layout', () => {
+  const ended = (index: number) =>
+    operation({
+      id: `018f47a0-7c2b-4f7e-9a3d-1b2c3d4e${String(6000 + index)}`,
+      vmName: `Old${index}`,
+      state: index % 2 ? 'failed' : 'succeeded',
+      archive: index % 2 ? null : ARCHIVE,
+      error: index % 2 ? { code: 'source_changed', message: 'It changed.' } : null,
+      committedAt: index % 2 ? null : WHEN,
+      finishedAt: WHEN,
+    });
+
+  it('puts discovery before the history, and shows ended operations as rows, not cards', async () => {
+    const api = mockApi(
+      routes({
+        'GET /admin/registrations': listing([
+          operation(),
+          ...Array.from({ length: 8 }, (_, index) => ended(index)),
+        ]),
+      }),
+    );
+    renderAt(AGENT_PATH);
+    const recent = await screen.findByRole('region', { name: 'Recent registrations' });
+    const discoveryRegion = screen.getByRole('region', { name: 'Discovery' });
+    const attention = screen.getByRole('region', { name: 'Needs attention' });
+    expect(
+      discoveryRegion.compareDocumentPosition(recent) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Only the running operation is a card; the eight that ended are rows.
+    expect(within(attention).getAllByRole('article')).toHaveLength(1);
+    expect(within(recent).queryAllByRole('article')).toEqual([]);
+    expect(within(recent).getAllByRole('row')).toHaveLength(9);
+    expect(
+      within(recent).getByRole('link', { name: 'View full registration history' }),
+    ).toBeTruthy();
+    // Each list asks the server for a bounded page, never for the whole history.
+    const views = api
+      .callsTo('GET', '/admin/registrations')
+      .map((call) => [call.query.get('view'), call.query.get('limit')]);
+    expect(views).toContainEqual(['attention', '5']);
+    expect(views).toContainEqual(['history', '8']);
+    expect(views.every(([view]) => view === 'attention' || view === 'history')).toBe(true);
+  });
+
+  it('says how many need attention when they do not all fit', async () => {
+    mockApi(
+      routes({
+        'GET /admin/registrations': (call: { query: URLSearchParams }) =>
+          call.query.get('view') === 'attention'
+            ? { operations: [operation()], nextCursor: 'more', total: 7 }
+            : { operations: [], nextCursor: null },
+      }),
+    );
+    renderAt(AGENT_PATH);
+    expect(await screen.findByText(/Showing 1 of 7/)).toBeTruthy();
+    expect(
+      screen.getByRole('link', { name: 'See all 7 that need attention' }).getAttribute('href'),
+    ).toBe(`/admin/registrations?agentId=${AGENT_ID}&status=attention`);
   });
 });
 
@@ -376,7 +553,7 @@ describe('the transfer dialog', () => {
 
 describe('progress', () => {
   it('shows real bytes and a percentage only when there is a total', async () => {
-    mockApi(routes({ 'GET /admin/registrations': { operations: [operation()] } }));
+    mockApi(routes({ 'GET /admin/registrations': listing([operation()]) }));
     renderAt(AGENT_PATH);
     const bar = await screen.findByRole('progressbar');
     expect(bar.getAttribute('aria-valuenow')).toBe('50');
@@ -386,11 +563,9 @@ describe('progress', () => {
   it('invents no percentage when it has no total', async () => {
     mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [
-            operation({ state: 'validating', progress: { doneBytes: null, totalBytes: null } }),
-          ],
-        },
+        'GET /admin/registrations': listing([
+          operation({ state: 'validating', progress: { doneBytes: null, totalBytes: null } }),
+        ]),
       }),
     );
     renderAt(AGENT_PATH);
@@ -399,9 +574,7 @@ describe('progress', () => {
   });
 
   it('says that an offline agent will continue', async () => {
-    mockApi(
-      routes({ 'GET /admin/registrations': { operations: [operation({ agentOnline: false })] } }),
-    );
+    mockApi(routes({ 'GET /admin/registrations': listing([operation({ agentOnline: false })]) }));
     renderAt(AGENT_PATH);
     expect(await screen.findByText(/continues when it reconnects/)).toBeTruthy();
   });
@@ -409,7 +582,7 @@ describe('progress', () => {
   it('can be cancelled before the master exists, and not after', async () => {
     const api = mockApi(
       routes({
-        'GET /admin/registrations': { operations: [operation()] },
+        'GET /admin/registrations': listing([operation()]),
         [`POST /admin/registrations/${OPERATION_ID}/cancel`]: operation({ cancelRequested: true }),
       }),
     );
@@ -423,9 +596,9 @@ describe('progress', () => {
   it('offers no cancellation once the master is committed', async () => {
     mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [operation({ state: 'cleaning_local', archive: ARCHIVE, committedAt: WHEN })],
-        },
+        'GET /admin/registrations': listing([
+          operation({ state: 'cleaning_local', archive: ARCHIVE, committedAt: WHEN }),
+        ]),
       }),
     );
     renderAt(AGENT_PATH);
@@ -436,9 +609,7 @@ describe('progress', () => {
   it('lets an administrator retry a commit that failed', async () => {
     const api = mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [operation({ state: 'committing', archive: ARCHIVE })],
-        },
+        'GET /admin/registrations': listing([operation({ state: 'committing', archive: ARCHIVE })]),
         [`POST /admin/registrations/${OPERATION_ID}/reconcile`]: operation({
           state: 'cleaning_local',
           archive: ARCHIVE,
@@ -455,77 +626,188 @@ describe('progress', () => {
 });
 
 describe('the outcome', () => {
+  /** Opens an ended operation from the recent history, where it now lives. */
+  async function details() {
+    const recent = await screen.findByRole('region', { name: 'Recent registrations' });
+    fireEvent.click(within(recent).getByRole('button', { name: /^Details of the/ }));
+    return within(await screen.findByRole('dialog', { name: 'Registration details' }));
+  }
+
+  const succeeded = (overrides: Partial<RegistrationOperation> = {}) =>
+    operation({
+      state: 'succeeded',
+      archive: ARCHIVE,
+      localCopy: 'preserved',
+      committedAt: WHEN,
+      finishedAt: WHEN,
+      ...overrides,
+    });
+
   it('shows what was registered, without claiming that the server checked it', async () => {
+    mockApi(routes({ 'GET /admin/registrations': listing([succeeded()]) }));
+    renderAt(AGENT_PATH);
+    const dialog = await details();
+    expect(dialog.getByRole('link', { name: 'Win98' })).toBeTruthy();
+    expect(dialog.getByText('Registered VM')).toBeTruthy();
+    expect(dialog.getByText('Master version')).toBeTruthy();
+    expect(dialog.getByRole('link', { name: VERSION_ID }).getAttribute('href')).toBe(
+      `/admin/vms/qemu/Win98#version-${VERSION_ID}`,
+    );
+    expect(dialog.getByText('Private')).toBeTruthy();
+    expect(dialog.getByText(/verified by the agent/)).toBeTruthy();
+    expect(dialog.getByText(SHA)).toBeTruthy();
+    expect(dialog.getByText(/Kept on the agent, unchanged/)).toBeTruthy();
+  });
+
+  it('calls a snapshot a snapshot, and names its parent', async () => {
     mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [
-            operation({
-              state: 'succeeded',
-              archive: ARCHIVE,
-              localCopy: 'preserved',
-              committedAt: WHEN,
-              finishedAt: WHEN,
-            }),
-          ],
-        },
+        'GET /admin/registrations': listing([
+          succeeded({
+            mode: 'snapshot',
+            parentVersionId: OPERATION_ID,
+            snapshotName: 'Win98 2026-01-31 15-30',
+          }),
+        ]),
       }),
     );
     renderAt(AGENT_PATH);
-    expect(await screen.findByRole('link', { name: 'Win98' })).toBeTruthy();
-    expect(screen.getByText(VERSION_ID)).toBeTruthy();
-    expect(screen.getByText('Private')).toBeTruthy();
-    expect(screen.getByText(/verified by the agent/)).toBeTruthy();
-    expect(screen.getByText(SHA)).toBeTruthy();
-    expect(screen.getByText(/Kept on the agent, unchanged/)).toBeTruthy();
+    const recent = await screen.findByRole('region', { name: 'Recent registrations' });
+    expect(within(recent).getByText('Snapshot created')).toBeTruthy();
+    expect(within(recent).getByText('Win98 2026-01-31 15-30')).toBeTruthy();
+    const dialog = await details();
+    expect(dialog.getByText('Snapshot version')).toBeTruthy();
+    expect(dialog.queryByText('Master version')).toBeNull();
+    expect(dialog.queryByText('Registered VM')).toBeNull();
+    expect(dialog.getByText('Parent version')).toBeTruthy();
+    expect(dialog.getByText(/^Master/)).toBeTruthy();
+  });
+
+  it('says that a failed snapshot created no snapshot, rather than no master', async () => {
+    mockApi(
+      routes({
+        'GET /admin/registrations': listing([
+          operation({
+            mode: 'snapshot',
+            state: 'failed',
+            parentVersionId: OPERATION_ID,
+            snapshotName: 'Win98 2026-01-31 15-30',
+            localCopy: 'preserved',
+            error: {
+              code: 'snapshot_lineage_unverified',
+              message:
+                'This agent’s record of where the local copy came from predates lineage checks',
+            },
+            finishedAt: WHEN,
+          }),
+        ]),
+      }),
+    );
+    renderAt(AGENT_PATH);
+    const dialog = await details();
+    expect(dialog.getByText(/No snapshot was created, and the local VM is unchanged/)).toBeTruthy();
+    expect(dialog.queryByText(/No master was created/)).toBeNull();
+  });
+
+  it('keeps a deleted version as history, without linking to it', async () => {
+    mockApi(
+      routes({
+        'GET /admin/registrations': listing([
+          succeeded({
+            mode: 'snapshot',
+            parentVersionId: OPERATION_ID,
+            parentSnapshotName: 'Win98 2026-01-30 10-00',
+            snapshotName: 'Win98 2026-01-31 15-30',
+            versionDeletion: 'deleted',
+          }),
+        ]),
+      }),
+    );
+    renderAt(AGENT_PATH);
+    const dialog = await details();
+    expect(dialog.getByText('Deleted since')).toBeTruthy();
+    expect(dialog.queryByRole('link', { name: VERSION_ID })).toBeNull();
+    expect(dialog.getByText(/Win98 2026-01-30 10-00/)).toBeTruthy();
   });
 
   it('shows a failure, and what to do about it', async () => {
     mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [
-            operation({
-              state: 'failed',
-              localCopy: 'preserved',
-              error: { code: 'host_key_changed', message: 'The host key differs.' },
-              recovery: 'Find out why the server’s key changed.',
-              finishedAt: WHEN,
-            }),
-          ],
-        },
+        'GET /admin/registrations': listing([
+          operation({
+            state: 'failed',
+            localCopy: 'preserved',
+            error: { code: 'host_key_changed', message: 'The host key differs.' },
+            recovery: 'Find out why the server’s key changed.',
+            finishedAt: WHEN,
+          }),
+        ]),
       }),
     );
     renderAt(AGENT_PATH);
-    const alert = await screen.findByRole('alert');
+    const dialog = await details();
+    const alert = dialog.getByRole('alert');
     expect(alert.textContent).toMatch(/The host key differs/);
     expect(alert.textContent).toMatch(/Find out why/);
-    expect(screen.getByText(/No master was created, and the local VM is unchanged/)).toBeTruthy();
+    expect(dialog.getByText(/No master was created, and the local VM is unchanged/)).toBeTruthy();
   });
 
-  it('shows a partial success as a registered master with a problem', async () => {
-    mockApi(
+  it('keeps a partial success in view until it is acknowledged', async () => {
+    const partial = operation({
+      mode: 'transfer',
+      state: 'partial_success',
+      archive: ARCHIVE,
+      localCopy: 'cleanup_failed',
+      error: { code: 'cleanup_in_use', message: 'A file is in use.' },
+      recovery: 'The master is registered and safe.',
+      committedAt: WHEN,
+      finishedAt: WHEN,
+    });
+    const api = mockApi(
       routes({
-        'GET /admin/registrations': {
-          operations: [
-            operation({
-              mode: 'transfer',
-              state: 'partial_success',
-              archive: ARCHIVE,
-              localCopy: 'cleanup_failed',
-              error: { code: 'cleanup_in_use', message: 'A file is in use.' },
-              recovery: 'The master is registered and safe.',
-              committedAt: WHEN,
-              finishedAt: WHEN,
-            }),
-          ],
+        'GET /admin/registrations': listing([partial]),
+        [`POST /admin/registrations/${OPERATION_ID}/acknowledge`]: {
+          ...partial,
+          acknowledgedAt: WHEN,
+          acknowledgedByDisplayName: 'Ada Admin',
         },
       }),
     );
     renderAt(AGENT_PATH);
-    expect((await screen.findAllByText('Registered, with a problem')).length).toBeGreaterThan(0);
-    expect(screen.getByText(/could not be safely removed/)).toBeTruthy();
-    expect(screen.getByRole('alert').textContent).toMatch(/registered and safe/);
+    const attention = await screen.findByRole('region', { name: 'Needs attention' });
+    expect(within(attention).getByText('Registered, with a problem')).toBeTruthy();
+    expect(within(attention).getByText(/could not be safely removed/)).toBeTruthy();
+    expect(within(attention).getByRole('alert').textContent).toMatch(/registered and safe/);
+    // Not retryable, so only an acknowledgement takes it out of view.
+    expect(within(attention).queryByRole('button', { name: 'Retry removal' })).toBeNull();
+    fireEvent.click(within(attention).getByRole('button', { name: 'Acknowledge' }));
+    await waitFor(() =>
+      expect(api.callsTo('POST', `/admin/registrations/${OPERATION_ID}/acknowledge`)).toHaveLength(
+        1,
+      ),
+    );
+  });
+
+  it('still offers to retry a removal that a screenshot blocked', async () => {
+    mockApi(
+      routes({
+        'GET /admin/registrations': listing([
+          operation({
+            mode: 'transfer',
+            state: 'partial_success',
+            archive: ARCHIVE,
+            localCopy: 'preserved',
+            error: { code: 'transfer_blocked_media', message: 'A screenshot is not synchronized.' },
+            committedAt: WHEN,
+            finishedAt: WHEN,
+          }),
+        ]),
+      }),
+    );
+    renderAt(AGENT_PATH);
+    const attention = await screen.findByRole('region', { name: 'Needs attention' });
+    expect(within(attention).getByRole('button', { name: 'Retry removal' })).toBeTruthy();
+    expect(within(attention).getByRole('button', { name: 'Acknowledge' })).toBeTruthy();
   });
 });
 

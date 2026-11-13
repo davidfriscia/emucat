@@ -73,6 +73,9 @@ import {
   type PublicCatalogResponse,
   type PublicVmDetail,
   type RegistrationListResponse,
+  type RegistrationListView,
+  type RegistrationMode,
+  type RegistrationState,
   type RegistrationOperation,
   type RepositoryListResponse,
   type RepositorySummary,
@@ -470,14 +473,38 @@ export function startDiscovery(agentId: string): Promise<DiscoveryOperation> {
 
 // Registration and repositories. Nothing here ever carries archive bytes, a path or a key.
 
+/** What a page can ask the registration listing for. Values travel as the query string carries them. */
+export interface RegistrationListFilters {
+  view?: RegistrationListView | undefined;
+  agentId?: string | undefined;
+  emulatorType?: EmulatorType | undefined;
+  vmName?: string | undefined;
+  q?: string | undefined;
+  mode?: RegistrationMode | undefined;
+  states?: readonly RegistrationState[] | undefined;
+  createdFrom?: string | undefined;
+  createdBefore?: string | undefined;
+  cursor?: string | undefined;
+  limit?: number | undefined;
+}
+
 export function fetchRegistrations(
-  agentId: string | undefined,
+  filters: RegistrationListFilters,
   signal?: AbortSignal,
 ): Promise<RegistrationListResponse> {
+  const { states, ...rest } = filters;
   return requestJson(
-    `/admin/registrations${queryString({ agentId })}`,
+    `/admin/registrations${queryString({ ...rest, state: states?.join(',') })}`,
     registrationListResponseSchema,
     { signal },
+  );
+}
+
+export function acknowledgeRegistration(operationId: string): Promise<RegistrationOperation> {
+  return requestJson(
+    `/admin/registrations/${encodeURIComponent(operationId)}/acknowledge`,
+    registrationOperationSchema,
+    { method: 'POST' },
   );
 }
 
