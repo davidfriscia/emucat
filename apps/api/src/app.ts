@@ -95,6 +95,8 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         hub.setExecution(execution);
         const captures = new CaptureCoordinator(browser.pool, hub);
         hub.setCaptures(captures);
+        captures.start();
+        app.addHook('onClose', () => captures.close());
         const workspaces = new WorkspaceCoordinator(
           browser.pool,
           {

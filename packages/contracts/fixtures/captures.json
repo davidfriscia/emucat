@@ -1,0 +1,15 @@
+{
+  "valid": {
+    "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e7001",
+    "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e7002",
+    "emulatorType": "qemu",
+    "vmName": "Windows 98"
+  },
+  "invalidFields": [
+    { "filename": "C:\\outside.ppm" },
+    { "command": "quit" },
+    { "arguments": { "filename": "outside.ppm" } },
+    { "operationId": "../../outside" },
+    { "vmName": "../outside" }
+  ]
+}

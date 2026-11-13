@@ -39,10 +39,27 @@ function operation(row: RowDataPacket): CaptureOperation {
 }
 
 export class CaptureCoordinator {
+  private timer: ReturnType<typeof setInterval> | null = null;
   constructor(
     private readonly pool: Pool,
     private readonly link: Link,
   ) {}
+
+  start(): void {
+    this.timer = setInterval(() => {
+      void this.pool
+        .execute(
+          "UPDATE qemu_captures SET state = 'failed', uncertain = TRUE, error_code = 'capture_outcome_uncertain', error_message = 'The agent did not confirm capture within 60 seconds. Any output remains on the agent; reconnect or retry recovery.' WHERE state IN ('requested', 'capturing') AND updated_at < UTC_TIMESTAMP(3) - INTERVAL 60 SECOND",
+        )
+        .catch(() => undefined);
+    }, 15_000);
+    this.timer.unref();
+  }
+
+  close(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
 
   private async session(id: string): Promise<RowDataPacket> {
     const [rows] = await this.pool.execute<RowDataPacket[]>(
@@ -69,7 +86,7 @@ export class CaptureCoordinator {
   async status(sessionId: string): Promise<CaptureStatus> {
     const session = await this.session(sessionId);
     const [rows] = await this.pool.execute<RowDataPacket[]>(
-      'SELECT * FROM qemu_captures WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT 1',
+      'SELECT * FROM qemu_captures WHERE session_id = ? ORDER BY active_marker DESC, created_at DESC, id DESC LIMIT 1',
       [sessionId],
     );
     const capture = rows[0] ? operation(rows[0]) : null;

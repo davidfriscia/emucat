@@ -20,6 +20,7 @@ struct Behavior {
     exit_code: i32,
     ignore_close: bool,
     ignore_powerdown: bool,
+    capture_delay: Duration,
 }
 
 fn behavior() -> Behavior {
@@ -40,6 +41,12 @@ fn behavior() -> Behavior {
             .unwrap_or(0),
         ignore_close: values.get("ignore_close") == Some(&"true"),
         ignore_powerdown: values.get("ignore_powerdown") == Some(&"true"),
+        capture_delay: Duration::from_millis(
+            values
+                .get("capture_delay_ms")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        ),
     }
 }
 
@@ -91,6 +98,7 @@ fn speak_qmp(behavior: &Behavior) {
                 }
             }
             Some("screendump") => {
+                std::thread::sleep(behavior.capture_delay);
                 let filename = value["arguments"]["filename"].as_str().unwrap();
                 match std::fs::write(filename, b"P6\n2 1\n255\n\xff\0\0\0\xff\0") {
                     Ok(()) => say(serde_json::json!({"return": {}})),

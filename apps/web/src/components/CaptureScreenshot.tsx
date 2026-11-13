@@ -68,7 +68,13 @@ export function CaptureScreenshot({ session }: { session: VmSession }) {
         <button
           type="button"
           className="btn btn-sm btn-outline-primary"
-          disabled={busy || !status.data?.available || Boolean(pending)}
+          disabled={
+            busy ||
+            session.state !== 'running' ||
+            !session.agentOnline ||
+            !status.data?.available ||
+            Boolean(pending)
+          }
           aria-describedby={help}
           onClick={() => void start(false)}
         >

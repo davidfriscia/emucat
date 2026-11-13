@@ -386,6 +386,7 @@ impl MediaApi for HttpMediaApi {
 /// What a transfer needs from synchronization, in order to prove that nothing would be lost. Implemented
 /// here, and by a stand-in in tests of the registration workflow.
 pub trait MediaPreservation: Send + Sync {
+    fn set_capture_reporter(&self, _reporter: Arc<dyn Fn() + Send + Sync>) {}
     fn enqueue_capture(&self, _id: Uuid, _vm: &VmIdentity, _hash: &str, _stamp: MediaStamp) {}
     fn capture_error(&self, _id: Uuid, _vm: &VmIdentity) -> Option<EntryError> {
         None
@@ -471,6 +472,7 @@ pub struct MediaSyncConfig {
 }
 
 pub struct MediaSync {
+    capture_reporter: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     config: MediaSyncConfig,
     state: Mutex<State>,
     wake: Notify,
@@ -535,6 +537,7 @@ impl MediaSync {
             .map_err(|error| format!("Cannot open the media queue: {error}"))?;
         let max_upload_bytes = config.settings.max_upload_bytes;
         Ok(Arc::new(Self {
+            capture_reporter: Mutex::default(),
             state: Mutex::new(State {
                 queue,
                 registered: BTreeMap::new(),
@@ -1160,8 +1163,8 @@ impl MediaSync {
                 state
                     .asked
                     .contains(&(key.clone(), entry.source_path.clone()))
-                    && !state.held.contains(&key)
-                    && state.registered.contains_key(&key)
+                    && (entry.capture_id.is_some() || !state.held.contains(&key))
+                    && (entry.capture_id.is_some() || state.registered.contains_key(&key))
             })
             .take(slots)
             .collect();
@@ -1214,16 +1217,17 @@ impl MediaSync {
         let capture_id = entry.capture_id;
         let opened = tokio::task::spawn_blocking(move || {
             if let Some(id) = capture_id {
-                let root = crate::capture::checked_directory(&base, id)
-                    .map_err(MediaFileProblem::Unsafe)?;
-                return open_media_file(&root, "ready.ppm", stamp);
+                let pinned =
+                    crate::capture::pin_directory(&base, id).map_err(MediaFileProblem::Unsafe)?;
+                let file = open_media_file(&pinned.path, "ready.ppm", stamp)?;
+                return Ok((file, Some(pinned)));
             }
             let root = resolve_vm_root(&base, &vm_name, emulator)
                 .map_err(|_| MediaFileProblem::Changed)?;
-            open_media_file(&root, &source_path, stamp)
+            open_media_file(&root, &source_path, stamp).map(|file| (file, None))
         })
         .await;
-        let file = match opened {
+        let (file, _pinned) = match opened {
             Ok(Ok(file)) => file,
             Ok(Err(MediaFileProblem::InUse)) => {
                 return UploadOutcome::Failed(ApiFailure::Transient {
@@ -1286,6 +1290,10 @@ impl MediaSync {
                 state
                     .queue
                     .mark_failed(emulator, &vm_name, &source_path, error);
+                drop(state);
+                if let Some(report) = self.capture_reporter.lock().expect("poisoned").as_ref() {
+                    report();
+                }
                 return;
             }
             other => other,
@@ -1361,6 +1369,11 @@ impl MediaSync {
                     .set_state(emulator, &vm_name, &source_path, EntryState::Pending);
             }
         }
+        drop(state);
+        if is_capture && let Some(report) = self.capture_reporter.lock().expect("poisoned").as_ref()
+        {
+            report();
+        }
     }
 
     async fn save(&self) {
@@ -1389,6 +1402,9 @@ impl MediaSync {
 }
 
 impl MediaPreservation for MediaSync {
+    fn set_capture_reporter(&self, reporter: Arc<dyn Fn() + Send + Sync>) {
+        *self.capture_reporter.lock().expect("poisoned") = Some(reporter);
+    }
     fn enqueue_capture(&self, id: Uuid, vm: &VmIdentity, hash: &str, stamp: MediaStamp) {
         let mut state = self.lock();
         let label = crate::capture::source_label(id);
@@ -1396,6 +1412,15 @@ impl MediaPreservation for MediaSync {
             .queue
             .record(vm.emulator_type, &vm.vm_name, &label, hash, stamp);
         state.queue.tag_capture(vm.emulator_type, &vm.vm_name, id);
+        if stamp.size_bytes
+            > state
+                .max_upload_bytes
+                .min(self.config.settings.max_upload_bytes)
+        {
+            state.queue.mark_failed(vm.emulator_type, &vm.vm_name, &label, EntryError {
+                code: "upload_too_large".to_owned(), message: "Capture exceeds the configured media upload limit; the spool image was retained".to_owned(),
+            });
+        }
         state.status_version += 1;
         drop(state);
         self.wake.notify_one();

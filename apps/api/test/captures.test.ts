@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { captureOperationSchema, PROTOCOL_VERSION, type CaptureOperation } from '@emucat/contracts';
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
+import { CaptureCoordinator } from '../src/execution/captures.js';
 import { envelope, GENEROUS_RATE_LIMITS, pairAgent, TestAgent, wsUrl } from './agent-helpers.js';
 import {
   HOST,
@@ -40,6 +41,28 @@ beforeAll(async () => {
 afterAll(async () => {
   agent?.close();
   await context?.close();
+});
+
+it('keeps the connection and waits for replay when recording a report fails', async () => {
+  const s = await session();
+  const capture = captureOperationSchema.parse(
+    (
+      await admin.request({ method: 'POST', url: s.path, payload: { requestId: randomUUID() } })
+    ).json(),
+  );
+  const interrupted = vi
+    .spyOn(CaptureCoordinator.prototype, 'report')
+    .mockRejectedValueOnce(new Error('Temporary database outage'));
+  try {
+    agent.send(envelope('agent.qemu_capture', report(capture)));
+    await barrier();
+    expect((await admin.get(`${s.path}/${capture.id}`)).json().state).toBe('requested');
+    agent.send(envelope('agent.qemu_capture', report(capture)));
+    await barrier();
+    expect((await admin.get(`${s.path}/${capture.id}`)).json().state).toBe('uploading');
+  } finally {
+    interrupted.mockRestore();
+  }
 });
 
 async function session(options: { available?: boolean; emulator?: string } = {}) {
@@ -94,6 +117,17 @@ it('requires an administrator and CSRF, and refuses QMP/path injection and unsup
     (await anonymous.request({ method: 'POST', url: s.path, payload: { requestId: randomUUID() } }))
       .statusCode,
   ).toBe(401);
+  const member = new TestClient(context.app);
+  const password = 'capture-test-member-password';
+  await context.pool.execute(
+    "INSERT INTO users (id, username, display_name, password_hash, role) VALUES (?, 'capturemember', 'Capture member', ?, 'user')",
+    [randomUUID(), await context.dependencies.passwords.hash(password)],
+  );
+  expect((await member.login('capturemember', password)).statusCode).toBe(200);
+  expect(
+    (await member.request({ method: 'POST', url: s.path, payload: { requestId: randomUUID() } }))
+      .statusCode,
+  ).toBe(403);
   expect(
     (
       await admin.request({
@@ -269,4 +303,48 @@ it('retains failed operations across API rebuilds and bounds explicit retries', 
     state: 'failed',
     retryAttempts: 3,
   });
+});
+
+it('ignores a foreign agent report and never reactivates a failed capture beside a newer operation', async () => {
+  const s = await session();
+  const first = captureOperationSchema.parse(
+    (
+      await admin.request({ method: 'POST', url: s.path, payload: { requestId: randomUUID() } })
+    ).json(),
+  );
+  agent.send(
+    envelope(
+      'agent.qemu_capture',
+      report(first, {
+        state: 'failed',
+        sha256: null,
+        uncertain: true,
+        code: 'capture_failed',
+        message: 'Interrupted',
+      }),
+    ),
+  );
+  await barrier();
+  const second = captureOperationSchema.parse(
+    (
+      await admin.request({ method: 'POST', url: s.path, payload: { requestId: randomUUID() } })
+    ).json(),
+  );
+  agent.send(envelope('agent.qemu_capture', report(first)));
+  await barrier();
+  expect((await admin.get(`${s.path}/${first.id}`)).json().state).toBe('failed');
+  expect((await admin.get(s.path)).json().operation.id).toBe(second.id);
+  const pairedOther = await pairAgent(context.app, admin, { name: 'Foreign report agent' });
+  const other = await TestAgent.connect(wsUrl(context.app), pairedOther.credential);
+  await other.hello();
+  other.send(
+    envelope(
+      'agent.qemu_capture',
+      report(second, { state: 'failed', code: 'forged', message: 'wrong agent' }),
+    ),
+  );
+  other.send(envelope('agent.heartbeat', {}));
+  await other.next('server.heartbeat_ack');
+  expect((await admin.get(`${s.path}/${second.id}`)).json().state).toBe('requested');
+  other.close();
 });

@@ -229,6 +229,7 @@ impl AgentOperations {
             execution.clone(),
             config.media.clone(),
         )?;
+        captures.set_outbound(outbound.clone());
         let inner = Arc::new(Inner {
             config,
             outbound,
@@ -356,8 +357,14 @@ impl AgentOperations {
     pub fn handle(&self, message: Message) {
         match message {
             Message::ServerQemuCapture(request) => self.captures.start(request),
-            Message::ServerQemuCaptureAck(ack) => self.captures.acknowledge(ack),
-            Message::ServerQemuCaptureRetry(retry) => self.captures.retry(retry),
+            Message::ServerQemuCaptureAck(ack) => {
+                let captures = self.captures.clone();
+                tokio::task::spawn_blocking(move || captures.acknowledge(ack));
+            }
+            Message::ServerQemuCaptureRetry(retry) => {
+                let captures = self.captures.clone();
+                tokio::task::spawn_blocking(move || captures.retry(retry));
+            }
             Message::ServerRegistrationRequest(request) => self.inner.start(request),
             Message::ServerRegistrationCancel(cancel) => self.inner.cancel(&cancel),
             Message::ServerRegistrationAck(ack) => self.inner.acknowledged(ack),

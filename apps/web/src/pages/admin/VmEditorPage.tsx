@@ -181,7 +181,8 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
   const media = useAsync(loadMedia);
   const refreshCapturedMedia = useCallback(() => {
     void fetchVmMedia({ emulatorType, vmName }).then(media.setData, () => undefined);
-  }, [emulatorType, vmName, media.setData]);
+    void fetchAdminVm({ emulatorType, vmName }).then(setData, () => undefined);
+  }, [emulatorType, vmName, media.setData, setData]);
   useCaptureGalleryRefresh({ emulatorType, vmName }, refreshCapturedMedia);
   // The version history chooses a version and mode in the run panel, which stays the one place to run.
   const [preselect, setPreselect] = useState<RunPreselection | null>(null);

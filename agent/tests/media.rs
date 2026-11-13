@@ -1184,3 +1184,84 @@ async fn a_busy_server_is_still_retried_with_backoff() {
     assert_eq!(refusals_left(&world), 0);
     running.stop().await;
 }
+
+#[tokio::test]
+async fn capture_spool_uses_the_existing_uploader_without_a_persistent_vm() {
+    let world = World::new();
+    let id = Uuid::new_v4();
+    let root = world.state_dir.join("captures").join(id.to_string());
+    fs::create_dir_all(&root).unwrap();
+    let bytes = b"P6\n1 1\n255\n\xff\0\0";
+    fs::write(root.join("ready.ppm"), bytes).unwrap();
+    let vm = VmIdentity {
+        emulator_type: EmulatorType::Qemu,
+        vm_name: VmName::new("Remote only").unwrap(),
+    };
+    let hashed = hash_media_file(&root, "ready.ppm").unwrap();
+    let running = world.start();
+    running.sync.hold(&vm, true); // A persistent-copy move never touches the capture spool.
+    running
+        .sync
+        .enqueue_capture(id, &vm, &hashed.sha256, hashed.stamp);
+    world.until_uploaded(1).await;
+    assert_eq!(world.uploads()[0].2, bytes);
+    assert_eq!(
+        world.uploads()[0].1,
+        emucat_agent::capture::source_label(id)
+    );
+    running.sync.on_connected();
+    quiet_period().await;
+    assert_eq!(world.uploads().len(), 1);
+    assert!(
+        root.join("ready.ppm").exists(),
+        "HTTP success alone never removes the spool image"
+    );
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn capture_failures_retain_output_and_allow_explicit_retry() {
+    for (status, code) in [
+        (413, "upload_too_large"),
+        (401, "unauthorized"),
+        (403, "vm_not_assigned"),
+        (500, "server_error"),
+        (408, "upload_timeout"),
+    ] {
+        let world = World::new();
+        let id = Uuid::new_v4();
+        let root = world.state_dir.join("captures").join(id.to_string());
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("ready.ppm"), b"P6\n1 1\n255\n\xff\0\0").unwrap();
+        let vm = VmIdentity {
+            emulator_type: EmulatorType::Qemu,
+            vm_name: VmName::new("Temporary VM").unwrap(),
+        };
+        let hashed = hash_media_file(&root, "ready.ppm").unwrap();
+        let count = if status >= 500 || status == 408 { 5 } else { 1 };
+        queue_refusals(
+            &world,
+            &classify_response(status, code, "Retained test image"),
+            count,
+        );
+        let running = world.start();
+        running
+            .sync
+            .enqueue_capture(id, &vm, &hashed.sha256, hashed.stamp);
+        world
+            .until("capture failure status", |_| {
+                running.sync.capture_error(id, &vm).is_some()
+            })
+            .await;
+        assert!(root.join("ready.ppm").exists());
+        assert!(world.uploads().is_empty());
+        // Prove retries are bounded even if the connection remains available.
+        quiet_period().await;
+        assert_eq!(refusals_left(&world), 0);
+        running.sync.on_connected();
+        running.sync.retry_capture(id, &vm);
+        world.until_uploaded(1).await;
+        assert!(root.join("ready.ppm").exists());
+        running.stop().await;
+    }
+}

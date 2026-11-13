@@ -4,7 +4,8 @@
 //! complete a different command. The reader always drains QEMU, with bounded frames and buffering.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -53,6 +54,7 @@ struct Connection {
 
 pub struct QmpChannel {
     connection: Mutex<Connection>,
+    connected: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for QmpChannel {
@@ -66,6 +68,8 @@ impl QmpChannel {
         mut input: impl Write + Send + 'static,
         output: impl Read + Send + 'static,
     ) -> Self {
+        let connected = Arc::new(AtomicBool::new(true));
+        let writer_connected = connected.clone();
         // Even an emulator that stops reading stdin must not hold a caller beyond its deadline.
         let (writer, requests) = mpsc::sync_channel::<Value>(1);
         std::thread::spawn(move || {
@@ -74,11 +78,13 @@ impl QmpChannel {
                     .and_then(|_| input.flush())
                     .is_err()
                 {
+                    writer_connected.store(false, Ordering::Release);
                     break;
                 }
             }
         });
         let (sender, receiver) = mpsc::sync_channel(32);
+        let reader_connected = connected.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(output);
             loop {
@@ -99,13 +105,19 @@ impl QmpChannel {
                     let _ = sender.try_send(value);
                 }
             }
+            reader_connected.store(false, Ordering::Release);
         });
         Self {
+            connected,
             connection: Mutex::new(Connection {
                 input: writer,
                 replies: receiver,
             }),
         }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
     }
 
     pub fn execute(&self, command: Command, timeout: Duration) -> Result<Value, QmpError> {
@@ -248,6 +260,20 @@ mod tests {
         assert!(matches!(
             channel.execute(Command::Quit, Duration::from_secs(1)),
             Err(QmpError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn a_closed_monitor_is_reported_as_unavailable() {
+        let channel = channel(|_| {});
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while channel.is_connected() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!channel.is_connected());
+        assert!(matches!(
+            channel.execute(Command::Quit, Duration::from_millis(100)),
+            Err(QmpError::Disconnected)
         ));
     }
 

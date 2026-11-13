@@ -533,8 +533,16 @@ export class AgentHub {
         await this.handleRestoreMessage(connection, message);
         break;
       case 'agent.qemu_capture':
-        if (this.active.get(agentId) === connection)
-          await this.captures?.report(agentId, message.payload);
+        if (this.active.get(agentId) === connection) {
+          try {
+            await this.captures?.report(agentId, message.payload);
+          } catch (error) {
+            connection.log.error(
+              { err: error, operationId: message.payload.operationId },
+              'Cannot record screenshot report; awaiting replay',
+            );
+          }
+        }
         return;
       case 'agent.execution_sync':
       case 'agent.vm_execution_status':

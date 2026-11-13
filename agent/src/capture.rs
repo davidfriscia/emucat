@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,6 +18,26 @@ use crate::protocol::Message;
 pub const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 // Reserve the full per-image allowance before execution: at most 512 MiB of unpublished captures.
 const MAX_UNPUBLISHED: usize = 8;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct CaptureFailure {
+    pub message: String,
+    pub uncertain: bool,
+}
+impl From<String> for CaptureFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            uncertain: false,
+        }
+    }
+}
+impl From<&str> for CaptureFailure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -181,6 +201,7 @@ pub struct CaptureManager {
     media: Option<Arc<dyn MediaPreservation>>,
     journals: Mutex<HashMap<Uuid, Journal>>,
     running: Mutex<HashSet<Uuid>>,
+    outbound: OnceLock<tokio::sync::mpsc::Sender<Message>>,
 }
 
 impl CaptureManager {
@@ -189,6 +210,10 @@ impl CaptureManager {
         execution: Arc<ExecutionManager>,
         media: Option<Arc<dyn MediaPreservation>>,
     ) -> Result<Arc<Self>, String> {
+        let state_metadata = fs::symlink_metadata(&state_dir).map_err(|error| error.to_string())?;
+        if !state_dir.is_absolute() || is_link_like(&state_metadata) || !state_metadata.is_dir() {
+            return Err("Unsafe capture state directory".to_owned());
+        }
         let root = state_dir.join("captures");
         if !root.exists() {
             fs::create_dir(&root).map_err(|error| error.to_string())?;
@@ -203,7 +228,19 @@ impl CaptureManager {
             media,
             journals: Mutex::default(),
             running: Mutex::default(),
+            outbound: OnceLock::new(),
         });
+        if let Some(media) = &manager.media {
+            let weak = Arc::downgrade(&manager);
+            media.set_capture_reporter(Arc::new(move || {
+                let weak = weak.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(manager) = weak.upgrade() {
+                        manager.publish_reports();
+                    }
+                });
+            }));
+        }
         for entry in fs::read_dir(root)
             .map_err(|error| error.to_string())?
             .flatten()
@@ -230,7 +267,11 @@ impl CaptureManager {
             if journal.report.request.operation_id != id {
                 return Err("Capture identity mismatch".to_owned());
             }
-            if !journal.published {
+            if !journal.published
+                && (journal.report.state != "failed"
+                    || journal.report.uncertain
+                    || journal.report.sha256.is_some())
+            {
                 // Recovery never reissues screendump. A closed, complete output can still be finalized.
                 if let Err(error) = manager.finalize(&mut journal) {
                     journal.report.state = "failed".to_owned();
@@ -247,6 +288,18 @@ impl CaptureManager {
                 .insert(id, journal);
         }
         Ok(manager)
+    }
+
+    pub fn set_outbound(&self, outbound: tokio::sync::mpsc::Sender<Message>) {
+        let _ = self.outbound.set(outbound);
+    }
+
+    fn publish_reports(&self) {
+        if let Some(outbound) = self.outbound.get() {
+            for message in self.reports() {
+                let _ = outbound.try_send(message);
+            }
+        }
     }
 
     fn persist(&self, journal: &Journal) -> Result<(), String> {
@@ -276,11 +329,16 @@ impl CaptureManager {
         if !ready.exists() {
             let pending = directory.join("pending.ppm");
             validate_ppm(&pending)?;
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&pending)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| error.to_string())?;
             fs::rename(pending, &ready).map_err(|error| error.to_string())?;
         }
         validate_ppm(&ready)?;
         let hashed =
-            hash_media_file(&directory, "ready.ppm").map_err(|error| format!("{error:?}"))?;
+            hash_media_file(directory, "ready.ppm").map_err(|error| format!("{error:?}"))?;
         if journal
             .report
             .sha256
@@ -307,11 +365,32 @@ impl CaptureManager {
             drop(running);
             if let Err(error) = this.capture(request.clone()) {
                 tracing::error!(operation_id = %request.operation_id, %error, "Capture retained after failure");
+                let mut journals = this.journals.lock().expect("poisoned");
+                let journal = journals
+                    .entry(request.operation_id)
+                    .or_insert_with(|| Journal {
+                        report: CaptureReport {
+                            request: request.clone(),
+                            state: "failed".to_owned(),
+                            sha256: None,
+                            uncertain: true,
+                            code: None,
+                            message: None,
+                        },
+                        published: false,
+                        retry_attempt: 0,
+                    });
+                journal.report.state = "failed".to_owned();
+                journal.report.code = Some("capture_spool_unavailable".to_owned());
+                journal.report.message = Some("The capture spool could not be recorded. Check the agent log and free disk space; existing output was retained".to_owned());
+                journal.report.uncertain = true;
+                let _ = this.persist(journal);
             }
             this.running
                 .lock()
                 .expect("poisoned")
                 .remove(&request.operation_id);
+            this.publish_reports();
         });
     }
 
@@ -333,30 +412,59 @@ impl CaptureManager {
             published: false,
             retry_attempt: 0,
         };
-        let full = journals
+        let reserved_bytes: u64 = journals
             .values()
-            .filter(|journal| {
-                !journal.published && (journal.report.state != "failed" || journal.report.uncertain)
+            .map(|journal| {
+                let actual: u64 =
+                    checked_directory(&self.state_dir, journal.report.request.operation_id)
+                        .ok()
+                        .map(|directory| {
+                            ["pending.ppm", "ready.ppm"]
+                                .iter()
+                                .filter_map(|name| fs::symlink_metadata(directory.join(name)).ok())
+                                .map(|metadata| metadata.len())
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                if !journal.published
+                    && (journal.report.state != "failed"
+                        || journal.report.uncertain
+                        || journal.report.sha256.is_some())
+                {
+                    actual.max(MAX_CAPTURE_BYTES)
+                } else {
+                    actual
+                }
             })
-            .count()
-            >= MAX_UNPUBLISHED;
+            .sum();
+        let full = reserved_bytes.saturating_add(MAX_CAPTURE_BYTES)
+            > MAX_CAPTURE_BYTES * MAX_UNPUBLISHED as u64;
         let directory = self.state_dir.join("captures").join(id.to_string());
         fs::create_dir(&directory).map_err(|error| error.to_string())?;
         let _pinned = pin_directory(&self.state_dir, id)?;
         self.persist(&journal)?; // Before a command could possibly execute.
         journals.insert(id, journal.clone());
         drop(journals);
-        let outcome = if full {
-            Err("Capture spool is full (512 MiB reserved); publish or retry existing captures first".to_owned())
+        if let Some(outbound) = self.outbound.get() {
+            let _ = outbound.try_send(Message::AgentQemuCapture(journal.report.clone()));
+        }
+        let outcome: Result<(), CaptureFailure> = if full {
+            Err("Capture spool is full (512 MiB reserved); publish or retry existing captures first".into())
         } else if request.emulator_type != EmulatorType::Qemu {
-            Err("Only QEMU sessions can capture".to_owned())
+            Err("Only QEMU sessions can capture".into())
         } else if self.media.is_none() {
-            Err("Media synchronization is unavailable".to_owned())
+            Err("Media synchronization is unavailable".into())
         } else {
             self.execution
                 .capture_screen(&request, directory.join("pending.ppm"))
         };
-        if let Err(error) = outcome.and_then(|_| self.finalize(&mut journal)) {
+        if let Err(error) = outcome.and_then(|_| {
+            self.finalize(&mut journal)
+                .map_err(|message| CaptureFailure {
+                    message,
+                    uncertain: true,
+                })
+        }) {
             journal.report.state = "failed".to_owned();
             journal.report.code = Some(
                 if full {
@@ -366,8 +474,8 @@ impl CaptureManager {
                 }
                 .to_owned(),
             );
-            journal.report.message = Some(error.chars().take(1000).collect());
-            journal.report.uncertain = !full;
+            journal.report.message = Some(error.message.chars().take(1000).collect());
+            journal.report.uncertain = error.uncertain;
         }
         self.persist(&journal)?;
         self.journals.lock().expect("poisoned").insert(id, journal);
@@ -376,6 +484,19 @@ impl CaptureManager {
 
     pub fn reports(&self) -> Vec<Message> {
         let journals = self.journals.lock().expect("poisoned");
+        // A deduplication acknowledgement can race an in-flight reader. Retry confirmed-only cleanup
+        // after that reader has released its Windows handle; unpublished output is never removed.
+        for journal in journals.values().filter(|journal| journal.published) {
+            if let Ok(pinned) = pin_directory(&self.state_dir, journal.report.request.operation_id)
+            {
+                let path = pinned.path.join("ready.ppm");
+                if fs::symlink_metadata(&path)
+                    .is_ok_and(|metadata| metadata.is_file() && !is_link_like(&metadata))
+                {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
         journals
             .values()
             .filter(|journal| !journal.published)
@@ -403,6 +524,11 @@ impl CaptureManager {
                             report.code = Some(error.code);
                             report.message = Some(error.message);
                         }
+                    } else {
+                        report.state = "failed".to_owned();
+                        report.code = Some("capture_source_unavailable".to_owned());
+                        report.message = Some("The retained capture cannot be read. Check the agent spool and retry recovery".to_owned());
+                        report.uncertain = true;
                     }
                 }
                 Message::AgentQemuCapture(report)
@@ -469,6 +595,8 @@ impl CaptureManager {
                 },
             );
         }
+        drop(journals);
+        self.publish_reports();
     }
 }
 
@@ -477,6 +605,22 @@ mod tests {
     use super::*;
     use crate::execution::{ExecutionConfig, ExecutionSettings};
     use crate::repository::CancelFlag;
+
+    #[test]
+    fn shared_commands_refuse_paths_and_raw_monitor_commands() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packages/contracts/fixtures/captures.json"
+        ))
+        .unwrap();
+        serde_json::from_value::<CaptureCommand>(fixture["valid"].clone()).unwrap();
+        for invalid in fixture["invalidFields"].as_array().unwrap() {
+            let mut command = fixture["valid"].clone();
+            for (key, value) in invalid.as_object().unwrap() {
+                command[key] = value.clone();
+            }
+            assert!(serde_json::from_value::<CaptureCommand>(command).is_err());
+        }
+    }
 
     fn manager(state: &Path) -> Arc<CaptureManager> {
         let (sender, _) = tokio::sync::mpsc::channel(32);

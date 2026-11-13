@@ -228,7 +228,9 @@ impl ExecutionManager {
             && live
                 .get(&session_id)
                 .is_some_and(|live| match journal.graceful {
-                    Some(Graceful::QmpPowerdown) => live.qmp.is_some(),
+                    Some(Graceful::QmpPowerdown) => {
+                        live.qmp.as_ref().is_some_and(|qmp| qmp.is_connected())
+                    }
                     Some(Graceful::CloseWindow) => true,
                     None => false,
                 });
@@ -250,7 +252,9 @@ impl ExecutionManager {
             screenshot_available: Some(
                 journal.state == AgentExecutionState::Running
                     && journal.request.emulator_type == EmulatorType::Qemu
-                    && live.get(&session_id).is_some_and(|live| live.qmp.is_some()),
+                    && live.get(&session_id).is_some_and(|live| {
+                        live.qmp.as_ref().is_some_and(|qmp| qmp.is_connected())
+                    }),
             ),
             code: journal.code.clone(),
             message: journal.message.clone(),
@@ -498,19 +502,23 @@ impl ExecutionManager {
         self: &Arc<Self>,
         request: &crate::capture::CaptureCommand,
         filename: PathBuf,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::capture::CaptureFailure> {
         let mut captures = self.captures.lock().expect("poisoned");
         if captures.contains_key(&request.session_id) {
-            return Err("A capture is already active".to_owned());
+            return Err("A capture is already active".into());
         }
         let journal = self
             .journal(request.session_id)
             .ok_or("The session is unknown")?;
-        if journal.request.emulator_type != EmulatorType::Qemu
+        if request.emulator_type != EmulatorType::Qemu
+            || journal.request.emulator_type != EmulatorType::Qemu
             || journal.request.vm_name != request.vm_name
             || journal.state != AgentExecutionState::Running
         {
-            return Err("The exact QEMU session is not running or is stopping".to_owned());
+            return Err("The exact QEMU session is not running or is stopping".into());
+        }
+        if !filename.is_absolute() {
+            return Err("Capture output must be an agent-generated absolute path".into());
         }
         let (process, qmp) = {
             let live = self.live.lock().expect("poisoned");
@@ -518,7 +526,7 @@ impl ExecutionManager {
                 .get(&request.session_id)
                 .ok_or("The session has no verified process")?;
             if journal.process.as_ref() != Some(live.process.identity()) {
-                return Err("Process identity mismatch".to_owned());
+                return Err("Process identity mismatch".into());
             }
             (
                 live.process.clone(),
@@ -528,7 +536,11 @@ impl ExecutionManager {
             )
         };
         if !matches!(process.poll(), Ok(WaitOutcome::Running)) {
-            return Err("QEMU exited".to_owned());
+            return Err("QEMU exited".into());
+        }
+        if !qmp.is_connected() {
+            self.send(Message::AgentVmExecutionStatus(self.status(&journal)));
+            return Err("QMP is disconnected; start a new VM session".into());
         }
         captures.insert(request.session_id, journal.identity());
         drop(captures);
@@ -538,11 +550,23 @@ impl ExecutionManager {
                 Duration::from_secs(10),
             )
             .map(|_| ())
-            .map_err(|error| error.to_string());
+            .map_err(|error| {
+                tracing::warn!(session_id = %request.session_id, %error, "QEMU screenshot command failed; output retained");
+                let message = match error {
+                    crate::qmp::QmpError::Refused { class, .. } => format!("QEMU refused screenshot capture ({class}); see the agent log"),
+                    other => other.to_string(),
+                };
+                crate::capture::CaptureFailure { message, uncertain: true }
+            });
         self.captures
             .lock()
             .expect("poisoned")
             .remove(&request.session_id);
+        if !qmp.is_connected()
+            && let Some(journal) = self.journal(request.session_id)
+        {
+            self.send(Message::AgentVmExecutionStatus(self.status(&journal)));
+        }
         result
     }
 

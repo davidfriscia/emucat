@@ -511,6 +511,19 @@ async fn a_restarted_agent_finds_its_emulator_again_and_can_still_stop_it() {
     assert_eq!(found.pid, Some(pid));
     // The monitor belonged to the earlier run.
     assert!(!found.graceful_stop_available);
+    assert_eq!(found.screenshot_available, Some(false));
+    let capture = emucat_agent::capture::CaptureCommand {
+        operation_id: Uuid::new_v4(),
+        session_id: session,
+        emulator_type: EmulatorType::Qemu,
+        vm_name: request.vm_name.clone(),
+    };
+    assert!(
+        agent
+            .manager
+            .capture_screen(&capture, machine.state_dir().join("unavailable.ppm"))
+            .is_err()
+    );
     assert_eq!(found.code.as_deref(), Some("graceful_stop_unavailable"));
 
     agent.manager.handle(stop(&request, false));
@@ -905,27 +918,184 @@ async fn captures_in_all_modes_without_changing_vm_files() {
     let launcher = "qemu-system-i386 -m 16 -vga std\r\n";
     let local = machine.qemu_vm("capture-vm", launcher, "");
     let mut agent = machine.manager(quick());
-    for mode in [ExecutionMode::Local, ExecutionMode::RemoteVolatile, ExecutionMode::RemoteSnapshot] {
+    for mode in [
+        ExecutionMode::Local,
+        ExecutionMode::RemoteVolatile,
+        ExecutionMode::RemoteSnapshot,
+    ] {
         let workspace = match mode {
             ExecutionMode::Local => None,
-            ExecutionMode::RemoteVolatile => Some(machine.qemu_working_copy("capture-vm", WorkspacePurpose::RemoteVolatile, launcher)),
-            ExecutionMode::RemoteSnapshot => Some(machine.qemu_working_copy("capture-vm", WorkspacePurpose::RemoteSnapshot, launcher)),
+            ExecutionMode::RemoteVolatile => Some(machine.qemu_working_copy(
+                "capture-vm",
+                WorkspacePurpose::RemoteVolatile,
+                launcher,
+            )),
+            ExecutionMode::RemoteSnapshot => Some(machine.qemu_working_copy(
+                "capture-vm",
+                WorkspacePurpose::RemoteSnapshot,
+                launcher,
+            )),
         };
-        let request = VmLaunchRequest {mode, workspace_id: workspace.as_ref().map(|(id, _)| *id), ..launch(EmulatorType::Qemu, "capture-vm")};
-        agent.manager.handle(Message::ServerVmLaunch(request.clone()));
-        let running = agent.wait_for(request.session_id, |status| status.state == AgentExecutionState::Running).await;
+        let request = VmLaunchRequest {
+            mode,
+            workspace_id: workspace.as_ref().map(|(id, _)| *id),
+            ..launch(EmulatorType::Qemu, "capture-vm")
+        };
+        agent
+            .manager
+            .handle(Message::ServerVmLaunch(request.clone()));
+        let running = agent
+            .wait_for(request.session_id, |status| {
+                status.state == AgentExecutionState::Running
+            })
+            .await;
         assert_eq!(running.screenshot_available, Some(true));
         let output = machine.state_dir().join(format!("{}.ppm", Uuid::new_v4()));
-        let capture = CaptureCommand {operation_id: Uuid::new_v4(), session_id: request.session_id, emulator_type: EmulatorType::Qemu, vm_name: request.vm_name.clone()};
-        let manager = agent.manager.clone(); let destination = output.clone(); let command = capture.clone();
-        tokio::task::spawn_blocking(move || manager.capture_screen(&command, destination)).await.unwrap().unwrap();
+        let capture = CaptureCommand {
+            operation_id: Uuid::new_v4(),
+            session_id: request.session_id,
+            emulator_type: EmulatorType::Qemu,
+            vm_name: request.vm_name.clone(),
+        };
+        let manager = agent.manager.clone();
+        let destination = output.clone();
+        let command = capture.clone();
+        tokio::task::spawn_blocking(move || manager.capture_screen(&command, destination))
+            .await
+            .unwrap()
+            .unwrap();
         validate_ppm(&output).unwrap();
-        let invalid = CaptureCommand {session_id: Uuid::new_v4(), ..capture};
-        assert!(agent.manager.capture_screen(&invalid, output.with_extension("other")).is_err());
+        let invalid = CaptureCommand {
+            session_id: Uuid::new_v4(),
+            ..capture
+        };
+        assert!(
+            agent
+                .manager
+                .capture_screen(&invalid, output.with_extension("other"))
+                .is_err()
+        );
         agent.manager.handle(stop(&request, true));
-        agent.wait_for(request.session_id, |status| status.state == AgentExecutionState::Stopped).await;
-        if let Some((id, _)) = workspace { emucat_agent::workspaces::discard(&machine.state_dir(), id, EmulatorType::Qemu, &request.vm_name).unwrap(); }
+        agent
+            .wait_for(request.session_id, |status| {
+                status.state == AgentExecutionState::Stopped
+            })
+            .await;
+        if let Some((id, _)) = workspace {
+            emucat_agent::workspaces::discard(
+                &machine.state_dir(),
+                id,
+                EmulatorType::Qemu,
+                &request.vm_name,
+            )
+            .unwrap();
+        }
         validate_ppm(&output).unwrap();
         assert_eq!(fs::read_to_string(local.join("run.bat")).unwrap(), launcher);
     }
+}
+
+#[tokio::test]
+async fn capture_serializes_with_other_captures_and_preserves_qmp_quit() {
+    use emucat_agent::capture::{CaptureCommand, validate_ppm};
+    let machine = Machine::new();
+    machine.qemu_vm(
+        "capture-race",
+        "qemu-system-i386 -m 16 -vga std\r\n",
+        "capture_delay_ms=300\n",
+    );
+    let mut agent = machine.manager(ExecutionSettings {
+        start_grace: Duration::from_millis(50),
+        ..quick()
+    });
+    let request = launch(EmulatorType::Qemu, "capture-race");
+    agent
+        .manager
+        .handle(Message::ServerVmLaunch(request.clone()));
+    agent
+        .wait_state(request.session_id, AgentExecutionState::Running)
+        .await;
+    let command = CaptureCommand {
+        operation_id: Uuid::new_v4(),
+        session_id: request.session_id,
+        emulator_type: EmulatorType::Qemu,
+        vm_name: request.vm_name.clone(),
+    };
+    let destination = machine.state_dir().join("race.ppm");
+    let output = destination.clone();
+    let manager = agent.manager.clone();
+    let first = command.clone();
+    let capturing = tokio::task::spawn_blocking(move || manager.capture_screen(&first, output));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !agent
+        .manager
+        .activity(&VmIdentity {
+            emulator_type: EmulatorType::Qemu,
+            vm_name: request.vm_name.clone(),
+        })
+        .is_some_and(|message| message.contains("screenshot"))
+    {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(
+        agent
+            .manager
+            .capture_screen(&command, destination.with_extension("other.ppm"))
+            .is_err()
+    );
+    agent.manager.handle(stop(&request, true));
+    capturing.await.unwrap().unwrap();
+    validate_ppm(&destination).unwrap();
+    let stopped = agent
+        .wait_state(request.session_id, AgentExecutionState::Stopped)
+        .await;
+    assert_eq!(stopped.exit_code, Some(0));
+}
+
+#[tokio::test]
+async fn qemu_exit_during_capture_is_explicit_and_releases_the_capture_claim() {
+    use emucat_agent::capture::CaptureCommand;
+    let machine = Machine::new();
+    machine.qemu_vm(
+        "capture-exit",
+        "qemu-system-i386 -m 16 -vga std\r\n",
+        "exit_after_ms=1000\ncapture_delay_ms=1500\n",
+    );
+    let mut agent = machine.manager(ExecutionSettings {
+        start_grace: Duration::from_millis(50),
+        ..quick()
+    });
+    let request = launch(EmulatorType::Qemu, "capture-exit");
+    agent
+        .manager
+        .handle(Message::ServerVmLaunch(request.clone()));
+    agent
+        .wait_state(request.session_id, AgentExecutionState::Running)
+        .await;
+    let command = CaptureCommand {
+        operation_id: Uuid::new_v4(),
+        session_id: request.session_id,
+        emulator_type: EmulatorType::Qemu,
+        vm_name: request.vm_name.clone(),
+    };
+    let destination = machine.state_dir().join("exited.ppm");
+    let manager = agent.manager.clone();
+    let failed = tokio::task::spawn_blocking(move || manager.capture_screen(&command, destination))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(failed.uncertain);
+    agent
+        .wait_state(request.session_id, AgentExecutionState::Exited)
+        .await;
+    assert!(
+        agent
+            .manager
+            .activity(&VmIdentity {
+                emulator_type: EmulatorType::Qemu,
+                vm_name: request.vm_name
+            })
+            .is_none()
+    );
 }
