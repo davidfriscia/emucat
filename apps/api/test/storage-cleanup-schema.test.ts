@@ -59,7 +59,11 @@ function insertRemoval(values: {
       values.vmName ?? 'Win98',
       values.expected === undefined ? master : values.expected,
       state,
-      values.errorCode === undefined ? (state === 'failed' ? 'vm_running' : null) : values.errorCode,
+      values.errorCode === undefined
+        ? state === 'failed'
+          ? 'vm_running'
+          : null
+        : values.errorCode,
       values.cleanupPending ?? false,
       (values.finished ?? state !== 'requested') ? new Date() : null,
     ],
@@ -176,10 +180,9 @@ describe('version deletions', () => {
       ).rejects.toThrow(/cannot be undone or redirected/);
     }
     await expect(
-      pool.execute(
-        "UPDATE vm_version_deletions SET state = 'deleted' WHERE version_id = ?",
-        [snapshot],
-      ),
+      pool.execute("UPDATE vm_version_deletions SET state = 'deleted' WHERE version_id = ?", [
+        snapshot,
+      ]),
     ).rejects.toThrow(/ck_vm_version_deletions_completed/);
     await pool.execute(
       `UPDATE vm_version_deletions SET state = 'deleted', archive_outcome = 'deleted',

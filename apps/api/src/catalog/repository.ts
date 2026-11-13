@@ -346,7 +346,9 @@ export async function getAdminVm(pool: Pool, vm: VmIdentity): Promise<AdminVmDet
   const [rows] = await pool.execute<AdminVmRow[]>(
     `SELECT ${ADMIN_VM_COLUMNS}, vm.description,
        (SELECT COUNT(*) FROM vm_versions AS version
-         WHERE version.emulator_type = vm.emulator_type AND version.vm_name = vm.vm_name)
+         WHERE version.emulator_type = vm.emulator_type AND version.vm_name = vm.vm_name
+           AND NOT EXISTS (SELECT 1 FROM vm_version_deletions AS deletion
+             WHERE deletion.version_id = version.id))
          AS version_count
      FROM virtual_machines AS vm
      ${ADMIN_VM_JOIN}

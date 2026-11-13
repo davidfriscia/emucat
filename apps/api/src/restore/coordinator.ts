@@ -20,6 +20,8 @@ import {
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import { removalIneligible } from '../cleanup/local-removals.js';
+import { lockUsableVersion, NOT_DELETED } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
 
 /** What the coordinator needs from the hub, which owns the sockets. */
@@ -285,7 +287,7 @@ export class RestoreCoordinator {
        FROM vm_versions AS version
        JOIN repositories AS r ON r.id = version.repository_id
        LEFT JOIN registration_operations AS reg ON reg.version_id = version.id
-       WHERE version.emulator_type = ? AND version.vm_name = ?
+       WHERE version.emulator_type = ? AND version.vm_name = ? AND ${NOT_DELETED('version')}
        ORDER BY version.created_at, version.id`,
       [vm.emulatorType, vm.vmName],
     );
@@ -314,7 +316,12 @@ export class RestoreCoordinator {
               (SELECT COUNT(*) FROM registration_operations AS reg
                 WHERE reg.agent_id = a.id AND reg.active_marker = 1) +
               (SELECT COUNT(*) FROM vm_verifications AS v
-                WHERE v.agent_id = a.id AND v.active_marker = 1) AS active_operations,
+                WHERE v.agent_id = a.id AND v.active_marker = 1) +
+              (SELECT COUNT(*) FROM local_copy_removals AS removal
+                WHERE removal.agent_id = a.id AND removal.active_marker = 1) AS active_operations,
+              (SELECT COUNT(*) FROM vm_workspaces AS w
+                WHERE w.agent_id = a.id AND w.state IN ('preparing', 'discarding'))
+                AS workspace_operations,
               (SELECT COUNT(*) FROM vm_sessions AS session
                 WHERE session.agent_id = a.id AND session.emulator_type = ? AND session.vm_name = ?
                   AND session.active_marker = 1) AS active_sessions
@@ -350,6 +357,13 @@ export class RestoreCoordinator {
         },
         'replace',
       );
+      const running = Number(row.active_sessions) > 0;
+      const remove = removalIneligible(this.link, agentId, {
+        revoked: false,
+        localState: state,
+        running,
+        busy: Number(row.active_operations) + Number(row.workspace_operations) > 0,
+      });
       const capabilities = this.link.restoreCapabilities(agentId);
       const base = capabilities?.emulators.find(
         (emulator) => emulator.emulatorType === vm.emulatorType,
@@ -371,6 +385,8 @@ export class RestoreCoordinator {
           lastVerifiedAt: (row.last_verified_at as Date | null)?.toISOString() ?? null,
         },
         replace: { eligible: replace === null, reason: replace },
+        running,
+        remove: { eligible: remove === null, reason: remove },
         cacheUsedBytes: capabilities?.cacheUsedBytes ?? null,
         cacheMaxBytes: capabilities?.cacheMaxBytes ?? null,
       };
@@ -436,6 +452,8 @@ export class RestoreCoordinator {
       }
       const canonicalName = version.vm_name as string;
       const repositoryId = version.repository_id as string;
+      // Before any row a deletion reads is locked here (decision 0041).
+      await lockUsableVersion(connection, versionId);
 
       const [states] = await connection.execute<RowDataPacket[]>(
         `SELECT execution_state, content_status, local_source_version_id FROM agent_vm_state
@@ -444,8 +462,9 @@ export class RestoreCoordinator {
       );
       const [registrations] = await connection.execute<RowDataPacket[]>(
         `SELECT 1 FROM registration_operations WHERE agent_id = ? AND active_marker = 1
-         UNION ALL SELECT 1 FROM vm_verifications WHERE agent_id = ? AND active_marker = 1`,
-        [agentId, agentId],
+         UNION ALL SELECT 1 FROM vm_verifications WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 1 FROM local_copy_removals WHERE agent_id = ? AND active_marker = 1`,
+        [agentId, agentId, agentId],
       );
       // Launch takes this row's lock too, so no session can begin while this is decided.
       const [sessions] = await connection.execute<RowDataPacket[]>(

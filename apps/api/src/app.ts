@@ -5,6 +5,8 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import { AgentHub, NO_PRESENCE } from './agents/hub.js';
 import type { AgentAuthenticator } from './auth/agent-auth.js';
 import { registerErrorHandling } from './errors.js';
+import { LocalCopyRemovalCoordinator } from './cleanup/local-removals.js';
+import { VersionDeletionCoordinator } from './cleanup/version-deletions.js';
 import { ExecutionCoordinator } from './execution/coordinator.js';
 import { RegistrationCoordinator } from './registration/coordinator.js';
 import { RestoreCoordinator } from './restore/coordinator.js';
@@ -106,6 +108,31 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         // Remote sessions move on by themselves, and the sweep is what retries what is due.
         workspaces.start();
         app.addHook('onClose', () => workspaces.close());
+        const cleanupLink = {
+          isOnline: (agentId: string) => hub.isOnline(agentId),
+          restoreCapabilities: (agentId: string) => hub.restoreCapabilities(agentId),
+          send: (agentId: string, message: Parameters<AgentHub['sendToAgent']>[1]) =>
+            hub.sendToAgent(agentId, message),
+        };
+        const removals = new LocalCopyRemovalCoordinator(browser.pool, cleanupLink, app.log);
+        const deletions = new VersionDeletionCoordinator(
+          browser.pool,
+          cleanupLink,
+          app.log,
+          browser.versionDeletions,
+        );
+        hub.setCleanup({
+          synced: async (agentId, payload) => {
+            await removals.synced(agentId, payload);
+            await deletions.synced(agentId, payload);
+          },
+          removalResult: (agentId, payload) => removals.result(agentId, payload),
+          archiveDeleteResult: (agentId, payload) => deletions.result(agentId, payload),
+          agentRevoked: (agentId) => removals.agentRevoked(agentId),
+        });
+        // Deleting archives is retried by itself until the repository confirms.
+        deletions.start();
+        app.addHook('onClose', () => deletions.close());
         await api.register(async (scope) =>
           registerBrowserRoutes(
             scope,
@@ -115,6 +142,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             restores,
             execution,
             workspaces,
+            { removals, deletions },
             dependencies.authenticateAgent,
           ),
         );

@@ -9,6 +9,11 @@ import type { PasswordHasher } from '../auth/passwords.js';
 import type { RateLimiter } from '../auth/rate-limiter.js';
 import type { SessionPolicy } from '../auth/sessions.js';
 import type { SetupToken } from '../auth/setup.js';
+import type { LocalCopyRemovalCoordinator } from '../cleanup/local-removals.js';
+import type {
+  VersionDeletionCoordinator,
+  VersionDeletionOptions,
+} from '../cleanup/version-deletions.js';
 import type { ExecutionCoordinator } from '../execution/coordinator.js';
 import type { MediaPolicy } from '../media/uploads.js';
 import type { RegistrationCoordinator, RegistrationPolicy } from '../registration/coordinator.js';
@@ -17,6 +22,7 @@ import type { MediaStorage } from '../storage/media-storage.js';
 import type { RemoteSessionOptions, WorkspaceCoordinator } from '../workspaces/coordinator.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
+import { registerAdminCleanupRoutes } from './admin-cleanup.js';
 import { registerAdminExecutionRoutes } from './admin-execution.js';
 import { registerAdminRegistrationRoutes } from './admin-registrations.js';
 import { registerAdminRestoreRoutes } from './admin-restores.js';
@@ -46,6 +52,8 @@ export interface BrowserDependencies {
   registrationPolicy?: RegistrationPolicy;
   /** How remote sessions retry and sweep. Tests shorten the delays, or turn the timer off. */
   remoteSessions?: Partial<RemoteSessionOptions>;
+  /** How snapshot deletions retry. Tests shorten the delays. */
+  versionDeletions?: Partial<VersionDeletionOptions>;
   /** Version reporting and the deployment service. Defaults to none configured. */
   deployment?: DeploymentDependencies;
 }
@@ -58,6 +66,7 @@ export async function registerBrowserRoutes(
   restores: RestoreCoordinator,
   execution: ExecutionCoordinator,
   workspaces: WorkspaceCoordinator,
+  cleanup: { removals: LocalCopyRemovalCoordinator; deletions: VersionDeletionCoordinator },
   authenticateAgent: AgentAuthenticator,
 ): Promise<void> {
   await api.register(cookie);
@@ -75,6 +84,7 @@ export async function registerBrowserRoutes(
   registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
   registerAdminRestoreRoutes(api, dependencies, restores);
   registerAdminExecutionRoutes(api, dependencies, execution);
-  registerAdminVersionRoutes(api, dependencies, registrations, workspaces);
+  registerAdminVersionRoutes(api, dependencies, registrations, workspaces, cleanup.deletions);
+  registerAdminCleanupRoutes(api, dependencies, cleanup.removals, cleanup.deletions);
   registerAdminSystemRoutes(api, dependencies);
 }

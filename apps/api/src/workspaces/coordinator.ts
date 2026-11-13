@@ -519,8 +519,17 @@ export class WorkspaceCoordinator {
          UNION ALL SELECT 'operation' FROM registration_operations
            WHERE agent_id = ? AND active_marker = 1
          UNION ALL SELECT 'operation' FROM restore_operations
+           WHERE agent_id = ? AND active_marker = 1
+         UNION ALL SELECT 'operation' FROM local_copy_removals
            WHERE agent_id = ? AND active_marker = 1`,
-        [before.agent_id, before.emulator_type, before.vm_name, before.agent_id, before.agent_id],
+        [
+          before.agent_id,
+          before.emulator_type,
+          before.vm_name,
+          before.agent_id,
+          before.agent_id,
+          before.agent_id,
+        ],
       );
       if (busy.some((item) => item.kind === 'session')) {
         throw new ApiError(

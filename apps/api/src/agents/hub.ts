@@ -32,6 +32,8 @@ import type {
   VmExecutionStatusPayload,
   VmVerifyResultPayload,
   WorkspaceDiscardResultPayload,
+  LocalCopyRemoveResultPayload,
+  ArchiveDeleteResultPayload,
 } from '@emucat/contracts';
 import { DiscoveryCoordinator, type DiscoveryRecord } from './discovery.js';
 
@@ -92,6 +94,15 @@ export interface AgentExecutionHandler {
 export interface AgentWorkspacesHandler {
   synced(agentId: string, workspaceIds: readonly string[]): Promise<void>;
   discardResult(agentId: string, payload: WorkspaceDiscardResultPayload): Promise<void>;
+  agentRevoked(agentId: string): Promise<void>;
+}
+
+/** What is done with storage cleanup messages (decision 0041). Every call is for the active connection. */
+export interface AgentCleanupHandler {
+  /** After the restore coordinator has handled the same sync. */
+  synced(agentId: string, payload: RestoreSyncPayload): Promise<void>;
+  removalResult(agentId: string, payload: LocalCopyRemoveResultPayload): Promise<void>;
+  archiveDeleteResult(agentId: string, payload: ArchiveDeleteResultPayload): Promise<void>;
   agentRevoked(agentId: string): Promise<void>;
 }
 
@@ -180,6 +191,7 @@ export class AgentHub {
   private restores: AgentRestoresHandler | null = null;
   private execution: AgentExecutionHandler | null = null;
   private workspaces: AgentWorkspacesHandler | null = null;
+  private cleanup: AgentCleanupHandler | null = null;
   /** What each agent last said about its screenshots. Stale once it is offline, and says when it spoke. */
   private readonly mediaStatuses = new Map<
     string,
@@ -212,6 +224,10 @@ export class AgentHub {
 
   setWorkspaces(workspaces: AgentWorkspacesHandler): void {
     this.workspaces = workspaces;
+  }
+
+  setCleanup(cleanup: AgentCleanupHandler): void {
+    this.cleanup = cleanup;
   }
 
   isSnapshotCapable(agentId: string): boolean {
@@ -517,6 +533,23 @@ export class AgentHub {
       case 'agent.vm_verify_result':
         await this.handleExecutionMessage(connection, message);
         break;
+      case 'agent.local_copy_remove_result':
+      case 'agent.archive_delete_result':
+        if (this.active.get(agentId) !== connection || !this.cleanup) {
+          connection.log.warn({ agentId }, 'Ignored a message from an inactive connection');
+          break;
+        }
+        try {
+          if (message.type === 'agent.local_copy_remove_result') {
+            await this.cleanup.removalResult(agentId, message.payload);
+          } else {
+            await this.cleanup.archiveDeleteResult(agentId, message.payload);
+          }
+        } catch (error) {
+          // No answer: the agent reports again.
+          connection.log.error({ agentId, err: error }, 'Cannot handle an agent report');
+        }
+        break;
       case 'agent.workspace_discard_result':
         if (this.active.get(agentId) !== connection || !this.workspaces) {
           connection.log.warn({ agentId }, 'Ignored a message from an inactive connection');
@@ -613,6 +646,7 @@ export class AgentHub {
           if (message.payload.workspaces && this.workspaces) {
             await this.workspaces.synced(agentId, message.payload.workspaces);
           }
+          await this.cleanup?.synced(agentId, message.payload);
           break;
         case 'agent.restore_progress':
           await restores.progress(agentId, message.payload);
@@ -687,6 +721,22 @@ export class AgentHub {
               connection.log.error(
                 { agentId, err: error },
                 'Cannot end a revoked agent’s restores',
+              );
+            }
+          }
+        })
+        .finally(() => this.pendingPresence.delete(ended));
+      this.pendingPresence.add(ended);
+    }
+    if (this.cleanup) {
+      const ended = this.cleanup
+        .agentRevoked(agentId)
+        .catch((error: unknown) => {
+          for (const connection of this.connections) {
+            if (connection.agentId === agentId) {
+              connection.log.error(
+                { agentId, err: error },
+                'Cannot end a revoked agent’s removals',
               );
             }
           }

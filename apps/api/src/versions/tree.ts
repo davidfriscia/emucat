@@ -1,4 +1,5 @@
 import type {
+  VersionDeletability,
   VersionHolder,
   VersionNode,
   VersionTreeResponse,
@@ -6,26 +7,45 @@ import type {
 } from '@emucat/contracts';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 
+/** Whether each version could be deleted now. Without one, nothing is offered for deletion. */
+export interface DeletabilitySource {
+  deletability(vm: VmIdentity): Promise<Map<string, VersionDeletability>>;
+}
+
+const NOT_DELETABLE: VersionDeletability = { eligible: false, reason: 'repository_unavailable' };
+const MASTER: VersionDeletability = { eligible: false, reason: 'master_cannot_be_deleted' };
+
 /**
  * A VM's versions as a tree: every node with its parent and children, oldest first. Administrators only
  * (decision 0039), and even then without archive keys, repository addresses or local paths.
  */
-export async function versionTree(pool: Pool, vm: VmIdentity): Promise<VersionTreeResponse> {
+export async function versionTree(
+  pool: Pool,
+  vm: VmIdentity,
+  deletions: DeletabilitySource | null = null,
+): Promise<VersionTreeResponse> {
+  // A deleted snapshot leaves the tree; one being deleted stays, marked, until its archive is gone. Only
+  // leaves are deleted, so what remains is still a tree (decision 0041).
   const [rows] = await pool.execute<RowDataPacket[]>(
     `SELECT version.id, version.vm_name, version.kind, version.parent_version_id,
             version.snapshot_name, version.created_at, version.archive_size_bytes,
             version.archive_sha256, r.name AS repository_name, r.enabled AS repository_enabled,
             a.name AS agent_name, u.display_name AS user_display_name,
-            reg.manifest_sha256, reg.file_count, reg.total_uncompressed_bytes
+            reg.manifest_sha256, reg.file_count, reg.total_uncompressed_bytes,
+            d.requested_at AS deletion_requested_at, d.attempts AS deletion_attempts,
+            d.error_code AS deletion_error_code, d.error_message AS deletion_error_message
      FROM vm_versions AS version
      JOIN repositories AS r ON r.id = version.repository_id
      LEFT JOIN agents AS a ON a.id = version.created_by_agent_id
      LEFT JOIN users AS u ON u.id = version.created_by_user_id
      LEFT JOIN registration_operations AS reg ON reg.version_id = version.id
+     LEFT JOIN vm_version_deletions AS d ON d.version_id = version.id
      WHERE version.emulator_type = ? AND version.vm_name = ?
+       AND (d.state IS NULL OR d.state <> 'deleted')
      ORDER BY version.created_at, version.id`,
     [vm.emulatorType, vm.vmName],
   );
+  const deletable = (await deletions?.deletability(vm)) ?? new Map<string, VersionDeletability>();
 
   const holders = new Map<string, VersionHolder[]>();
   const add = (versionId: string, holder: VersionHolder) => {
@@ -90,10 +110,27 @@ export async function versionTree(pool: Pool, vm: VmIdentity): Promise<VersionTr
         }
       : null,
     repositoryName: row.repository_name as string,
-    available: Boolean(row.repository_enabled),
+    available: Boolean(row.repository_enabled) && !row.deletion_requested_at,
     createdByAgentName: (row.agent_name as string | null) ?? null,
     createdByDisplayName: (row.user_display_name as string | null) ?? null,
     holders: holders.get(row.id as string) ?? [],
+    deletion: row.deletion_requested_at
+      ? {
+          requestedAt: (row.deletion_requested_at as Date).toISOString(),
+          attempts: Number(row.deletion_attempts),
+          error: row.deletion_error_code
+            ? {
+                code: row.deletion_error_code as string,
+                message: (row.deletion_error_message as string | null) ?? '',
+              }
+            : null,
+        }
+      : null,
+    deletable: row.deletion_requested_at
+      ? { eligible: false, reason: null }
+      : row.kind === 'master'
+        ? MASTER
+        : (deletable.get(row.id as string) ?? NOT_DELETABLE),
   }));
   return {
     emulatorType: vm.emulatorType,
