@@ -34,6 +34,12 @@ function node(n: number, parent: number | null, minute = n): VersionNode {
     createdByAgentName: null,
     createdByDisplayName: null,
     holders: [],
+    deletion: null,
+    // As the server reports it: the master never, and a snapshot with no children nobody uses.
+    deletable:
+      parent === null
+        ? { eligible: false, reason: 'master_cannot_be_deleted' }
+        : { eligible: true, reason: null },
   };
 }
 
