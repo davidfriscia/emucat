@@ -818,7 +818,9 @@ impl ExecutionManager {
                 let terminated = blocking(move || {
                     // QEMU can still be asked to quit at once, which closes its disk images properly.
                     if let Some(qmp) = qmp
-                        && qmp.execute("quit", Duration::from_secs(2)).is_ok()
+                        && qmp
+                            .execute(crate::qmp::Command::Quit, Duration::from_secs(2))
+                            .is_ok()
                         && matches!(
                             process.wait(Duration::from_secs(5)),
                             Ok(WaitOutcome::Exited(_))
@@ -850,7 +852,10 @@ impl ExecutionManager {
                     }
                 }
                 Some(Graceful::QmpPowerdown) => match qmp {
-                    Some(qmp) => qmp.execute("system_powerdown", Duration::from_secs(5)),
+                    Some(qmp) => qmp
+                        .execute(crate::qmp::Command::Powerdown, Duration::from_secs(5))
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
                     None => {
                         Err("QEMU's monitor is not connected to this run of the agent".to_owned())
                     }

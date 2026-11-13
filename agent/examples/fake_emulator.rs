@@ -77,6 +77,10 @@ fn speak_qmp(behavior: &Behavior) {
             say(serde_json::json!({"error": {"class": "GenericError", "desc": "bad json"}}));
             continue;
         };
+        let say = |mut reply: serde_json::Value| {
+            reply["id"] = value["id"].clone();
+            say(reply);
+        };
         match value.get("execute").and_then(|command| command.as_str()) {
             Some("qmp_capabilities") => say(serde_json::json!({"return": {}})),
             Some("system_powerdown") => {

@@ -58,6 +58,7 @@ pub mod pairing;
 pub mod platform;
 pub mod process;
 pub mod protocol;
+pub mod qmp;
 pub mod registration;
 pub mod removal;
 pub mod repository;

@@ -65,7 +65,8 @@ pub struct SpawnRequest {
     pub qmp_stdio: bool,
 }
 
-pub use platform::{ProcessHandle, QmpChannel, close_windows, reattach, spawn};
+pub use crate::qmp::QmpChannel;
+pub use platform::{ProcessHandle, close_windows, reattach, spawn};
 
 /// Whether this build can launch emulators at all.
 pub const fn supported() -> bool {
@@ -86,12 +87,11 @@ fn same_image(left: &Path, right: &Path) -> bool {
 
 #[cfg(windows)]
 mod platform {
-    use std::io::{self, BufRead, BufReader, Write};
+    use std::io;
     use std::os::windows::io::IntoRawHandle;
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
-    use std::process::{ChildStdin, Command, Stdio};
-    use std::sync::{Mutex, mpsc};
+    use std::process::{Command, Stdio};
     use std::time::Duration;
 
     use windows_sys::Win32::Foundation::{
@@ -108,7 +108,10 @@ mod platform {
         WM_CLOSE,
     };
 
-    use super::{ProcessError, ProcessIdentity, Reattached, SpawnRequest, WaitOutcome, same_image};
+    use super::{
+        ProcessError, ProcessIdentity, QmpChannel, Reattached, SpawnRequest, WaitOutcome,
+        same_image,
+    };
 
     /// An open handle to a process. Holding it keeps the PID from being given to anything else.
     #[derive(Debug)]
@@ -208,62 +211,6 @@ mod platform {
                 return Err(error);
             }
             Ok(())
-        }
-    }
-
-    /// The QMP connection QEMU serves on its standard input and output. No other process can reach it.
-    pub struct QmpChannel {
-        input: Mutex<ChildStdin>,
-        replies: Mutex<mpsc::Receiver<serde_json::Value>>,
-    }
-
-    impl std::fmt::Debug for QmpChannel {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("QmpChannel")
-        }
-    }
-
-    impl QmpChannel {
-        /// Sends one command, after the capabilities handshake, and waits for its answer.
-        pub fn execute(&self, command: &str, timeout: Duration) -> Result<(), String> {
-            let replies = self.replies.lock().expect("poisoned");
-            while replies.try_recv().is_ok() {}
-            {
-                let mut input = self.input.lock().expect("poisoned");
-                let line = serde_json::json!({ "execute": command }).to_string();
-                writeln!(input, "{line}")
-                    .and_then(|()| input.flush())
-                    .map_err(|error| format!("QEMU's monitor cannot be reached: {error}"))?;
-            }
-            match replies.recv_timeout(timeout) {
-                Ok(reply) if reply.get("return").is_some() => Ok(()),
-                Ok(reply) => Err(format!("QEMU refused {command}: {reply}")),
-                Err(_) => Err(format!("QEMU did not answer {command}")),
-            }
-        }
-
-        fn start(input: ChildStdin, output: std::process::ChildStdout) -> Self {
-            let (sender, receiver) = mpsc::channel();
-            // Always drained, so that QEMU can never block on a full pipe. Events are dropped.
-            std::thread::spawn(move || {
-                for line in BufReader::new(output).lines() {
-                    let Ok(line) = line else { break };
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                        continue;
-                    };
-                    if value.get("return").is_some() || value.get("error").is_some() {
-                        let _ = sender.send(value);
-                    }
-                }
-            });
-            Self {
-                input: Mutex::new(input),
-                replies: Mutex::new(receiver),
-            }
-        }
-
-        fn negotiate(&self) -> Result<(), String> {
-            self.execute("qmp_capabilities", Duration::from_secs(10))
         }
     }
 
@@ -375,7 +322,7 @@ mod platform {
     use std::io;
     use std::time::Duration;
 
-    use super::{ProcessError, ProcessIdentity, Reattached, SpawnRequest, WaitOutcome};
+    use super::{ProcessError, ProcessIdentity, QmpChannel, Reattached, SpawnRequest, WaitOutcome};
 
     #[derive(Debug)]
     pub struct ProcessHandle {
@@ -394,15 +341,6 @@ mod platform {
         }
         pub fn terminate(&self, _exit_code: u32) -> io::Result<()> {
             Err(io::Error::from(io::ErrorKind::Unsupported))
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct QmpChannel;
-
-    impl QmpChannel {
-        pub fn execute(&self, _command: &str, _timeout: Duration) -> Result<(), String> {
-            Err("Unsupported on this platform".to_owned())
         }
     }
 
