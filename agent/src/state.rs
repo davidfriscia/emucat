@@ -141,6 +141,35 @@ pub fn record_local_source(
     fs::rename(&temporary, &path)
 }
 
+/// Forgets what [`record_local_source`] recorded for one VM, once its persistent copy has been removed
+/// (decision 0041). Atomic and durable, like recording it; forgetting what is not there succeeds.
+pub fn forget_local_source(
+    state_dir: &Path,
+    emulator_type: EmulatorType,
+    vm_name: &VmName,
+) -> std::io::Result<()> {
+    let path = state_dir.join(LOCAL_STATE_FILE);
+    let mut states: BTreeMap<String, AgentVmState> = match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if states
+        .remove(&format!("{emulator_type}/{}", vm_name.key()))
+        .is_none()
+    {
+        return Ok(());
+    }
+    let temporary = path.with_extension("tmp");
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(&states)?)?;
+        file.sync_all()?;
+    }
+    fs::rename(&temporary, &path)
+}
+
 /// Why a local copy's lineage cannot be relied on for a snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineageProblem {

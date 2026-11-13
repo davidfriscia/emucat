@@ -51,6 +51,8 @@ use crate::repository::{
 use crate::state::{local_source_entries, read_local_state, record_local_source};
 use crate::verification::{PathList, VerifyStatus, verify_local_copy};
 
+mod local_removal;
+
 /// Progress is informational, so it is thinned out to well below the server's message limit.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
@@ -248,6 +250,37 @@ fn check_replaceable(
     replace: &crate::protocol::RestoreReplace,
     cancel: &CancelFlag,
 ) -> Result<ReplacedCopy, JobFailure> {
+    check_disposable(
+        state_dir,
+        base_path,
+        emulator,
+        vm_name,
+        replace.expected_version_id,
+        replace.discard_local_changes,
+        false,
+        cancel,
+    )
+}
+
+/// Whether the persistent copy may be given up: replaced (decision 0040) or removed (decision 0041). With
+/// `strict_directory`, a lineage recorded for another directory is a stale request even when its changes
+/// may be discarded, because nothing the administrator saw describes the directory now under that name.
+#[allow(clippy::too_many_arguments)]
+fn check_disposable(
+    state_dir: &Path,
+    base_path: &Path,
+    emulator: EmulatorType,
+    vm_name: &VmName,
+    expected_version_id: Option<Uuid>,
+    discard_local_changes: bool,
+    strict_directory: bool,
+    cancel: &CancelFlag,
+) -> Result<ReplacedCopy, JobFailure> {
+    let replace = crate::protocol::RestoreReplace {
+        expected_version_id,
+        discard_local_changes,
+    };
+    let replace = &replace;
     let path = existing_vm_directory(base_path, vm_name)?.ok_or_else(|| {
         failure(
             "local_copy_missing",
@@ -275,6 +308,10 @@ fn check_replaceable(
                 "The local copy is recorded as version {found}, not the one that was shown. Nothing \
                  was changed"
             ),
+        )),
+        Err(crate::state::LineageProblem::DirectoryReplaced) if strict_directory => Err(failure(
+            "local_copy_changed",
+            "The directory with this VM's name is not the copy the agent recorded: it was replaced              since. Nothing was changed",
         )),
         _ if replace.discard_local_changes => Ok(()),
         Err(_) => Err(failure(
@@ -422,6 +459,8 @@ pub struct RestoreManager {
     verifications: Mutex<HashMap<Uuid, VerifyJournal>>,
     /// Operations whose progress nobody asked for: verifications, which reuse the archive download.
     quiet: Mutex<HashSet<Uuid>>,
+    /// Removals of persistent copies (decision 0041), until the server has closed them.
+    removals: Mutex<HashMap<Uuid, local_removal::RemovalJournal>>,
 }
 
 impl RestoreManager {
@@ -479,6 +518,8 @@ impl RestoreManager {
             verifications.insert(journal.request.operation_id, journal);
         }
 
+        let removals = local_removal::load_removals(&config.state_dir)?;
+
         let cache = ArchiveCache::open(
             config.settings.cache_dir.clone(),
             config.settings.cache_max_bytes,
@@ -493,8 +534,10 @@ impl RestoreManager {
             activity: OnceLock::new(),
             verifications: Mutex::new(verifications),
             quiet: Mutex::new(HashSet::new()),
+            removals: Mutex::new(removals),
         });
         manager.recover_interrupted();
+        manager.recover_removals();
         manager.recover_verifications();
         Ok(manager)
     }
@@ -509,6 +552,9 @@ impl RestoreManager {
 
     /// Why `vm` must not be launched now, if a restore or verification is working on it.
     pub fn working_on(&self, vm: &VmIdentity) -> Option<String> {
+        if let Some(reason) = self.removing(vm) {
+            return Some(reason);
+        }
         let running = self.running.lock().expect("poisoned");
         let journals = self.journals.lock().expect("poisoned");
         let verifications = self.verifications.lock().expect("poisoned");
@@ -905,6 +951,7 @@ impl RestoreManager {
             capabilities: self.capabilities(),
             local_copies: self.local_copies(),
             workspaces: crate::workspaces::held(&self.config.state_dir),
+            removals: self.removal_sync_entries(),
         })
     }
 
@@ -928,6 +975,8 @@ impl RestoreManager {
             cache_max_bytes: self.cache.max_bytes(),
             cache_used_bytes: self.cache.usage().total_bytes,
             replace_local: true,
+            remove_local: true,
+            delete_archives: !self.config.repositories.repository_ids().is_empty(),
         }
     }
 
@@ -1020,6 +1069,7 @@ impl RestoreManager {
                 .values()
                 .filter_map(|journal| journal.result.clone().map(Message::AgentVmVerifyResult)),
         );
+        reports.extend(self.removal_reports());
         reports
     }
 
@@ -1031,6 +1081,8 @@ impl RestoreManager {
             Message::ServerRestoreAck(ack) => self.acknowledged(&ack),
             Message::ServerVmVerify(request) => self.verify(request),
             Message::ServerVmVerifyAck(ack) => self.verification_acknowledged(&ack),
+            Message::ServerLocalCopyRemove(request) => self.start_removal(request),
+            Message::ServerLocalCopyRemoveAck(ack) => self.removal_acknowledged(&ack),
             _ => {}
         }
     }
@@ -1042,6 +1094,19 @@ impl RestoreManager {
             code: "invalid_request".to_owned(),
             message: "The request failed validation".to_owned(),
         }));
+    }
+
+    /// Deletes what removed copies left behind, where something could not be deleted at once. Blocking.
+    pub fn retry_removal_leftovers(&self) {
+        self.retry_leftovers(1);
+    }
+
+    /// The removals this agent has not closed yet, for tests and diagnostics.
+    pub fn open_removals(&self) -> Vec<Uuid> {
+        self.removal_sync_entries()
+            .into_iter()
+            .map(|entry| entry.operation_id)
+            .collect()
     }
 
     pub fn open_operations(&self) -> Vec<Uuid> {

@@ -498,6 +498,13 @@ async fn run_session<F: Future<Output = ()>>(
                             operations.refuse_invalid_restore(operation_id);
                         }
                         if let (true, Some(operation_id), Some(operations)) = (
+                            message_type == "server.local_copy_remove",
+                            operation_id,
+                            &settings.operations,
+                        ) {
+                            operations.refuse_invalid_removal(operation_id);
+                        }
+                        if let (true, Some(operation_id), Some(operations)) = (
                             message_type == "server.vm_verify",
                             operation_id,
                             &settings.operations,
@@ -599,7 +606,10 @@ async fn run_session<F: Future<Output = ()>>(
                         | Message::ServerVmExecutionAck(_)
                         | Message::ServerVmVerify(_)
                         | Message::ServerVmVerifyAck(_)
-                        | Message::ServerWorkspaceDiscard(_)) => {
+                        | Message::ServerWorkspaceDiscard(_)
+                        | Message::ServerLocalCopyRemove(_)
+                        | Message::ServerLocalCopyRemoveAck(_)
+                        | Message::ServerArchiveDelete(_)) => {
                             match &settings.operations {
                                 Some(operations) if welcomed => operations.handle(message),
                                 _ => tracing::warn!("Ignored a repository command"),

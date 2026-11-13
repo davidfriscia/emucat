@@ -37,6 +37,7 @@
 //! an existing one. Neither happens to a VM that is running.
 
 pub mod archive_cache;
+pub mod archive_deletion;
 pub mod archives;
 pub mod cli;
 pub mod config;

@@ -134,6 +134,16 @@ pub enum Message {
     ServerWorkspaceDiscard(WorkspaceDiscard),
     #[serde(rename = "agent.workspace_discard_result")]
     AgentWorkspaceDiscardResult(WorkspaceDiscardResult),
+    #[serde(rename = "server.local_copy_remove")]
+    ServerLocalCopyRemove(LocalCopyRemove),
+    #[serde(rename = "server.local_copy_remove_ack")]
+    ServerLocalCopyRemoveAck(LocalCopyRemoveAck),
+    #[serde(rename = "agent.local_copy_remove_result")]
+    AgentLocalCopyRemoveResult(LocalCopyRemoveResult),
+    #[serde(rename = "server.archive_delete")]
+    ServerArchiveDelete(ArchiveDelete),
+    #[serde(rename = "agent.archive_delete_result")]
+    AgentArchiveDeleteResult(ArchiveDeleteResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -564,6 +574,12 @@ pub struct RestoreCapabilities {
     /// This agent can replace a persistent copy safely (decision 0040).
     #[serde(default)]
     pub replace_local: bool,
+    /// This agent can remove a persistent copy (decision 0041).
+    #[serde(default)]
+    pub remove_local: bool,
+    /// This agent can delete a version's archive from a repository it is configured for (decision 0041).
+    #[serde(default)]
+    pub delete_archives: bool,
 }
 
 /// What can honestly be said about a local copy without reading it. A difference proves a change, and no
@@ -596,6 +612,103 @@ pub struct RestoreSync {
     /// this agent keeps them.
     #[serde(default)]
     pub workspaces: Vec<Uuid>,
+    /// The local copy removals this agent has journaled and not yet closed (decision 0041). Listing one
+    /// is what tells the server that the command arrived, so it is never sent again.
+    #[serde(default)]
+    pub removals: Vec<LocalRemovalSyncEntry>,
+}
+
+/// How far a removal of a persistent local copy got (decision 0041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalRemovalPhase {
+    /// Nothing has moved yet.
+    Checking,
+    /// The directory and its identity are recorded, and it is being moved aside.
+    Moving,
+    /// Moved aside and forgotten; what was moved aside is being deleted.
+    Removing,
+    /// The answer is recorded, and repeated until the server closes it.
+    Reported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRemovalSyncEntry {
+    pub operation_id: Uuid,
+    pub phase: LocalRemovalPhase,
+}
+
+/// Removes this agent's persistent copy of a VM. It names the VM and what the administrator saw, never a
+/// path: the agent finds the directory under its own base path, and checks it is the copy that was shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalCopyRemove {
+    pub operation_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub expected_version_id: Option<Uuid>,
+    pub discard_local_changes: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCopyRemoveResult {
+    pub operation_id: Uuid,
+    pub removed: bool,
+    pub cleanup_pending: bool,
+    pub local_directory: Option<String>,
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCopyRemoveAckOutcome {
+    Closed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalCopyRemoveAck {
+    pub operation_id: Uuid,
+    pub outcome: LocalCopyRemoveAckOutcome,
+}
+
+/// Deletes one version's archive from a repository. The agent derives the key itself, and refuses when
+/// the one sent differs, so this can never name another object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArchiveDelete {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+    pub emulator_type: EmulatorType,
+    pub vm_name: VmName,
+    pub repository_id: Uuid,
+    pub archive_key: String,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveDeleteOutcome {
+    /// Deleted by this attempt, and looked for again: nothing is at the key.
+    Deleted,
+    /// Nothing was at the key when this attempt looked.
+    Absent,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveDeleteResult {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+    pub outcome: ArchiveDeleteOutcome,
+    pub code: Option<String>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -743,6 +856,11 @@ fn is_known_type(message_type: &str) -> bool {
             | "server.vm_verify_ack"
             | "server.workspace_discard"
             | "agent.workspace_discard_result"
+            | "server.local_copy_remove"
+            | "server.local_copy_remove_ack"
+            | "agent.local_copy_remove_result"
+            | "server.archive_delete"
+            | "agent.archive_delete_result"
     )
 }
 
