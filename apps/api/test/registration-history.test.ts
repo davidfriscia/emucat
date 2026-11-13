@@ -283,7 +283,7 @@ describe('the registration history', () => {
         snapshotName: '486-dos622ita 2026-11-11',
         createdAt: at(1003),
       },
-    ])) as string[];
+    ])) as [string, string, string, string];
     await context.pool.query('ANALYZE TABLE registration_operations');
   }, 60_000);
 
@@ -607,11 +607,11 @@ describe('acknowledging a partial success', () => {
     await expect(
       context.pool.execute(
         'UPDATE registration_operations SET acknowledged_at = UTC_TIMESTAMP(3) WHERE id = ?',
-        [created[0]],
+        [created[0] as string],
       ),
     ).rejects.toThrow(/ck_registration_acknowledged/);
     await context.pool.execute("UPDATE registration_operations SET state = 'failed' WHERE id = ?", [
-      created[2],
+      created[2] as string,
     ]);
   });
 

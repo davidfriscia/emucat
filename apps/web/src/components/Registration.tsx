@@ -373,7 +373,11 @@ export function RegistrationHistoryTable({
             <tr>
               <th scope="col">Date</th>
               <th scope="col">VM</th>
-              {showAgent ? <th scope="col">Agent</th> : null}
+              {showAgent ? (
+                <th scope="col" className="d-none d-sm-table-cell">
+                  Agent
+                </th>
+              ) : null}
               <th scope="col">Mode</th>
               <th scope="col">Status</th>
               <th scope="col">Version</th>
@@ -387,8 +391,8 @@ export function RegistrationHistoryTable({
               const committed = isRegistrationCommitted(operation.state);
               return (
                 <tr key={operation.id}>
-                  <td className="text-nowrap">{formatTime(operation.createdAt)}</td>
-                  <td>
+                  <td>{formatTime(operation.createdAt)}</td>
+                  <td className="text-nowrap">
                     {committed || operation.mode === 'snapshot' ? (
                       <Link className="vm-identity" to={adminVmRoute(operation)}>
                         {operation.vmName}
@@ -400,7 +404,9 @@ export function RegistrationHistoryTable({
                       {EMULATOR_NAMES[operation.emulatorType]}
                     </span>
                   </td>
-                  {showAgent ? <td>{operation.agentName}</td> : null}
+                  {showAgent ? (
+                    <td className="d-none d-sm-table-cell">{operation.agentName}</td>
+                  ) : null}
                   <td>{REGISTRATION_MODE_TEXT[operation.mode]}</td>
                   <td>
                     <span className={`badge ${stateBadge(operation.state)}`}>
