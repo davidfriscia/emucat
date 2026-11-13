@@ -1,3 +1,4 @@
+import { captureRequestSchema } from '@emucat/contracts';
 import {
   dismissSessionRequestSchema,
   launchRequestSchema,
@@ -18,7 +19,7 @@ import {
   type VmVerification,
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
-import type { z } from 'zod';
+import { z } from 'zod';
 import {
   noStore,
   requireAdmin,
@@ -39,6 +40,7 @@ export function registerAdminExecutionRoutes(
   parent: FastifyInstance,
   dependencies: BrowserDependencies,
   execution: ExecutionCoordinator,
+  captures: import('../execution/captures.js').CaptureCoordinator,
 ): void {
   const { pool, session, cookie, publicOrigin } = dependencies;
 
@@ -61,6 +63,48 @@ export function registerAdminExecutionRoutes(
         },
       );
 
+      const captureParams = vmSessionPathParamsSchema.extend({ operationId: z.uuid() });
+      api.get(
+        '/sessions/:sessionId/screenshots',
+        { schema: { params: vmSessionPathParamsSchema } },
+        async (request) => captures.status((request.params as { sessionId: string }).sessionId),
+      );
+      api.post(
+        '/sessions/:sessionId/screenshots',
+        { schema: { params: vmSessionPathParamsSchema, body: captureRequestSchema } },
+        async (request, reply) => {
+          const result = await captures.create(
+            (request.params as { sessionId: string }).sessionId,
+            (request.body as { requestId: string }).requestId,
+            sessionOf(request).user.id,
+          );
+          reply.status(202);
+          return result;
+        },
+      );
+      api.get(
+        '/sessions/:sessionId/screenshots/:operationId',
+        { schema: { params: captureParams } },
+        async (request) => {
+          const { sessionId, operationId } = request.params as {
+            sessionId: string;
+            operationId: string;
+          };
+          return captures.get(sessionId, operationId);
+        },
+      );
+      api.post(
+        '/sessions/:sessionId/screenshots/:operationId/retry',
+        { schema: { params: captureParams, body: z.strictObject({}) } },
+        async (request, reply) => {
+          const { sessionId, operationId } = request.params as {
+            sessionId: string;
+            operationId: string;
+          };
+          reply.status(202);
+          return captures.retry(sessionId, operationId);
+        },
+      );
       api.get(
         '/sessions',
         { schema: { querystring: vmSessionListQuerySchema } },

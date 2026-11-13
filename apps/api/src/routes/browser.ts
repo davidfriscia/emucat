@@ -65,6 +65,7 @@ export async function registerBrowserRoutes(
   registrations: RegistrationCoordinator,
   restores: RestoreCoordinator,
   execution: ExecutionCoordinator,
+  captures: import('../execution/captures.js').CaptureCoordinator,
   workspaces: WorkspaceCoordinator,
   cleanup: { removals: LocalCopyRemovalCoordinator; deletions: VersionDeletionCoordinator },
   authenticateAgent: AgentAuthenticator,
@@ -83,7 +84,7 @@ export async function registerBrowserRoutes(
   registerAdminAgentRoutes(api, dependencies, hub);
   registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
   registerAdminRestoreRoutes(api, dependencies, restores);
-  registerAdminExecutionRoutes(api, dependencies, execution);
+  registerAdminExecutionRoutes(api, dependencies, execution, captures);
   registerAdminVersionRoutes(api, dependencies, registrations, workspaces, cleanup.deletions);
   registerAdminCleanupRoutes(api, dependencies, cleanup.removals, cleanup.deletions);
   registerAdminSystemRoutes(api, dependencies);

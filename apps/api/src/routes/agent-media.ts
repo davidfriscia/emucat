@@ -22,6 +22,7 @@ import {
   acknowledgedHashes,
   agentMediaVms,
   requireAgentVm,
+  requireCaptureUpload,
   storeUpload,
   UploadGate,
 } from '../media/uploads.js';
@@ -157,8 +158,17 @@ export function registerAgentMediaRoutes(
           if (Number.isFinite(declaredLength) && declaredLength > policy.maxUploadBytes) {
             throw new ApiError(413, 'upload_too_large', 'The upload is over the size limit');
           }
-          await requireAgentVm(pool, agentId, vm);
+          const captureHeader = header(request, 'x-emucat-capture-id');
+          const captureId = captureHeader === undefined ? undefined : z.uuid().parse(captureHeader);
+          if (captureId) await requireCaptureUpload(pool, agentId, vm, captureId, declaredSha256);
+          else await requireAgentVm(pool, agentId, vm);
           const sourcePath = parseSourcePath(request, vm);
+          if (captureId && sourcePath !== `emucat-capture-${captureId}.ppm`)
+            throw new ApiError(
+              400,
+              'invalid_source_path',
+              'Capture source label does not match its operation',
+            );
           const capturedAt = parseCapturedAt(request);
           if (typeof (request.body as Readable | undefined)?.pipe !== 'function') {
             throw new ApiError(415, 'unsupported_media_type', 'Send application/octet-stream');
@@ -175,6 +185,7 @@ export function registerAgentMediaRoutes(
               declaredSha256,
               sourcePath,
               capturedAt,
+              ...(captureId ? { captureId } : {}),
               body: request.body as Readable,
             });
             request.log.info(

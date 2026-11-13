@@ -1,3 +1,4 @@
+import { CaptureCoordinator } from './execution/captures.js';
 import { randomUUID } from 'node:crypto';
 import websocket from '@fastify/websocket';
 import { AGENT_MAX_MESSAGE_BYTES, API_PREFIX } from '@emucat/contracts';
@@ -92,6 +93,8 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           app.log,
         );
         hub.setExecution(execution);
+        const captures = new CaptureCoordinator(browser.pool, hub);
+        hub.setCaptures(captures);
         const workspaces = new WorkspaceCoordinator(
           browser.pool,
           {
@@ -141,6 +144,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             registrations,
             restores,
             execution,
+            captures,
             workspaces,
             { removals, deletions },
             dependencies.authenticateAgent,

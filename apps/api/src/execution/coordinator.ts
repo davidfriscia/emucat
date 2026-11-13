@@ -1117,7 +1117,7 @@ export class ExecutionCoordinator {
          SET execution_state = ?, pid = ?, process_started_at = ?,
              started_at = COALESCE(?, started_at), ended_at = ?, exit_code = ?,
              stop_requested_at = IF(? AND stop_requested_at IS NULL, UTC_TIMESTAMP(3), stop_requested_at),
-             graceful_stop_available = ?, error_code = ?, error_message = ?
+             graceful_stop_available = ?, screenshot_available = ?, error_code = ?, error_message = ?
          WHERE id = ? AND agent_id = ?`,
         [
           payload.state,
@@ -1128,6 +1128,7 @@ export class ExecutionCoordinator {
           payload.exitCode,
           payload.stopRequested,
           payload.gracefulStopAvailable,
+          payload.screenshotAvailable ?? false,
           payload.code,
           payload.message,
           sessionId,

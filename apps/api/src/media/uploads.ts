@@ -40,6 +40,31 @@ export const DEFAULT_MEDIA_POLICY: MediaPolicy = {
  * `agent_vm_state` exists only for an agent that registered the VM or holds a copy of it, so this is
  * the existing association, and neither fact comes from the request.
  */
+export async function requireCaptureUpload(
+  executor: Pool | PoolConnection,
+  agentId: string,
+  vm: VmIdentity,
+  id: string,
+  hash: string,
+): Promise<void> {
+  // The first report or upload binds the operation to one digest. A capture is not a reusable grant
+  // to upload arbitrary content after its temporary workspace disappears.
+  await executor.execute(
+    'UPDATE qemu_captures c JOIN agents a ON a.id = c.agent_id SET c.sha256 = COALESCE(c.sha256, ?) WHERE c.id = ? AND c.agent_id = ? AND c.emulator_type = ? AND c.vm_name = ? AND a.revoked_at IS NULL AND (c.sha256 IS NULL OR c.sha256 = ?)',
+    [hash, id, agentId, vm.emulatorType, vm.vmName, hash],
+  );
+  const [rows] = await executor.execute<RowDataPacket[]>(
+    'SELECT c.id FROM qemu_captures c JOIN agents a ON a.id = c.agent_id WHERE c.id = ? AND c.agent_id = ? AND c.emulator_type = ? AND c.vm_name = ? AND a.revoked_at IS NULL AND (c.sha256 IS NULL OR c.sha256 = ?)',
+    [id, agentId, vm.emulatorType, vm.vmName, hash],
+  );
+  if (!rows[0])
+    throw new ApiError(
+      403,
+      'capture_not_assigned',
+      'This capture does not belong to this agent and VM',
+    );
+}
+
 export async function requireAgentVm(pool: Pool, agentId: string, vm: VmIdentity): Promise<void> {
   const [rows] = await pool.execute<RowDataPacket[]>(
     `SELECT state.agent_id
@@ -123,6 +148,7 @@ export interface UploadRequest {
   declaredSha256: string;
   sourcePath: string;
   capturedAt: Date | null;
+  captureId?: string;
   body: Readable;
 }
 
@@ -187,7 +213,7 @@ export async function storeUpload(
   policy: MediaPolicy,
   request: UploadRequest,
 ): Promise<UploadOutcome> {
-  const { agentId, vm, declaredSha256, sourcePath, capturedAt, body } = request;
+  const { agentId, vm, declaredSha256, sourcePath, capturedAt, body, captureId } = request;
   const staged = await storage.stagingPath('.upload');
   const stagedFull = `${staged}.full.jpg`;
   const stagedThumbnail = `${staged}.thumb.jpg`;
@@ -260,7 +286,8 @@ export async function storeUpload(
           [vm.emulatorType, vm.vmName, agentId],
         );
         // A revocation can arrive while the bytes are still on their way.
-        if (allowed.length === 0) {
+        if (captureId) await requireCaptureUpload(connection, agentId, vm, captureId, sha256);
+        if (!captureId && allowed.length === 0) {
           throw new ApiError(403, 'vm_not_assigned', 'This agent may no longer upload to this VM');
         }
         const again = await findExisting(connection, vm, sha256);

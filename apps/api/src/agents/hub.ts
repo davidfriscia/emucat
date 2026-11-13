@@ -190,6 +190,10 @@ export class AgentHub {
   private operations: AgentOperationsHandler | null = null;
   private restores: AgentRestoresHandler | null = null;
   private execution: AgentExecutionHandler | null = null;
+  private captures: import('../execution/captures.js').CaptureCoordinator | null = null;
+  setCaptures(captures: import('../execution/captures.js').CaptureCoordinator): void {
+    this.captures = captures;
+  }
   private workspaces: AgentWorkspacesHandler | null = null;
   private cleanup: AgentCleanupHandler | null = null;
   /** What each agent last said about its screenshots. Stale once it is offline, and says when it spoke. */
@@ -528,6 +532,10 @@ export class AgentHub {
       case 'agent.restore_error':
         await this.handleRestoreMessage(connection, message);
         break;
+      case 'agent.qemu_capture':
+        if (this.active.get(agentId) === connection)
+          await this.captures?.report(agentId, message.payload);
+        return;
       case 'agent.execution_sync':
       case 'agent.vm_execution_status':
       case 'agent.vm_verify_result':
@@ -682,6 +690,7 @@ export class AgentHub {
         case 'agent.execution_sync':
           connection.executionCapabilities = message.payload.capabilities;
           await execution.synced(agentId, message.payload);
+          await this.captures?.synced(agentId);
           break;
         case 'agent.vm_execution_status':
           await execution.status(agentId, message.payload);
