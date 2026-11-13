@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { versionDeletabilitySchema } from './cleanup.js';
 import { emulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
@@ -59,6 +60,19 @@ export const versionNodeSchema = z.object({
   createdByAgentName: z.string().nullable(),
   createdByDisplayName: z.string().nullable(),
   holders: z.array(versionHolderSchema),
+  /**
+   * Set while the snapshot is being deleted: it is unavailable for everything from that moment, and leaves
+   * the tree once its archive is gone (decision 0041). Deleted versions are never listed.
+   */
+  deletion: z
+    .object({
+      requestedAt: timestampSchema,
+      attempts: z.number().int().nonnegative(),
+      error: z.object({ code: z.string(), message: z.string() }).nullable(),
+    })
+    .nullable(),
+  /** Whether this version could be deleted now. Never for the master. */
+  deletable: versionDeletabilitySchema,
 });
 export type VersionNode = z.infer<typeof versionNodeSchema>;
 

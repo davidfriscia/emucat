@@ -167,4 +167,29 @@ describe('shared wire examples', () => {
     }
     expect(all.snapshotRefusedByTheAgent?.length).toBeGreaterThan(0);
   });
+
+  it('accepts each storage cleanup message in its own direction only', () => {
+    for (const example of all.cleanupServerMessages ?? []) {
+      expect(serverMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(true);
+      expect(agentMessageSchema.safeParse(example).success).toBe(false);
+    }
+    for (const example of all.cleanupAgentMessages ?? []) {
+      expect(agentMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(true);
+      expect(serverMessageSchema.safeParse(example).success).toBe(false);
+    }
+    expect(all.cleanupServerMessages?.length).toBeGreaterThan(0);
+    expect(all.cleanupAgentMessages?.length).toBeGreaterThan(0);
+  });
+
+  it('still understands the sync of an agent that can neither remove nor delete', () => {
+    const older = fixture<Record<string, unknown>>('wire-examples').cleanupOlderAgentSync;
+    expect(agentMessageSchema.safeParse(older).success).toBe(true);
+  });
+
+  it('refuses a cleanup command that carries a path, or a VM name that is not one', () => {
+    for (const example of all.cleanupRefusedByTheAgent ?? []) {
+      expect(serverMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(false);
+    }
+    expect(all.cleanupRefusedByTheAgent?.length).toBeGreaterThan(0);
+  });
 });

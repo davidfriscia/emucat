@@ -3,6 +3,7 @@ export * from './api.js';
 export * from './archive-paths.js';
 export * from './auth.js';
 export * from './catalog.js';
+export * from './cleanup.js';
 export * from './deployment.js';
 export * from './discovery.js';
 export * from './emulator.js';
