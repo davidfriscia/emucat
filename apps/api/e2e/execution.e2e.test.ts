@@ -972,7 +972,15 @@ describe('running and verifying VMs, end to end', () => {
         await signIn(page);
         await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
         const section = page.getByRole('region', { name: 'Run and verify' });
-        await section.getByRole('radio', { name: 'Remote Volatile', exact: true }).check();
+        // Each mode is a Bootstrap `btn-check` radio: the input itself is clipped to nothing and lies under
+        // its label button, so Playwright's `check()` would wait forever for the label to stop covering it.
+        // A person clicks the button they can see, the label; the radio must then be the checked one.
+        const volatileMode = section.getByRole('radio', { name: 'Remote Volatile', exact: true });
+        await section
+          .getByRole('group', { name: 'Execution mode' })
+          .getByText('Remote Volatile', { exact: true })
+          .click();
+        expect(await volatileMode.isChecked()).toBe(true);
         const versions = (await tree()).versions;
         const label = versions.find((node) => node.id === snapshotId)?.snapshotName as string;
         await section.getByLabel('Version').selectOption({ value: snapshotId });
