@@ -477,13 +477,144 @@ export const registrationOperationSchema = z.object({
   updatedAt: timestampSchema,
   committedAt: timestampSchema.nullable(),
   finishedAt: timestampSchema.nullable(),
+  /**
+   * When an administrator confirmed that a partial success needs nothing more from EmuCat, for example
+   * after dealing with a kept local copy by hand. Only ever set on a `partial_success`.
+   */
+  acknowledgedAt: timestampSchema.nullable().default(null),
+  acknowledgedByDisplayName: z.string().nullable().default(null),
+  /**
+   * The display name of a snapshot's parent, or `null` when the parent is the master (or there is no
+   * parent, for a master registration).
+   */
+  parentSnapshotName: z.string().nullable().default(null),
+  /**
+   * Set when the version this operation created has since been deleted by storage cleanup (decision
+   * 0041). The operation stays as history; only the version is gone, or going.
+   */
+  versionDeletion: z.enum(['deleting', 'deleted']).nullable().default(null),
 });
 export type RegistrationOperation = z.infer<typeof registrationOperationSchema>;
 
+/** What a registration produces: a master for Copy and Transfer, a snapshot otherwise. */
+export function registrationVersionKind(mode: RegistrationMode): 'master' | 'snapshot' {
+  return mode === 'snapshot' ? 'snapshot' : 'master';
+}
+
+/**
+ * Whether an operation still needs an administrator to see it: it is running, or it ended with the
+ * version committed but the local copy left in a state that someone has to deal with (a partial
+ * success), and nobody has acknowledged that yet. A failure or cancellation never needs attention: it
+ * committed nothing, and the agent kept the local VM unchanged. The server's `attention_marker` column
+ * (migration 0013) is the same rule.
+ */
+export function registrationNeedsAttention(
+  operation: Pick<RegistrationOperation, 'state' | 'acknowledgedAt'>,
+): boolean {
+  if (!isRegistrationTerminal(operation.state)) return true;
+  return operation.state === 'partial_success' && operation.acknowledgedAt === null;
+}
+
+// Listing.
+
+/**
+ * `attention`: every operation for which `registrationNeedsAttention` holds. `history`: every
+ * operation that has ended, including acknowledged and unacknowledged partial successes. `all`: both.
+ */
+export const REGISTRATION_LIST_VIEWS = ['all', 'attention', 'history'] as const;
+export const registrationListViewSchema = z.enum(REGISTRATION_LIST_VIEWS);
+export type RegistrationListView = z.infer<typeof registrationListViewSchema>;
+
+export const REGISTRATION_LIST_LIMIT_MAX = 100;
+export const REGISTRATION_LIST_SEARCH_MAX_LENGTH = 64;
+
+/** Where a page of a listing ends: the last operation's creation time and ID, newest first. */
+export interface RegistrationCursor {
+  createdAt: string;
+  id: string;
+}
+
+const cursorContentSchema = z.tuple([timestampSchema, z.uuid()]);
+
+function toBase64Url(text: string): string {
+  return btoa(text).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+
+function fromBase64Url(text: string): string {
+  const base64 = text.replaceAll('-', '+').replaceAll('_', '/');
+  return atob(base64 + '='.repeat((4 - (base64.length % 4)) % 4));
+}
+
+/** Opaque to clients, which only ever pass back what a response gave them. */
+export function encodeRegistrationCursor(cursor: RegistrationCursor): string {
+  return toBase64Url(JSON.stringify([cursor.createdAt, cursor.id]));
+}
+
+/** `null` for anything that is not a cursor this API issued. */
+export function decodeRegistrationCursor(text: string): RegistrationCursor | null {
+  try {
+    const parsed = cursorContentSchema.safeParse(JSON.parse(fromBase64Url(text)));
+    return parsed.success ? { createdAt: parsed.data[0], id: parsed.data[1] } : null;
+  } catch {
+    return null;
+  }
+}
+
+export const registrationCursorSchema = z
+  .string()
+  .max(200)
+  .regex(/^[A-Za-z0-9_-]+$/)
+  .transform((text, context) => {
+    const cursor = decodeRegistrationCursor(text);
+    if (!cursor) {
+      context.addIssue({ code: 'custom', message: 'Not a valid cursor' });
+      return z.NEVER;
+    }
+    return cursor;
+  });
+
+/** A comma-separated list, as `state=failed,cancelled`. */
+const stateListSchema = z
+  .string()
+  .max(200)
+  .transform((text) => text.split(','))
+  .pipe(z.array(registrationStateSchema).min(1).max(REGISTRATION_STATES.length));
+
+export const registrationListQuerySchema = z
+  .strictObject({
+    view: registrationListViewSchema.default('all'),
+    agentId: z.uuid().optional(),
+    emulatorType: emulatorTypeSchema.optional(),
+    /** One VM exactly, as its identity: names are case-insensitive. */
+    vmName: vmNameSchema.optional(),
+    /** Part of a VM name, case-insensitive. */
+    q: z.string().trim().min(1).max(REGISTRATION_LIST_SEARCH_MAX_LENGTH).optional(),
+    mode: registrationModeSchema.optional(),
+    state: stateListSchema.optional(),
+    /** Created at or after this instant. */
+    createdFrom: timestampSchema.optional(),
+    /** Created strictly before this instant. */
+    createdBefore: timestampSchema.optional(),
+    cursor: registrationCursorSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(REGISTRATION_LIST_LIMIT_MAX).default(100),
+  })
+  .refine(
+    (query) =>
+      !query.createdFrom ||
+      !query.createdBefore ||
+      Date.parse(query.createdFrom) < Date.parse(query.createdBefore),
+    { message: 'The date range is empty', path: ['createdBefore'] },
+  );
+export type RegistrationListQuery = z.output<typeof registrationListQuerySchema>;
+
 export const registrationListResponseSchema = z.object({
+  /** Newest first, by creation time and then by ID. */
   operations: z.array(registrationOperationSchema),
+  /** Pass as `cursor` for the next, older page. `null` on the last page. */
+  nextCursor: z.string().nullable().default(null),
+  /** For the `attention` view only: how many operations match in all, so none is silently hidden. */
+  total: z.number().int().nonnegative().optional(),
 });
 export type RegistrationListResponse = z.infer<typeof registrationListResponseSchema>;
 
 export const registrationPathParamsSchema = z.object({ operationId: z.uuid() });
-export const registrationListQuerySchema = z.object({ agentId: z.uuid().optional() });

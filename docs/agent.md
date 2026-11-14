@@ -166,7 +166,9 @@ are not candidates and are not mentioned.
 ## Registering VMs
 
 First [set up a repository](repositories.md). Then, on the agent's page, run discovery and choose **Copy to remote** or **Transfer to
-remote**. **Stop the VM first.** The agent builds the archive in `storage.staging_dir`, uploads it directly to the repository, reads it
+remote** on a VM under _not registered yet_. VMs already in the catalog are behind **Show N already registered VMs**, each with a
+link to its catalog page; snapshots of those are made from there. A report expires after 15 minutes, or when the agent reconnects,
+and then offers nothing until discovery runs again. **Stop the VM first.** The agent builds the archive in `storage.staging_dir`, uploads it directly to the repository, reads it
 back and hashes it, and publishes it so that it can never be overwritten. The server then records one private master. Nothing
 passes through the server, and a registration carries on while the server is away.
 
@@ -191,6 +193,11 @@ QEMU. A symlink, junction or other reparse point inside a VM fails the archive, 
 Restart whichever side stopped. An unfinished registration fails with `agent_restarted`, and you can start again. A published one
 continues, and is committed once the server is back. Nothing is deleted by a restart alone. Local journals are in `registrations` in the
 state directory, and hold no secrets and no VM contents.
+
+**Where to follow it:** a running registration, and one that ended with a problem on the agent, are under _Needs attention_ on the
+agent's page, with their actions. A partial success stays there until it is retried or you choose **Acknowledge** once you have dealt
+with it. Everything that ended is under _Recent registrations_, and the complete history, with filters, is on the **Registrations**
+page.
 
 ## Restoring VMs
 

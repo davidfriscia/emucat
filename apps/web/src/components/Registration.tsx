@@ -1,7 +1,10 @@
 import {
+  adminVmRoute,
   isRegistrationCommitted,
   isRetryableCleanup,
   isRegistrationTerminal,
+  registrationNeedsAttention,
+  registrationVersionKind,
   type LocalCopyStatus,
   type RegistrationMode,
   type RegistrationOperation,
@@ -11,12 +14,14 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import {
+  acknowledgeRegistration,
   cancelRegistration,
   reconcileRegistration,
   retryRegistrationCleanup,
   startRegistration,
 } from '../api';
 import { formatBytes, formatTime } from './Agents';
+import { InfoDialog } from './Dialogs';
 import { FormError } from './States';
 
 const EMULATOR_NAMES = { '86box': '86Box', qemu: 'QEMU' } as const;
@@ -35,6 +40,27 @@ const STATE_TEXT: Record<RegistrationState, string> = {
   partial_success: 'Registered, with a problem',
 };
 
+/** What a state means for this operation: a snapshot is created, a master is registered. */
+export function registrationStateText(operation: Pick<RegistrationOperation, 'mode' | 'state'>) {
+  if (operation.mode === 'snapshot' && operation.state === 'succeeded') return 'Snapshot created';
+  return STATE_TEXT[operation.state];
+}
+
+export const REGISTRATION_MODE_TEXT: Record<RegistrationMode, string> = {
+  copy: 'Copy',
+  transfer: 'Transfer',
+  snapshot: 'Snapshot',
+};
+
+/** How a version reads to a person: the master, or the snapshot's own name. */
+export function registrationVersionLabel(
+  operation: Pick<RegistrationOperation, 'mode' | 'snapshotName'>,
+): string {
+  return registrationVersionKind(operation.mode) === 'master'
+    ? 'Master'
+    : (operation.snapshotName ?? 'Snapshot');
+}
+
 const LOCAL_COPY_TEXT: Record<LocalCopyStatus, string> = {
   preserved: 'Kept on the agent, unchanged',
   removed: 'Removed from the agent',
@@ -42,7 +68,7 @@ const LOCAL_COPY_TEXT: Record<LocalCopyStatus, string> = {
   unknown: 'Unknown: the agent did not say',
 };
 
-function stateBadge(state: RegistrationState): string {
+export function stateBadge(state: RegistrationState): string {
   switch (state) {
     case 'succeeded':
       return 'text-bg-success';
@@ -87,21 +113,69 @@ function RegistrationProgress({ operation }: { operation: RegistrationOperation 
   );
 }
 
+/**
+ * The version an operation created, linked to its place in the VM's version history while it exists. A
+ * version deleted since by storage cleanup is history, not an error: it is said so, and not linked.
+ */
+function VersionReference({ operation }: { operation: RegistrationOperation }) {
+  const deletion = operation.versionDeletion;
+  return (
+    <>
+      {deletion ? (
+        <span className="text-break">{operation.versionId}</span>
+      ) : (
+        <Link
+          className="text-break"
+          to={`${adminVmRoute(operation)}#version-${operation.versionId}`}
+        >
+          {operation.versionId}
+        </Link>
+      )}{' '}
+      {deletion === 'deleted' ? (
+        <span className="badge text-bg-secondary">Deleted since</span>
+      ) : deletion === 'deleting' ? (
+        <span className="badge text-bg-warning">Being deleted</span>
+      ) : null}
+    </>
+  );
+}
+
 function Completion({ operation }: { operation: RegistrationOperation }) {
   const { archive } = operation;
+  const snapshot = registrationVersionKind(operation.mode) === 'snapshot';
   return (
     <dl className="settings-facts small mb-2">
-      <dt>Registered VM</dt>
+      <dt>{snapshot ? 'VM' : 'Registered VM'}</dt>
       <dd>
-        <Link
-          to={`/admin/vms/${encodeURIComponent(operation.emulatorType)}/${encodeURIComponent(operation.vmName)}`}
-        >
-          {operation.vmName}
-        </Link>{' '}
-        <span className="badge text-bg-dark border">Private</span>
+        <Link to={adminVmRoute(operation)}>{operation.vmName}</Link>{' '}
+        {snapshot ? null : <span className="badge text-bg-dark border">Private</span>}
       </dd>
-      <dt>Master version</dt>
-      <dd className="text-break">{operation.versionId}</dd>
+      {snapshot ? (
+        <>
+          <dt>Snapshot</dt>
+          <dd className="text-break">{operation.snapshotName ?? 'Unnamed'}</dd>
+          <dt>Snapshot version</dt>
+          <dd>
+            <VersionReference operation={operation} />
+          </dd>
+          {operation.parentVersionId ? (
+            <>
+              <dt>Parent version</dt>
+              <dd className="text-break">
+                {operation.parentSnapshotName ?? 'Master'}{' '}
+                <span className="text-body-secondary">({operation.parentVersionId})</span>
+              </dd>
+            </>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <dt>Master version</dt>
+          <dd>
+            <VersionReference operation={operation} />
+          </dd>
+        </>
+      )}
       <dt>Repository</dt>
       <dd>{operation.repositoryName}</dd>
       {archive ? (
@@ -156,17 +230,13 @@ export function RegistrationCard({
         <h3 className="h6 card-title media-filename">{operation.vmName}</h3>
         <div className="d-flex flex-wrap gap-1 mb-2">
           <span className={`badge ${stateBadge(operation.state)}`}>
-            {STATE_TEXT[operation.state]}
+            {registrationStateText(operation)}
           </span>
           <span className="badge text-bg-dark border">
             {EMULATOR_NAMES[operation.emulatorType]}
           </span>
           <span className="badge text-bg-dark border">
-            {operation.mode === 'transfer'
-              ? 'Transfer'
-              : operation.mode === 'snapshot'
-                ? 'Snapshot'
-                : 'Copy'}
+            {REGISTRATION_MODE_TEXT[operation.mode]}
           </span>
         </div>
         {terminal ? null : <RegistrationProgress operation={operation} />}
@@ -201,9 +271,24 @@ export function RegistrationCard({
         {committed ? <Completion operation={operation} /> : null}
         {operation.state === 'failed' || operation.state === 'cancelled' ? (
           <p className="small text-body-secondary mb-2">
-            No master was created
+            No {registrationVersionKind(operation.mode)} was created
             {operation.localCopy === 'preserved' ? ', and the local VM is unchanged' : ''}.
           </p>
+        ) : null}
+        {operation.state === 'partial_success' ? (
+          operation.acknowledgedAt ? (
+            <p className="small text-body-secondary mb-2">
+              Acknowledged {formatTime(operation.acknowledgedAt)}
+              {operation.acknowledgedByDisplayName
+                ? ` by ${operation.acknowledgedByDisplayName}`
+                : ''}
+              . Nothing more is expected from EmuCat.
+            </p>
+          ) : (
+            <p className="small text-body-secondary mb-2">
+              Once you have dealt with this yourself, acknowledge it to move it to the history.
+            </p>
+          )
         ) : null}
         <p className="small text-body-secondary mb-2">
           Started {formatTime(operation.createdAt)}
@@ -231,6 +316,16 @@ export function RegistrationCard({
               Retry removal
             </button>
           ) : null}
+          {operation.state === 'partial_success' && !operation.acknowledgedAt ? (
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-secondary theme-button"
+              disabled={busy}
+              onClick={() => void act(acknowledgeRegistration)}
+            >
+              Acknowledge
+            </button>
+          ) : null}
           {operation.state === 'committing' ? (
             <button
               type="button"
@@ -244,6 +339,125 @@ export function RegistrationCard({
         </div>
       </div>
     </article>
+  );
+}
+
+/**
+ * Ended operations as one compact row each, newest first. Each opens the full card in a dialog: the
+ * error, what to do about it, and any action still possible.
+ */
+export function RegistrationHistoryTable({
+  operations,
+  showAgent = false,
+  caption,
+  onChanged,
+}: {
+  operations: RegistrationOperation[];
+  showAgent?: boolean;
+  caption: string;
+  onChanged: () => void;
+}) {
+  const [details, setDetails] = useState<string | null>(null);
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const shown = operations.find((operation) => operation.id === details) ?? null;
+  const close = () => {
+    setDetails(null);
+    opener.current?.focus();
+  };
+  return (
+    <>
+      <div className="table-responsive">
+        <table className="table table-sm small align-middle mb-0 registration-history">
+          <caption className="visually-hidden">{caption}</caption>
+          <thead>
+            <tr>
+              <th scope="col">Date</th>
+              <th scope="col">VM</th>
+              {showAgent ? (
+                <th scope="col" className="d-none d-sm-table-cell">
+                  Agent
+                </th>
+              ) : null}
+              <th scope="col">Mode</th>
+              <th scope="col">Status</th>
+              <th scope="col">Version</th>
+              <th scope="col">
+                <span className="visually-hidden">Details</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {operations.map((operation) => {
+              const committed = isRegistrationCommitted(operation.state);
+              return (
+                <tr key={operation.id}>
+                  <td>{formatTime(operation.createdAt)}</td>
+                  <td className="text-nowrap">
+                    {committed || operation.mode === 'snapshot' ? (
+                      <Link className="vm-identity" to={adminVmRoute(operation)}>
+                        {operation.vmName}
+                      </Link>
+                    ) : (
+                      <span className="vm-identity">{operation.vmName}</span>
+                    )}{' '}
+                    <span className="badge text-bg-dark border">
+                      {EMULATOR_NAMES[operation.emulatorType]}
+                    </span>
+                  </td>
+                  {showAgent ? (
+                    <td className="d-none d-sm-table-cell">{operation.agentName}</td>
+                  ) : null}
+                  <td>{REGISTRATION_MODE_TEXT[operation.mode]}</td>
+                  <td>
+                    <span className={`badge ${stateBadge(operation.state)}`}>
+                      {registrationStateText(operation)}
+                    </span>
+                    {registrationNeedsAttention(operation) &&
+                    isRegistrationTerminal(operation.state) ? (
+                      <span className="badge text-bg-warning ms-1">Needs attention</span>
+                    ) : null}
+                  </td>
+                  <td>
+                    {committed ? (
+                      <>
+                        {registrationVersionLabel(operation)}
+                        {operation.versionDeletion ? (
+                          <span className="badge text-bg-secondary ms-1">
+                            {operation.versionDeletion === 'deleted'
+                              ? 'Deleted since'
+                              : 'Being deleted'}
+                          </span>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-body-secondary">None</span>
+                    )}
+                  </td>
+                  <td className="text-end">
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-secondary theme-button"
+                      aria-label={`Details of the ${REGISTRATION_MODE_TEXT[operation.mode].toLowerCase()} of ${operation.vmName}, ${formatTime(operation.createdAt)}`}
+                      onClick={(event) => {
+                        opener.current = event.currentTarget;
+                        setDetails(operation.id);
+                      }}
+                    >
+                      Details
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {shown ? (
+        <InfoDialog title="Registration details" onClose={close}>
+          <RegistrationCard operation={shown} onChanged={onChanged} />
+        </InfoDialog>
+      ) : null}
+    </>
   );
 }
 

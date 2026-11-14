@@ -40,6 +40,7 @@ import {
 } from '../auth/guards.js';
 import type { RateLimitKey } from '../auth/rate-limiter.js';
 import { ApiError } from '../errors.js';
+import { DEFAULT_REGISTRATION_POLICY } from '../registration/coordinator.js';
 import { enforceRateLimit } from './agent-pairing.js';
 import type { BrowserDependencies } from './browser.js';
 
@@ -51,7 +52,16 @@ const pairingExpired = () =>
 const alreadyDecided = () =>
   new ApiError(409, 'pairing_already_decided', 'This pairing request was already decided.');
 
-async function toOperation(pool: Pool, record: DiscoveryRecord): Promise<DiscoveryOperation> {
+/**
+ * A discovery as an administrator sees it. Catalog membership, expiry and whether the report still
+ * belongs to the agent's connection are all worked out now, from the same rules a registration is
+ * checked against, so the page never offers a registration the server would refuse as stale.
+ */
+async function toOperation(
+  pool: Pool,
+  record: DiscoveryRecord,
+  freshness: { maxAgeMs: number; activeConnectionId: string | null },
+): Promise<DiscoveryOperation> {
   const registered = await registeredVmKeys(pool, record.vms);
   return {
     id: record.id,
@@ -64,6 +74,11 @@ async function toOperation(pool: Pool, record: DiscoveryRecord): Promise<Discove
     emulators: record.emulators,
     vms: record.vms.map((vm) => ({ ...vm, registered: registered.has(vmIdentityKey(vm)) })),
     skipped: record.skipped,
+    expiresAt:
+      record.status === 'completed' && record.finishedAt
+        ? new Date(record.finishedAt.getTime() + freshness.maxAgeMs).toISOString()
+        : null,
+    fromCurrentConnection: record.connectionId === freshness.activeConnectionId,
   };
 }
 
@@ -92,6 +107,12 @@ export function registerAdminAgentRoutes(
 ): void {
   const { pool, limiter, pairing, pairingRateLimits, session, cookie, publicOrigin } = dependencies;
   const isOnline = (agentId: string) => hub.isOnline(agentId);
+  const maxAgeMs = (dependencies.registrationPolicy ?? DEFAULT_REGISTRATION_POLICY)
+    .discoveryMaxAgeMs;
+  const freshness = (agentId: string) => ({
+    maxAgeMs,
+    activeConnectionId: hub.activeConnectionId(agentId),
+  });
 
   /** Counts one try at a code. A correct one is given back, so only wrong guesses use up the limit. */
   const codeAttemptKeys = (request: FastifyRequest): RateLimitKey[] => [
@@ -147,7 +168,7 @@ export function registerAdminAgentRoutes(
           const agent = await getAgent(pool, agentId, isOnline);
           if (!agent) throw agentNotFound();
           const record = hub.discovery.get(agentId);
-          return { operation: record ? await toOperation(pool, record) : null };
+          return { operation: record ? await toOperation(pool, record, freshness(agentId)) : null };
         },
       );
 
@@ -164,7 +185,7 @@ export function registerAdminAgentRoutes(
           const record = hub.startDiscovery(agentId);
           if (!record) throw new ApiError(409, 'agent_offline', 'This agent is offline.');
           reply.status(202);
-          return toOperation(pool, record);
+          return toOperation(pool, record, freshness(agentId));
         },
       );
 

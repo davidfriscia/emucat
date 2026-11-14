@@ -95,6 +95,8 @@ function operation(overrides: Partial<DiscoveryOperation> = {}): DiscoveryOperat
       { emulatorType: 'qemu', name: 'bad.', reason: 'invalid_name', nameError: 'invalid_boundary' },
       { emulatorType: '86box', name: 'Linked', reason: 'reparse_point', nameError: null },
     ],
+    expiresAt: null,
+    fromCurrentConnection: true,
     ...overrides,
   };
 }
@@ -507,7 +509,19 @@ describe('discovery', () => {
     expect(within(box).getByText('Not registered')).toBeTruthy();
     expect(within(box).queryByText(/launch script/)).toBeNull();
 
+    // Unregistered VMs come first; the registered ones wait behind a toggle, still reachable.
+    expect(screen.getByRole('heading', { name: '2 VMs not registered yet' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Win98' })).toBeNull();
+    const toggle = screen.getByRole('button', { name: 'Show 1 already registered VM' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
     const registered = articleOf(screen.getByRole('heading', { name: 'Win98' }));
+    expect(
+      within(registered)
+        .getByRole('link', { name: 'Open Win98 in the catalog' })
+        .getAttribute('href'),
+    ).toBe('/admin/vms/qemu/Win98');
     expect(within(registered).getByText('QEMU')).toBeTruthy();
     expect(within(registered).getByText('Already registered')).toBeTruthy();
     expect(within(registered).getByText('Has a launcher for this host')).toBeTruthy();

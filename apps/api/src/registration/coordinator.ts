@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   SNAPSHOT_INELIGIBLE_TEXT,
   archiveObjectKey,
+  encodeRegistrationCursor,
   formatSnapshotName,
   isRegistrationCommitted,
   isRegistrationTerminal,
@@ -11,6 +12,8 @@ import {
   type RegistrationAckPayload,
   type RegistrationCleanupPayload,
   type RegistrationErrorPayload,
+  type RegistrationListQuery,
+  type RegistrationListResponse,
   type RegistrationOperation,
   type RegistrationProgressPayload,
   type RegistrationRequestPayload,
@@ -84,6 +87,10 @@ interface OperationRow extends RowDataPacket {
   cancel_requested_at: Date | null;
   committed_at: Date | null;
   finished_at: Date | null;
+  acknowledged_at: Date | null;
+  acknowledged_by_display_name: string | null;
+  parent_snapshot_name: string | null;
+  version_deletion: 'deleting' | 'deleted' | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -98,11 +105,16 @@ const OPERATION_QUERY = `
          op.archive_size_bytes, op.archive_sha256, op.manifest_version, op.manifest_sha256,
          op.file_count, op.total_uncompressed_bytes, op.local_copy,
          op.error_code, op.error_message, op.cancel_requested_at,
-         op.committed_at, op.finished_at, op.created_at, op.updated_at
+         op.committed_at, op.finished_at, op.created_at, op.updated_at,
+         op.acknowledged_at, ack.display_name AS acknowledged_by_display_name,
+         parent.snapshot_name AS parent_snapshot_name, deletion.state AS version_deletion
   FROM registration_operations AS op
   JOIN agents AS a ON a.id = op.agent_id
   JOIN repositories AS r ON r.id = op.repository_id
-  LEFT JOIN users AS u ON u.id = op.requested_by_user_id`;
+  LEFT JOIN users AS u ON u.id = op.requested_by_user_id
+  LEFT JOIN users AS ack ON ack.id = op.acknowledged_by_user_id
+  LEFT JOIN vm_versions AS parent ON parent.id = op.parent_version_id
+  LEFT JOIN vm_version_deletions AS deletion ON deletion.version_id = op.version_id`;
 
 const ACTIVE_STATES = [
   'queued',
@@ -172,6 +184,10 @@ function toOperation(row: OperationRow, online: boolean): RegistrationOperation 
     updatedAt: row.updated_at.toISOString(),
     committedAt: row.committed_at?.toISOString() ?? null,
     finishedAt: row.finished_at?.toISOString() ?? null,
+    acknowledgedAt: row.acknowledged_at?.toISOString() ?? null,
+    acknowledgedByDisplayName: row.acknowledged_by_display_name,
+    parentSnapshotName: row.parent_snapshot_name,
+    versionDeletion: row.version_deletion,
   };
 }
 
@@ -610,16 +626,105 @@ export class RegistrationCoordinator {
     return operation;
   }
 
-  async list(agentId?: string): Promise<RegistrationOperation[]> {
-    const [rows] = agentId
-      ? await this.pool.execute<OperationRow[]>(
-          `${OPERATION_QUERY} WHERE op.agent_id = ? ORDER BY op.created_at DESC LIMIT 100`,
-          [agentId],
-        )
-      : await this.pool.execute<OperationRow[]>(
-          `${OPERATION_QUERY} ORDER BY op.created_at DESC LIMIT 100`,
-        );
-    return rows.map((row) => toOperation(row, this.link.isOnline(row.agent_id)));
+  /**
+   * A page of operations, newest first by creation time and then by ID, so that a cursor names one
+   * exact place in the order: rows created while someone pages through are newer, and never shift a
+   * later page. The attention view also says how many match in all, so nothing that needs an
+   * administrator is hidden by the page size.
+   */
+  async list(query: RegistrationListQuery): Promise<RegistrationListResponse> {
+    const conditions: string[] = [];
+    const parameters: (string | Date)[] = [];
+    if (query.view === 'attention') conditions.push('op.attention_marker = 1');
+    if (query.view === 'history') conditions.push('op.active_marker IS NULL');
+    if (query.agentId) {
+      conditions.push('op.agent_id = ?');
+      parameters.push(query.agentId);
+    }
+    if (query.emulatorType) {
+      conditions.push('op.emulator_type = ?');
+      parameters.push(query.emulatorType);
+    }
+    if (query.vmName) {
+      conditions.push('op.vm_name = ?');
+      parameters.push(query.vmName);
+    }
+    if (query.q) {
+      conditions.push("op.vm_name LIKE ? ESCAPE '\\\\'");
+      parameters.push(`%${query.q.replace(/[\\%_]/g, (character) => `\\${character}`)}%`);
+    }
+    if (query.mode) {
+      conditions.push('op.mode = ?');
+      parameters.push(query.mode);
+    }
+    if (query.state) {
+      conditions.push(`op.state IN (${query.state.map(() => '?').join(', ')})`);
+      parameters.push(...query.state);
+    }
+    if (query.createdFrom) {
+      conditions.push('op.created_at >= ?');
+      parameters.push(new Date(query.createdFrom));
+    }
+    if (query.createdBefore) {
+      conditions.push('op.created_at < ?');
+      parameters.push(new Date(query.createdBefore));
+    }
+    const filters = [...conditions];
+    const filterParameters = [...parameters];
+    if (query.cursor) {
+      const after = new Date(query.cursor.createdAt);
+      conditions.push('(op.created_at < ? OR (op.created_at = ? AND op.id < ?))');
+      parameters.push(after, after, query.cursor.id);
+    }
+    const where = (list: string[]) => (list.length > 0 ? `WHERE ${list.join(' AND ')}` : '');
+
+    // One more than asked, to know whether there is a next page without counting.
+    const [rows] = await this.pool.query<OperationRow[]>(
+      `${OPERATION_QUERY} ${where(conditions)}
+       ORDER BY op.created_at DESC, op.id DESC LIMIT ${query.limit + 1}`,
+      parameters,
+    );
+    const page = rows.slice(0, query.limit);
+    const last = page.at(-1);
+    const nextCursor =
+      rows.length > query.limit && last
+        ? encodeRegistrationCursor({ createdAt: last.created_at.toISOString(), id: last.id })
+        : null;
+    const response: RegistrationListResponse = {
+      operations: page.map((row) => toOperation(row, this.link.isOnline(row.agent_id))),
+      nextCursor,
+    };
+    if (query.view === 'attention') {
+      const [counted] = await this.pool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS total FROM registration_operations AS op ${where(filters)}`,
+        filterParameters,
+      );
+      response.total = Number(counted[0]?.total ?? 0);
+    }
+    return response;
+  }
+
+  /**
+   * Records that an administrator has dealt with a partial success, so that it leaves the operations
+   * needing attention and stays only in the history. Nothing else changes: the version, the local copy
+   * and what the agent knows are exactly as they were. Repeating it changes nothing either.
+   */
+  async acknowledge(operationId: string, userId: string): Promise<RegistrationOperation> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE registration_operations
+       SET acknowledged_at = UTC_TIMESTAMP(3), acknowledged_by_user_id = ?
+       WHERE id = ? AND state = 'partial_success' AND acknowledged_at IS NULL`,
+      [userId, operationId],
+    );
+    const operation = await this.require(operationId);
+    if (result.affectedRows === 0 && operation.acknowledgedAt === null) {
+      throw new ApiError(
+        409,
+        'registration_not_acknowledgeable',
+        'Only a registration that ended with a problem on the agent can be acknowledged.',
+      );
+    }
+    return operation;
   }
 
   /**
@@ -727,7 +832,8 @@ export class RegistrationCoordinator {
       const [result] = await this.pool.execute<ResultSetHeader>(
         `UPDATE registration_operations
          SET state = 'cleaning_local', local_copy = NULL, error_code = NULL, error_message = NULL,
-             finished_at = NULL, progress_done_bytes = NULL, progress_total_bytes = NULL
+             finished_at = NULL, progress_done_bytes = NULL, progress_total_bytes = NULL,
+             acknowledged_at = NULL, acknowledged_by_user_id = NULL
          WHERE id = ? AND state = 'partial_success'
            AND error_code IN ('transfer_blocked_media', 'transfer_blocked_running')`,
         [operationId],

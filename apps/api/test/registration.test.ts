@@ -635,6 +635,16 @@ describe('what cannot be registered', () => {
     const w = { context, admin, agent, paired, repository };
 
     const old = await discover(admin, agent, paired.agentId, [WIN98]);
+    const report = async () =>
+      discoveryOperationSchema.parse(
+        (await admin.get(`/admin/agents/${paired.agentId}/discovery`)).json<{
+          operation: unknown;
+        }>().operation,
+      );
+    // The page is told the same limits the server checks, so it never offers a stale registration.
+    const reported = await report();
+    expect(reported.fromCurrentConnection).toBe(true);
+    expect(Date.parse(reported.expiresAt ?? '') - Date.parse(reported.finishedAt ?? '')).toBe(300);
     await new Promise((resolve) => setTimeout(resolve, 350));
     expect((await registerRequest(w, old)).json<{ error: { code: string } }>().error.code).toBe(
       'discovery_stale',
@@ -643,6 +653,7 @@ describe('what cannot be registered', () => {
     const fresh = await discover(admin, agent, paired.agentId, [WIN98]);
     const replacement = await connectAgent(context.app, paired.credential);
     await agent.closed();
+    expect((await report()).fromCurrentConnection).toBe(false);
     expect(
       (await registerRequest({ ...w, agent: replacement }, fresh)).json<{
         error: { code: string };

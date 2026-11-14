@@ -1,4 +1,5 @@
 import {
+  adminVmRoute,
   isRegistrationCommitted,
   isRegistrationTerminal,
   type AgentSummary,
@@ -8,11 +9,11 @@ import {
   type DiscoverySkipped,
   type DiscoveryListedVm,
   type EmulatorType,
+  type RegistrationListResponse,
   type RegistrationMode,
-  type RegistrationOperation,
   type RepositorySummary,
 } from '@emucat/contracts';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import {
   ApiRequestError,
@@ -32,6 +33,7 @@ import {
 import {
   RegistrationCard,
   RegistrationDialog,
+  RegistrationHistoryTable,
   type RegistrationTarget,
 } from '../../components/Registration';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
@@ -43,6 +45,11 @@ const AGENT_REFRESH_MS = 5_000;
 const RUNNING_REFRESH_MS = 1_000;
 const REGISTRATION_ACTIVE_REFRESH_MS = 1_500;
 const REGISTRATION_IDLE_REFRESH_MS = 10_000;
+const RECENT_REFRESH_MS = 30_000;
+/** Cheap, and catches catalog changes made elsewhere, such as another agent registering the VM. */
+const DISCOVERY_IDLE_REFRESH_MS = 15_000;
+const ATTENTION_LIMIT = 5;
+const RECENT_LIMIT = 8;
 
 const EMULATOR_NAMES: Record<EmulatorType, string> = { '86box': '86Box', qemu: 'QEMU' };
 
@@ -87,18 +94,23 @@ function HostCompatibility({ vm }: { vm: DiscoveryListedVm }) {
 interface VmActions {
   /** Why nothing can be started right now, or null if it can. */
   blocked: string | null;
+  /** The report may no longer describe the disk, so nothing is offered from it. */
+  stale: boolean;
   running: ReadonlySet<string>;
-  /** Registered since this report was made. The report itself says nothing about that. */
+  /** Committed since this report was read, and not yet reflected in it. */
   registered: ReadonlySet<string>;
   onChoose: (vm: DiscoveryListedVm, mode: Exclude<RegistrationMode, 'snapshot'>) => void;
 }
 
 const vmKey = (emulatorType: string, vmName: string) => `${emulatorType}/${vmName.toLowerCase()}`;
 
+const isRegistered = (vm: DiscoveryListedVm, actions: VmActions) =>
+  vm.registered || actions.registered.has(vmKey(vm.emulatorType, vm.vmName));
+
 function DiscoveredVmCard({ vm, actions }: { vm: DiscoveryListedVm; actions: VmActions }) {
   const key = vmKey(vm.emulatorType, vm.vmName);
   const running = actions.running.has(key);
-  const registered = vm.registered || actions.registered.has(key);
+  const registered = isRegistered(vm, actions);
   const title = actions.blocked ?? undefined;
   return (
     <article className="card h-100">
@@ -118,7 +130,13 @@ function DiscoveredVmCard({ vm, actions }: { vm: DiscoveryListedVm; actions: VmA
         <p className="small text-body-secondary media-filename">
           Launchers: {vm.markers.join(', ')}
         </p>
-        {registered || running ? null : (
+        {registered ? (
+          <div className="mt-auto">
+            <Link className="small" to={adminVmRoute(vm)}>
+              Open {vm.vmName} in the catalog
+            </Link>
+          </div>
+        ) : running || actions.stale ? null : (
           <div className="mt-auto d-flex flex-wrap gap-2">
             <button
               type="button"
@@ -166,6 +184,34 @@ function SkippedList({ skipped }: { skipped: DiscoverySkipped[] }) {
   );
 }
 
+/** Catalog identity is global: another agent's registration of the same VM counts here too. */
+function RegisteredGroup({ vms, actions }: { vms: DiscoveryListedVm[]; actions: VmActions }) {
+  const [open, setOpen] = useState(false);
+  if (vms.length === 0) return null;
+  const label =
+    vms.length === 1 ? 'Show 1 already registered VM' : `Show ${vms.length} already registered VMs`;
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        className="btn btn-sm btn-link px-0"
+        aria-expanded={open}
+        aria-controls="registered-vms"
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? 'Hide the already registered VMs' : label}
+      </button>
+      {open ? (
+        <div id="registered-vms" className="media-grid mt-2">
+          {vms.map((vm) => (
+            <DiscoveredVmCard key={`${vm.emulatorType}/${vm.vmName}`} vm={vm} actions={actions} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function DiscoveryResults({
   operation,
   actions,
@@ -174,6 +220,8 @@ function DiscoveryResults({
   actions: VmActions;
 }) {
   const truncated = operation.emulators.some((emulator) => emulator.truncated);
+  const unregistered = operation.vms.filter((vm) => !isRegistered(vm, actions));
+  const registered = operation.vms.filter((vm) => isRegistered(vm, actions));
   return (
     <>
       <div className="alert alert-secondary small" role="note">
@@ -199,13 +247,26 @@ function DiscoveryResults({
           The agent looked directly inside its configured directories and found no directory with a
           marker file.
         </EmptyState>
+      ) : unregistered.length === 0 ? (
+        <EmptyState title="Every VM found is already registered">
+          All the virtual machines this agent reported are in the catalog. Snapshots of a registered
+          VM are made from its page in the catalog.
+        </EmptyState>
       ) : (
-        <div className="media-grid">
-          {operation.vms.map((vm) => (
-            <DiscoveredVmCard key={`${vm.emulatorType}/${vm.vmName}`} vm={vm} actions={actions} />
-          ))}
-        </div>
+        <>
+          <h3 className="h6">
+            {unregistered.length === 1
+              ? '1 VM not registered yet'
+              : `${unregistered.length} VMs not registered yet`}
+          </h3>
+          <div className="media-grid">
+            {unregistered.map((vm) => (
+              <DiscoveredVmCard key={`${vm.emulatorType}/${vm.vmName}`} vm={vm} actions={actions} />
+            ))}
+          </div>
+        </>
       )}
+      <RegisteredGroup vms={registered} actions={actions} />
       <SkippedList skipped={operation.skipped} />
     </>
   );
@@ -223,23 +284,35 @@ function usableRepository(
   );
 }
 
-function RegistrationsPanel({
-  operations,
+const historyLink = (agentId: string, status?: 'attention') =>
+  `/admin/registrations?${new URLSearchParams({ agentId, ...(status ? { status } : {}) }).toString()}`;
+
+/**
+ * Only what is running, or ended with something an administrator has to deal with. Everything else is
+ * history, below. Nothing is cut off silently: when there are more than fit, the page says how many.
+ */
+function AttentionPanel({
+  agentId,
+  response,
   error,
   onChanged,
 }: {
-  operations: RegistrationOperation[];
+  agentId: string;
+  response: RegistrationListResponse | null;
   error: unknown;
   onChanged: () => void;
 }) {
+  const operations = response?.operations ?? [];
+  const total = response?.total ?? operations.length;
   if (operations.length === 0) return null;
   return (
-    <section className="mt-4" aria-labelledby="registrations-heading">
-      <h2 className="h5" id="registrations-heading">
-        Registrations
+    <section className="mt-4" aria-labelledby="attention-heading">
+      <h2 className="h5" id="attention-heading">
+        Needs attention
       </h2>
       <p className="text-body-secondary">
-        These keep going if you leave this page, and survive a server restart.
+        Registrations that are running, or that ended with something for you to deal with. They keep
+        going if you leave this page, and survive a server restart.
       </p>
       {error ? (
         <div className="alert alert-warning" role="alert">
@@ -251,24 +324,84 @@ function RegistrationsPanel({
           <RegistrationCard key={operation.id} operation={operation} onChanged={onChanged} />
         ))}
       </div>
+      {total > operations.length ? (
+        <p className="mt-2 mb-0">
+          Showing {operations.length} of {total}.{' '}
+          <Link to={historyLink(agentId, 'attention')}>See all {total} that need attention</Link>
+        </p>
+      ) : null}
     </section>
   );
 }
 
-function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
+function RecentRegistrations({
+  agentId,
+  response,
+  onChanged,
+}: {
+  agentId: string;
+  response: RegistrationListResponse | null;
+  onChanged: () => void;
+}) {
+  const operations = response?.operations ?? [];
+  if (operations.length === 0) return null;
+  return (
+    <section className="mt-4" aria-labelledby="recent-registrations-heading">
+      <h2 className="h5" id="recent-registrations-heading">
+        Recent registrations
+      </h2>
+      <RegistrationHistoryTable
+        operations={operations}
+        caption="Recent registrations on this agent, newest first"
+        onChanged={onChanged}
+      />
+      <p className="mt-2 mb-0">
+        <Link to={historyLink(agentId)}>View full registration history</Link>
+      </p>
+    </section>
+  );
+}
+
+/** Rerenders once `at` has passed, so that an expiry shows without anything else changing. */
+function usePassed(at: string | null): boolean {
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    if (!at) return undefined;
+    const wait = Math.max(0, Date.parse(at) - Date.now()) + 50;
+    const timer = setTimeout(() => setClock(Date.now()), wait);
+    return () => clearTimeout(timer);
+  }, [at]);
+  return at !== null && Date.parse(at) <= clock;
+}
+
+/**
+ * Discovery first, with what is running or needs attention above it and recent history below. Whether a
+ * discovered VM is registered always comes from the server's reading of the catalog: the report is
+ * read again whenever a registration on this agent moves on, rather than inferred from history.
+ */
+function RegistrationWorkspace({ agent }: { agent: AgentSummary }) {
   const loadRepositories = useCallback((signal: AbortSignal) => fetchRepositories(signal), []);
   const repositories = usePolledData(loadRepositories, REGISTRATION_IDLE_REFRESH_MS);
+
   const [active, setActive] = useState(false);
-  const loadRegistrations = useCallback(
-    (signal: AbortSignal) => fetchRegistrations(agent.id, signal),
+  const loadAttention = useCallback(
+    (signal: AbortSignal) =>
+      fetchRegistrations({ agentId: agent.id, view: 'attention', limit: ATTENTION_LIMIT }, signal),
     [agent.id],
   );
-  const registrations = usePolledData(
-    loadRegistrations,
+  const attention = usePolledData(
+    loadAttention,
     active ? REGISTRATION_ACTIVE_REFRESH_MS : REGISTRATION_IDLE_REFRESH_MS,
   );
-  const operations = registrations.data?.operations ?? [];
-  const activeOperations = operations.filter(
+  const loadRecent = useCallback(
+    (signal: AbortSignal) =>
+      fetchRegistrations({ agentId: agent.id, view: 'history', limit: RECENT_LIMIT }, signal),
+    [agent.id],
+  );
+  const recent = usePolledData(loadRecent, RECENT_REFRESH_MS);
+
+  const attentionOperations = attention.data?.operations ?? [];
+  const activeOperations = attentionOperations.filter(
     (operation) => !isRegistrationTerminal(operation.state),
   );
   const isActive = activeOperations.length > 0;
@@ -280,13 +413,37 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
 
   const [running, setRunning] = useState(false);
   const load = useCallback((signal: AbortSignal) => fetchDiscovery(agent.id, signal), [agent.id]);
-  const discovery = usePolledData(load, running ? RUNNING_REFRESH_MS : null);
+  const discovery = usePolledData(load, running ? RUNNING_REFRESH_MS : DISCOVERY_IDLE_REFRESH_MS);
   const [error, setError] = useState<unknown>(null);
   const [starting, setStarting] = useState(false);
 
   const operation = discovery.data?.operation ?? null;
   const isRunning = operation?.status === 'running';
   if (running !== isRunning) setRunning(isRunning);
+
+  // A registration that moves on, or ends, may have changed the catalog: read the report again, which
+  // asks the server, and the recent history with it. This never starts another scan on the agent.
+  const progress = attention.data
+    ? attentionOperations.map((item) => `${item.id}:${item.state}`).join(',')
+    : null;
+  const previousProgress = useRef<string | null>(null);
+  const { refresh: refreshDiscovery } = discovery;
+  const { refresh: refreshRecent } = recent;
+  useEffect(() => {
+    if (progress === null) return;
+    if (previousProgress.current !== null && previousProgress.current !== progress) {
+      refreshDiscovery();
+      refreshRecent();
+    }
+    previousProgress.current = progress;
+  }, [progress, refreshDiscovery, refreshRecent]);
+  // A reconnection makes the report stale on the server's side; ask it.
+  const reconnectedAt = agent.lastConnectedAt;
+  const previousConnection = useRef(reconnectedAt);
+  useEffect(() => {
+    if (previousConnection.current !== reconnectedAt) refreshDiscovery();
+    previousConnection.current = reconnectedAt;
+  }, [reconnectedAt, refreshDiscovery]);
 
   const start = async () => {
     setStarting(true);
@@ -303,6 +460,10 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
     }
   };
 
+  const expired = usePassed(operation?.status === 'completed' ? operation.expiresAt : null);
+  const replaced = operation?.status === 'completed' && !operation.fromCurrentConnection;
+  const stale = agent.online && agent.pairingStatus !== 'revoked' && (expired || replaced);
+
   const repository = usableRepository(repositories.data?.repositories ?? [], agent.id);
   const blocked =
     agent.pairingStatus === 'revoked'
@@ -316,11 +477,12 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
             : null;
   const actions: VmActions = {
     blocked,
+    stale,
     running: new Set(
       activeOperations.map((operation) => vmKey(operation.emulatorType, operation.vmName)),
     ),
     registered: new Set(
-      operations
+      attentionOperations
         .filter((operation) => isRegistrationCommitted(operation.state))
         .map((operation) => vmKey(operation.emulatorType, operation.vmName)),
     ),
@@ -346,18 +508,28 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
         ? null
         : 'This agent is offline. Discovery works once it reconnects.';
 
+  const refreshRegistrations = () => {
+    attention.refresh();
+    recent.refresh();
+    discovery.refresh();
+  };
+
   return (
     <>
       <div id="registrations" />
-      <RegistrationsPanel
-        operations={operations}
-        error={registrations.error}
-        onChanged={registrations.refresh}
+      <AttentionPanel
+        agentId={agent.id}
+        response={attention.data}
+        error={attention.error}
+        onChanged={refreshRegistrations}
       />
-      <section className="mt-4">
-        <h2 className="h5">Discovery</h2>
+      <section className="mt-4" aria-labelledby="discovery-heading">
+        <h2 className="h5" id="discovery-heading">
+          Discovery
+        </h2>
         <p className="text-body-secondary">
-          Asks the agent to look, read-only, inside its configured VM directories.
+          Asks the agent to look, read-only, inside its configured VM directories, and shows which
+          of the virtual machines it finds are not in the catalog yet.
         </p>
         {unavailable ? (
           <div className="alert alert-secondary" role="status">
@@ -394,6 +566,14 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
             <p className="small text-body-secondary">
               Finished at {formatTime(operation.finishedAt)}.
             </p>
+            {stale ? (
+              <div className="alert alert-warning" role="status">
+                {replaced
+                  ? 'The agent has reconnected since this report was made, so it may no longer describe its disk.'
+                  : 'This report has expired, so it may no longer describe the agent’s disk.'}{' '}
+                Run discovery again to register a VM from it.
+              </div>
+            ) : null}
             {agent.online && agent.pairingStatus !== 'revoked' && !repository ? (
               <div className="alert alert-secondary small" role="status">
                 To register a VM, first <Link to="/admin/repositories">allow this agent</Link> to
@@ -404,7 +584,10 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
           </>
         ) : null}
         {!operation && !discovery.loading && !unavailable ? (
-          <p className="text-body-secondary">No discovery has run since the server started.</p>
+          <EmptyState title="No discovery yet">
+            No discovery has run since the server started. Choose Discover virtual machines to see
+            what this agent has.
+          </EmptyState>
         ) : null}
         {choice && repository ? (
           <RegistrationDialog
@@ -415,13 +598,18 @@ function DiscoveryPanel({ agent }: { agent: AgentSummary }) {
             onStarted={() => {
               setChoice(null);
               setActive(true);
-              registrations.refresh();
+              attention.refresh();
               // Its progress appears above the list this was started from.
               document.getElementById('registrations')?.scrollIntoView?.();
             }}
           />
         ) : null}
       </section>
+      <RecentRegistrations
+        agentId={agent.id}
+        response={recent.data}
+        onChanged={refreshRegistrations}
+      />
     </>
   );
 }
@@ -531,7 +719,7 @@ export function AgentDetailPage() {
         <dd>{formatTime(agent.lastConnectedAt)}</dd>
       </dl>
       <RevokeControl agent={agent} onRevoked={refresh} />
-      <DiscoveryPanel agent={agent} />
+      <RegistrationWorkspace agent={agent} />
       <AgentRestores agentId={agent.id} />
     </>
   );

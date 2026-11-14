@@ -165,6 +165,16 @@ export const discoveryOperationSchema = z.object({
   emulators: z.array(discoveryEmulatorReportSchema),
   vms: z.array(discoveryListedVmSchema),
   skipped: z.array(discoverySkippedSchema),
+  /**
+   * When a completed report stops being accepted for a registration, or `null` when it was never
+   * usable (still running, or failed). Worked out when read, from the server's own policy.
+   */
+  expiresAt: timestampSchema.nullable().default(null),
+  /**
+   * Whether the report came over the agent's current connection. A report from before a reconnection
+   * says nothing reliable about the disk any more, and the server refuses to register from it.
+   */
+  fromCurrentConnection: z.boolean().default(true),
 });
 export type DiscoveryOperation = z.infer<typeof discoveryOperationSchema>;
 

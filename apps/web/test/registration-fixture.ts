@@ -37,5 +37,9 @@ export function registrationOperation(): RegistrationOperation {
     updatedAt: '2026-01-31T15:31:00.000Z',
     committedAt: '2026-01-31T15:31:00.000Z',
     finishedAt: '2026-01-31T15:32:00.000Z',
+    acknowledgedAt: null,
+    acknowledgedByDisplayName: null,
+    parentSnapshotName: null,
+    versionDeletion: null,
   };
 }

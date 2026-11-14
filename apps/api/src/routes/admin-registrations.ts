@@ -6,6 +6,7 @@ import {
   repositoryPathParamsSchema,
   saveRepositoryRequestSchema,
   type CreateRegistrationRequest,
+  type RegistrationListQuery,
   type RegistrationListResponse,
   type RegistrationOperation,
   type RepositoryListResponse,
@@ -63,10 +64,8 @@ export function registerAdminRegistrationRoutes(
       api.get(
         '/registrations',
         { schema: { querystring: registrationListQuerySchema } },
-        async (request): Promise<RegistrationListResponse> => {
-          const { agentId } = request.query as z.infer<typeof registrationListQuerySchema>;
-          return { operations: await registrations.list(agentId) };
-        },
+        async (request): Promise<RegistrationListResponse> =>
+          registrations.list(request.query as RegistrationListQuery),
       );
 
       api.post(
@@ -112,6 +111,20 @@ export function registerAdminRegistrationRoutes(
         async (request): Promise<RegistrationOperation> => {
           const { operationId } = request.params as z.infer<typeof registrationPathParamsSchema>;
           return registrations.reconcile(operationId);
+        },
+      );
+
+      api.post(
+        '/registrations/:operationId/acknowledge',
+        { schema: { params: registrationPathParamsSchema } },
+        async (request): Promise<RegistrationOperation> => {
+          const { operationId } = request.params as z.infer<typeof registrationPathParamsSchema>;
+          const operation = await registrations.acknowledge(
+            operationId,
+            sessionOf(request).user.id,
+          );
+          request.log.info({ operationId }, 'A partial registration was acknowledged');
+          return operation;
         },
       );
 
