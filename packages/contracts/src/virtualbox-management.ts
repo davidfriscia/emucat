@@ -214,6 +214,31 @@ export function isVirtualBoxOperationActive(state: VirtualBoxOperationState): bo
   return state === 'queued' || state === 'running';
 }
 
+/**
+ * What an import does with its machine once VirtualBox has it: link it to a VM that had none, or replace the link
+ * an administrator explicitly agreed to replace.
+ */
+export const VIRTUALBOX_AUTO_LINK_INTENTS = ['link', 'relink'] as const;
+export const virtualBoxAutoLinkIntentSchema = z.enum(VIRTUALBOX_AUTO_LINK_INTENTS);
+export type VirtualBoxAutoLinkIntent = z.infer<typeof virtualBoxAutoLinkIntentSchema>;
+
+/**
+ * `pending` until the import succeeded and the link was made or refused; `linked` once it was made; `failed` when
+ * it was refused, which never undoes the import. `null` when the import itself did not succeed, so nothing was tried.
+ */
+export const VIRTUALBOX_AUTO_LINK_STATES = ['pending', 'linked', 'failed'] as const;
+export const virtualBoxAutoLinkStateSchema = z.enum(VIRTUALBOX_AUTO_LINK_STATES);
+export type VirtualBoxAutoLinkState = z.infer<typeof virtualBoxAutoLinkStateSchema>;
+
+export const virtualBoxAutoLinkSchema = z.object({
+  intent: virtualBoxAutoLinkIntentSchema,
+  state: virtualBoxAutoLinkStateSchema.nullable(),
+  /** The link or relink this made, once it is made. */
+  linkOperationId: z.uuid().nullable(),
+  error: z.object({ code: z.string(), message: z.string() }).nullable(),
+});
+export type VirtualBoxAutoLink = z.infer<typeof virtualBoxAutoLinkSchema>;
+
 /** One import, deletion or change of link, as recorded. A link change is recorded when it is made. */
 export const virtualBoxOperationSchema = z.object({
   id: z.uuid(),
@@ -231,8 +256,13 @@ export const virtualBoxOperationSchema = z.object({
   machineUuid: virtualBoxUuidSchema.nullable(),
   machineName: z.string().nullable(),
   machineState: virtualBoxVmStateSchema.nullable(),
-  /** For a relink or an unlink: the machine the VM was linked to before. */
+  /**
+   * For a relink or an unlink: the machine the VM was linked to before. For an import that replaces a link: the
+   * machine it replaces, which must still be the linked one when the import finishes.
+   */
   previousMachineUuid: virtualBoxUuidSchema.nullable(),
+  /** For an import: what is done with its machine once it exists. `null` when nothing is. */
+  autoLink: virtualBoxAutoLinkSchema.nullable().default(null),
   strayMachines: z.array(virtualBoxMachineSchema).default([]),
   filesRemoved: z.boolean().nullable(),
   progress: z.object({
@@ -271,11 +301,23 @@ export type VirtualBoxLinkRequest = z.infer<typeof virtualBoxLinkRequestSchema>;
 export const virtualBoxUnlinkRequestSchema = z.strictObject({ machineUuid: virtualBoxUuidSchema });
 export type VirtualBoxUnlinkRequest = z.infer<typeof virtualBoxUnlinkRequestSchema>;
 
-export const virtualBoxImportRequestSchema = z.strictObject({
-  agentId: z.uuid(),
-  targetName: virtualBoxTargetNameSchema,
-  requestId: z.uuid(),
-});
+/**
+ * An import links its new machine by itself when the VM has none. When the VM has one, the administrator either
+ * keeps it (`replaceSource: false`) or explicitly replaces it (`true`), which needs that machine powered off, now
+ * and again when the import finishes. `replaceMachineUuid` is the machine the administrator saw linked, or `null`
+ * for none, so that an import never acts on a link that changed since the page was loaded.
+ */
+export const virtualBoxImportRequestSchema = z
+  .strictObject({
+    agentId: z.uuid(),
+    targetName: virtualBoxTargetNameSchema,
+    requestId: z.uuid(),
+    replaceMachineUuid: virtualBoxUuidSchema.nullable(),
+    replaceSource: z.boolean(),
+  })
+  .refine((request) => request.replaceMachineUuid !== null || !request.replaceSource, {
+    message: 'Only a linked machine can be replaced',
+  });
 export type VirtualBoxImportRequest = z.infer<typeof virtualBoxImportRequestSchema>;
 
 export const virtualBoxDeleteRequestSchema = z.strictObject({

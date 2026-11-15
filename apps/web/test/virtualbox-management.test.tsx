@@ -77,6 +77,7 @@ function operation(overrides: Partial<VirtualBoxOperation> = {}): VirtualBoxOper
     machineName: 'Xenix 386 (Master)',
     machineState: 'powered_off',
     previousMachineUuid: null,
+    autoLink: null,
     strayMachines: [],
     filesRemoved: null,
     progress: { doneBytes: null, totalBytes: null },
@@ -415,9 +416,139 @@ describe('importing a version into VirtualBox', () => {
     const path = `${VM_PATH}/versions/${MASTER}/virtualbox-import`;
     await waitFor(() => expect(api.callsTo('POST', path)).toHaveLength(1));
     const body = api.callsTo('POST', path)[0]?.body as Record<string, unknown>;
-    expect(body).toMatchObject({ agentId: AGENT_ID, targetName: 'Xenix test' });
+    // The VM has a machine, and replacing it was not chosen: it stays linked.
+    expect(body).toMatchObject({
+      agentId: AGENT_ID,
+      targetName: 'Xenix test',
+      replaceMachineUuid: MACHINE,
+      replaceSource: false,
+    });
     expect(typeof body.requestId).toBe('string');
     expect(api.callsTo('POST', `${MANAGEMENT_PATH}/link`)).toHaveLength(0);
+  });
+
+  it('links the new machine by itself when the VM has none', async () => {
+    const api = routes({
+      [`GET ${MANAGEMENT_PATH}`]: management({ source: null, sourceVersionId: null }),
+      [`POST ${VM_PATH}/versions/${MASTER}/virtualbox-import`]: new Reply(
+        202,
+        operation({ state: 'queued', machineUuid: null, machineName: null }),
+      ),
+    });
+    renderAt(VM_PATH);
+    fireEvent.click(await screen.findByRole('button', { name: 'Import Master into VirtualBox' }));
+    const dialog = within(
+      await screen.findByRole('dialog', { name: 'Import Master into VirtualBox' }),
+    );
+    expect(dialog.getByText(/the new machine is linked to xenix-386/)).toBeTruthy();
+    expect(dialog.queryByLabelText(/Replace this link/)).toBeNull();
+    fireEvent.click(dialog.getByRole('button', { name: 'Import' }));
+    const path = `${VM_PATH}/versions/${MASTER}/virtualbox-import`;
+    await waitFor(() => expect(api.callsTo('POST', path)).toHaveLength(1));
+    expect(api.callsTo('POST', path)[0]?.body).toMatchObject({
+      replaceMachineUuid: null,
+      replaceSource: false,
+    });
+  });
+
+  it('replaces the linked machine only once that is explicitly confirmed', async () => {
+    const api = routes({
+      [`POST ${VM_PATH}/versions/${MASTER}/virtualbox-import`]: new Reply(
+        202,
+        operation({ state: 'queued', machineUuid: null, machineName: null }),
+      ),
+    });
+    renderAt(VM_PATH);
+    fireEvent.click(await screen.findByRole('button', { name: 'Import Master into VirtualBox' }));
+    const dialog = within(
+      await screen.findByRole('dialog', { name: 'Import Master into VirtualBox' }),
+    );
+    // The current link is named by its UUID, and kept unless replacing it is chosen.
+    expect(dialog.getByText(MACHINE)).toBeTruthy();
+    expect((dialog.getByLabelText(/Keep this link/) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(dialog.getByLabelText('Replace this link with the new machine'));
+    expect(dialog.getByText(/is not deleted or changed/)).toBeTruthy();
+    const submit = dialog.getByRole('button', { name: 'Import and replace link' });
+    expect(disabled(submit)).toBe(true);
+    fireEvent.click(dialog.getByLabelText('Replace the link to Xenix 386'));
+    expect(disabled(submit)).toBe(false);
+    fireEvent.click(submit);
+    const path = `${VM_PATH}/versions/${MASTER}/virtualbox-import`;
+    await waitFor(() => expect(api.callsTo('POST', path)).toHaveLength(1));
+    expect(api.callsTo('POST', path)[0]?.body).toMatchObject({
+      replaceMachineUuid: MACHINE,
+      replaceSource: true,
+    });
+  });
+
+  it('cannot replace a machine that is not powered off', async () => {
+    const api = routes({
+      [`GET ${MANAGEMENT_PATH}`]: management({ source: source({ state: 'running' }) }),
+    });
+    renderAt(VM_PATH);
+    fireEvent.click(await screen.findByRole('button', { name: 'Import Master into VirtualBox' }));
+    const dialog = within(
+      await screen.findByRole('dialog', { name: 'Import Master into VirtualBox' }),
+    );
+    fireEvent.click(dialog.getByLabelText('Replace this link with the new machine'));
+    expect(dialog.getByText(/It is not powered off/)).toBeTruthy();
+    expect(disabled(dialog.getByLabelText('Replace the link to Xenix 386'))).toBe(true);
+    expect(disabled(dialog.getByRole('button', { name: 'Import and replace link' }))).toBe(true);
+    expect(api.callsTo('POST', `${VM_PATH}/versions/${MASTER}/virtualbox-import`)).toHaveLength(0);
+  });
+
+  it('reports an import whose link failed, and retries only the link', async () => {
+    const failed = operation({
+      autoLink: {
+        intent: 'link',
+        state: 'failed',
+        linkOperationId: null,
+        error: { code: 'virtualbox_already_registered', message: 'Linked to another VM.' },
+      },
+    });
+    const api = routes({
+      [`GET ${MANAGEMENT_PATH}`]: management({ source: null, operations: [failed] }),
+      [`POST ${MANAGEMENT_PATH}/operations/${IMPORT_ID}/link`]: operation({
+        autoLink: { intent: 'link', state: 'linked', linkOperationId: SPARE, error: null },
+      }),
+    });
+    renderAt(VM_PATH);
+    const alert = within(await screen.findByText(/Imported, but not linked/)).getByText(
+      /Imported, but not linked/,
+    ).parentElement as HTMLElement;
+    expect(alert.textContent).toMatch(/virtualbox_already_registered/);
+    expect(alert.textContent).toMatch(/does not import again/);
+    const optionsBefore = api.callsTo('GET', `${VM_PATH}/execution-options`).length;
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry linking' }));
+    await waitFor(() =>
+      expect(api.callsTo('POST', `${MANAGEMENT_PATH}/operations/${IMPORT_ID}/link`)).toHaveLength(
+        1,
+      ),
+    );
+    // The run panel hears that the machine changed.
+    await waitFor(() =>
+      expect(api.callsTo('GET', `${VM_PATH}/execution-options`).length).toBeGreaterThan(
+        optionsBefore,
+      ),
+    );
+    expect(api.callsTo('POST', `${VM_PATH}/versions/${MASTER}/virtualbox-import`)).toHaveLength(0);
+  });
+
+  it('shows an import that linked its machine', async () => {
+    routes({
+      [`GET ${MANAGEMENT_PATH}`]: management({
+        source: source({ machineUuid: IMPORTED, displayName: 'Xenix 386 (Master)' }),
+        operations: [
+          operation({
+            previousMachineUuid: MACHINE,
+            autoLink: { intent: 'relink', state: 'linked', linkOperationId: SPARE, error: null },
+          }),
+        ],
+      }),
+    });
+    renderAt(VM_PATH);
+    expect(await screen.findByText('Linked automatically')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry linking' })).toBeNull();
   });
 
   it('cannot import while another operation runs', async () => {
@@ -429,6 +560,69 @@ describe('importing a version into VirtualBox', () => {
     renderAt(VM_PATH);
     const button = await screen.findByRole('button', { name: 'Import Master into VirtualBox' });
     await waitFor(() => expect(disabled(button)).toBe(true));
+  });
+});
+
+describe('polling the page of a VirtualBox VM', () => {
+  function ended(id: string): VmSession {
+    return {
+      id,
+      agentId: AGENT_ID,
+      agentName: 'Desk PC',
+      agentOnline: true,
+      emulatorType: 'virtualbox',
+      vmName: 'xenix-386',
+      mode: 'local',
+      state: 'stopped',
+      versionId: null,
+      workspaceId: null,
+      pid: null,
+      processStartedAt: null,
+      requestedAt: WHEN,
+      startedAt: WHEN,
+      endedAt: WHEN,
+      exitCode: 0,
+      stopRequested: false,
+      forceRequested: false,
+      gracefulStopAvailable: true,
+      error: null,
+      recovery: null,
+      requestedByDisplayName: 'Ada Admin',
+      updatedAt: WHEN,
+    };
+  }
+
+  it('reads the machine once for every panel, and each ended session’s screenshots once', async () => {
+    const sessions = [
+      '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f81',
+      '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f82',
+      '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f83',
+    ];
+    const api = routes({
+      'GET /admin/sessions': { sessions: sessions.map(ended) },
+      ...Object.fromEntries(
+        sessions.map((id) => [
+          `GET /admin/sessions/${id}/screenshots`,
+          { available: false, reason: null, operation: null },
+        ]),
+      ),
+    });
+    renderAt(VM_PATH);
+    await screen.findByRole('button', { name: 'Import Master into VirtualBox' });
+    await screen.findByText('Earlier sessions');
+    await waitFor(() => {
+      for (const id of sessions) {
+        expect(api.callsTo('GET', `/admin/sessions/${id}/screenshots`)).toHaveLength(1);
+      }
+    });
+    // Long enough for any of the old 1.5-second polls to have fired again.
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    for (const id of sessions) {
+      expect(api.callsTo('GET', `/admin/sessions/${id}/screenshots`)).toHaveLength(1);
+    }
+    expect(api.callsTo('GET', MANAGEMENT_PATH)).toHaveLength(1);
+    expect(api.callsTo('GET', `${VM_PATH}/workspaces`)).toHaveLength(1);
+    expect(api.callsTo('GET', `${VM_PATH}/restore-options`)).toHaveLength(1);
   });
 });
 

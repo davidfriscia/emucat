@@ -26,7 +26,10 @@ import {
 } from '../../components/Execution';
 import { VmRestoreSection } from '../../components/Restore';
 import { VmVersionsSection } from '../../components/Versions';
-import { VirtualBoxSourceSection } from '../../components/VirtualBoxSource';
+import {
+  VirtualBoxManagementProvider,
+  VirtualBoxSourceSection,
+} from '../../components/VirtualBoxSource';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
 import { VmMediaGrid } from '../../components/VmMediaGrid';
 import { useAsync } from '../../useAsync';
@@ -224,6 +227,10 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
   }
 
   const vm = state.data;
+  const run = (choice: Omit<RunPreselection, 'token'>) => {
+    runToken.current += 1;
+    setPreselect({ ...choice, token: runToken.current });
+  };
   return (
     <div className="page-wide vm-admin">
       <title>{`${vmTitle(vm)} · Manage · EmuCat`}</title>
@@ -299,28 +306,23 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
           </div>
         </section>
       </div>
-      <div className="vm-admin-panels">
-        {identity.emulatorType === 'virtualbox' ? (
-          // Run in place only: never restored, and no remote mode (decision 0045).
-          <>
+      {identity.emulatorType === 'virtualbox' ? (
+        // Run in place only: never restored, and no remote mode (decision 0045). The machine is polled once, for
+        // every panel that shows it.
+        <VirtualBoxManagementProvider vm={identity}>
+          <div className="vm-admin-panels">
             <VirtualBoxExecutionSection vm={identity} />
             <VirtualBoxSourceSection vm={identity} />
-          </>
-        ) : (
-          <>
-            <VmExecutionSection vm={identity} preselect={preselect} />
-            <VmRestoreSection vm={identity} />
-          </>
-        )}
-        <VmVersionsSection
-          vm={identity}
-          title={vmTitle(vm)}
-          onRun={(choice) => {
-            runToken.current += 1;
-            setPreselect({ ...choice, token: runToken.current });
-          }}
-        />
-      </div>
+            <VmVersionsSection vm={identity} title={vmTitle(vm)} onRun={run} />
+          </div>
+        </VirtualBoxManagementProvider>
+      ) : (
+        <div className="vm-admin-panels">
+          <VmExecutionSection vm={identity} preselect={preselect} />
+          <VmRestoreSection vm={identity} />
+          <VmVersionsSection vm={identity} title={vmTitle(vm)} onRun={run} />
+        </div>
+      )}
       <section className="mt-4" aria-labelledby="vm-screenshots-heading">
         <h2 id="vm-screenshots-heading" className="h5">
           Screenshots

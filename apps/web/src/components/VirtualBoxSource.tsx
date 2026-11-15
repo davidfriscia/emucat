@@ -15,8 +15,11 @@ import {
   type VmIdentity,
 } from '@emucat/contracts';
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
+  useMemo,
   useId,
   useRef,
   useState,
@@ -30,9 +33,10 @@ import {
   fetchVirtualBoxManagement,
   importIntoVirtualBox,
   linkVirtualBoxMachine,
+  retryVirtualBoxImportLink,
   unlinkVirtualBoxMachine,
 } from '../api';
-import { usePolledData } from '../usePolledData';
+import { usePolledData, type PolledData } from '../usePolledData';
 import { formatTime } from './Agents';
 import { ConfirmDialog } from './Dialogs';
 import { useModalDialog } from './Gallery';
@@ -47,37 +51,101 @@ import { STATE_BADGE, STATE_TEXT } from './VirtualBox';
  */
 
 const CHANGED = 'emucat:virtualbox-changed';
-const ACTIVE_POLL_MS = 2000;
-const IDLE_POLL_MS = 15000;
+/** While an import or a deletion is under way. */
+export const VIRTUALBOX_ACTIVE_POLL_MS = 2_000;
+/** Otherwise: the link changes only through this page, which says so at once. */
+export const VIRTUALBOX_IDLE_POLL_MS = 30_000;
 
 /** Tells every part of the page about this VM's machine that something changed. */
 export function notifyVirtualBoxChanged(vm: VmIdentity) {
   window.dispatchEvent(new CustomEvent<VmIdentity>(CHANGED, { detail: vm }));
 }
 
-/** This VM's machine, its agents and its operations, polled faster while one runs. */
-export function useVirtualBoxManagement(vm: VmIdentity) {
+/** Calls `onChange` whenever something on the page says this VM's machine changed. */
+export function useVirtualBoxChanged(vm: VmIdentity, onChange: () => void) {
+  const { emulatorType, vmName } = vm;
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const changed = (event as CustomEvent<VmIdentity>).detail;
+      if (changed.emulatorType === emulatorType && changed.vmName === vmName) onChange();
+    };
+    window.addEventListener(CHANGED, listener);
+    return () => window.removeEventListener(CHANGED, listener);
+  }, [emulatorType, vmName, onChange]);
+}
+
+type Management = PolledData<VirtualBoxManagementResponse>;
+const ManagementContext = createContext<{ vm: VmIdentity; management: Management } | null>(null);
+
+/**
+ * This VM's machine, its agents and its operations, polled faster while one runs. When an import or a deletion
+ * finishes, the rest of the page hears of it, since it may have linked, relinked or unlinked the machine.
+ */
+function usePolledManagement(vm: VmIdentity): Management {
   const { emulatorType, vmName } = vm;
   const load = useCallback(
     (signal: AbortSignal) => fetchVirtualBoxManagement({ emulatorType, vmName }, signal),
     [emulatorType, vmName],
   );
   const [fast, setFast] = useState(false);
-  const polled = usePolledData(load, fast ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+  const polled = usePolledData(load, fast ? VIRTUALBOX_ACTIVE_POLL_MS : VIRTUALBOX_IDLE_POLL_MS);
   const active =
     polled.data?.operations.some((operation) => isVirtualBoxOperationActive(operation.state)) ??
     false;
   if (active !== fast) setFast(active);
   const { refresh } = polled;
+  useVirtualBoxChanged(vm, refresh);
+  const wasActive = useRef(false);
   useEffect(() => {
-    const listener = (event: Event) => {
-      const changed = (event as CustomEvent<VmIdentity>).detail;
-      if (changed.emulatorType === emulatorType && changed.vmName === vmName) refresh();
-    };
-    window.addEventListener(CHANGED, listener);
-    return () => window.removeEventListener(CHANGED, listener);
-  }, [emulatorType, vmName, refresh]);
+    if (wasActive.current && !active) notifyVirtualBoxChanged({ emulatorType, vmName });
+    wasActive.current = active;
+  }, [active, emulatorType, vmName]);
   return polled;
+}
+
+/** One poll of this VM's machine for everything inside it, however many parts of the page show it. */
+export function VirtualBoxManagementProvider({
+  vm,
+  children,
+}: {
+  vm: VmIdentity;
+  children: ReactNode;
+}) {
+  const management = usePolledManagement(vm);
+  const { emulatorType, vmName } = vm;
+  const value = useMemo(
+    () => ({ vm: { emulatorType, vmName }, management }),
+    [emulatorType, vmName, management],
+  );
+  return <ManagementContext.Provider value={value}>{children}</ManagementContext.Provider>;
+}
+
+/** The machine of `vm` from the nearest provider for it, or `null` outside one. */
+function useSharedManagement(vm: VmIdentity): Management | null {
+  const shared = useContext(ManagementContext);
+  return shared?.vm.emulatorType === vm.emulatorType && shared.vm.vmName === vm.vmName
+    ? shared.management
+    : null;
+}
+
+/**
+ * Renders `children` with this VM's machine: the provider's, or a poll of its own outside one, so that a part of
+ * the page shown alone still works.
+ */
+export function WithVirtualBoxManagement({
+  vm,
+  children,
+}: {
+  vm: VmIdentity;
+  children: (management: Management) => ReactNode;
+}) {
+  const shared = useSharedManagement(vm);
+  if (shared) return <>{children(shared)}</>;
+  return (
+    <VirtualBoxManagementProvider vm={vm}>
+      <WithVirtualBoxManagement vm={vm}>{children}</WithVirtualBoxManagement>
+    </VirtualBoxManagementProvider>
+  );
 }
 
 const KIND_TEXT: Record<VirtualBoxOperationKind, string> = {
@@ -150,17 +218,109 @@ function importedMachine(
   return deleted ? null : { uuid: operation.machineUuid, name: operation.machineName };
 }
 
+/** What an import does, did or could not do with its machine's link. */
+function AutoLinkStatus({
+  operation,
+  linked,
+  busy,
+  onRetry,
+}: {
+  operation: VirtualBoxOperation;
+  linked: boolean;
+  busy: boolean;
+  onRetry: (operation: VirtualBoxOperation) => Promise<void>;
+}) {
+  const [retrying, setRetrying] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const autoLink = operation.autoLink;
+  if (!autoLink) return null;
+  const replaces = operation.previousMachineUuid;
+  const retry = async () => {
+    setRetrying(true);
+    setError(null);
+    try {
+      await onRetry(operation);
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setRetrying(false);
+    }
+  };
+  if (isVirtualBoxOperationActive(operation.state)) {
+    return (
+      <div className="text-body-secondary">
+        {autoLink.intent === 'relink' && replaces ? (
+          <>
+            Once imported, the new machine replaces the link to{' '}
+            <code className="vm-identity small">{replaces}</code>, which stays in VirtualBox.
+          </>
+        ) : (
+          'Once imported, the new machine is linked to this VM.'
+        )}
+      </div>
+    );
+  }
+  if (autoLink.state === 'linked') {
+    return (
+      <div>
+        <span className="badge text-bg-success">Linked automatically</span>
+        {autoLink.intent === 'relink' && replaces ? (
+          <span className="text-body-secondary">
+            {' '}
+            in place of <code className="vm-identity small">{replaces}</code>, kept in VirtualBox
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+  if (autoLink.state === 'pending') {
+    return (
+      <div role="status" className="text-body-secondary">
+        Imported; linking the new machine…
+      </div>
+    );
+  }
+  if (autoLink.state !== 'failed' || linked) return null;
+  return (
+    <div className="alert alert-warning small mt-1 mb-1" role="alert">
+      <strong>Imported, but not linked.</strong> The import succeeded and the new machine stays in
+      VirtualBox; only linking it failed
+      {autoLink.error ? (
+        <>
+          : <span className="vm-identity">{autoLink.error.code}</span>, {autoLink.error.message}
+        </>
+      ) : (
+        '.'
+      )}{' '}
+      Retrying links the machine already imported; it does not import again.
+      <div className="mt-1">
+        <button
+          type="button"
+          className="btn btn-sm btn-outline-primary"
+          disabled={busy || retrying}
+          onClick={() => void retry()}
+        >
+          {retrying ? 'Linking…' : 'Retry linking'}
+        </button>
+      </div>
+      <FormError error={error} />
+    </div>
+  );
+}
+
 function OperationItem({
   operation,
   data,
   busy,
   onLink,
+  onRetryLink,
   onDelete,
 }: {
   operation: VirtualBoxOperation;
   data: VirtualBoxManagementResponse;
   busy: boolean;
   onLink: (operation: VirtualBoxOperation) => void;
+  onRetryLink: (operation: VirtualBoxOperation) => Promise<void>;
   onDelete: (machine: { agentId: string; uuid: string; name: string }) => void;
 }) {
   const machine = importedMachine(operation, data);
@@ -194,11 +354,14 @@ function OperationItem({
             {linked ? <span className="badge text-bg-info ms-1">Linked</span> : null}
           </div>
         ) : null}
-        {operation.previousMachineUuid ? (
+        {operation.previousMachineUuid && operation.kind !== 'import' ? (
           <div className="text-body-secondary">
             Previously linked:{' '}
             <code className="vm-identity small">{operation.previousMachineUuid}</code>
           </div>
+        ) : null}
+        {operation.kind === 'import' ? (
+          <AutoLinkStatus operation={operation} linked={linked} busy={busy} onRetry={onRetryLink} />
         ) : null}
         {active && operation.stage ? (
           <div role="status">
@@ -278,7 +441,14 @@ function OperationItem({
 
 /** The machine of a VirtualBox VM, and what an administrator can do with it. */
 export function VirtualBoxSourceSection({ vm }: { vm: VmIdentity }) {
-  const management = useVirtualBoxManagement(vm);
+  return (
+    <WithVirtualBoxManagement vm={vm}>
+      {(management) => <SourceSection vm={vm} management={management} />}
+    </WithVirtualBoxManagement>
+  );
+}
+
+function SourceSection({ vm, management }: { vm: VmIdentity; management: Management }) {
   const [linking, setLinking] = useState<'discovery' | VirtualBoxOperation | null>(null);
   const [unlinking, setUnlinking] = useState(false);
   const [deleting, setDeleting] = useState<{ agentId: string; uuid: string; name: string } | null>(
@@ -354,14 +524,15 @@ export function VirtualBoxSourceSection({ vm }: { vm: VmIdentity }) {
             ) : (
               <p className="small">
                 Not linked to a VirtualBox machine. Link a machine VirtualBox already has, or import
-                a version into VirtualBox from the version history and link the new machine.
+                a version into VirtualBox from the version history: the new machine is linked once
+                the import succeeds.
               </p>
             )}
             <p className="small text-body-secondary">
               The link names the machine by its UUID, and changes only when an administrator changes
-              it here: never because a machine has a similar name, and never because an agent
-              disconnects. Changing or removing the link never deletes a machine, a version or a
-              screenshot.
+              it here, or imports a version and agrees to link the new machine: never because a
+              machine has a similar name, and never because an agent disconnects. Changing or
+              removing the link never deletes a machine, a version or a screenshot.
             </p>
             <div className="d-flex flex-wrap gap-2">
               <button
@@ -416,6 +587,13 @@ export function VirtualBoxSourceSection({ vm }: { vm: VmIdentity }) {
                       data={data}
                       busy={active}
                       onLink={setLinking}
+                      onRetryLink={async (item) => {
+                        try {
+                          await retryVirtualBoxImportLink(vm, item.id);
+                        } finally {
+                          changed();
+                        }
+                      }}
                       onDelete={setDeleting}
                     />
                   ))}
@@ -801,14 +979,16 @@ export function DeleteMachineDialog({
 }
 
 /**
- * Imports one version's OVA into an agent's VirtualBox as a new machine. Nothing is linked, overwritten or deleted:
- * the new machine is offered for linking once VirtualBox has it.
+ * Imports one version's OVA into an agent's VirtualBox as a new machine. Nothing is overwritten or deleted. Once
+ * VirtualBox has the machine it is linked to the VM, if the VM has none; if it has one, the administrator chooses to
+ * keep that link, or explicitly to replace it, which leaves the old machine in VirtualBox as it is.
  */
 export function ImportIntoVirtualBoxDialog({
   vm,
   title,
   version,
   agents,
+  source,
   onClose,
   onStarted,
 }: {
@@ -817,9 +997,16 @@ export function ImportIntoVirtualBoxDialog({
   title: string;
   version: { id: string; label: string };
   agents: readonly VirtualBoxAgentOption[];
+  /** The machine the VM is linked to now, as the page last saw it. */
+  source: VirtualBoxManagementResponse['source'];
   onClose: () => void;
   onStarted: (operation: VirtualBoxOperation) => void;
 }) {
+  const [replace, setReplace] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const sourceIdle =
+    source !== null && (source.present === false || source.state === 'powered_off');
+  const linkReady = !replace || (sourceIdle && confirmed);
   const capable = agents.filter((agent) => agent.management);
   const [agentId, setAgentId] = useState(
     () => capable.find((agent) => agent.online)?.agentId ?? '',
@@ -835,12 +1022,18 @@ export function ImportIntoVirtualBoxDialog({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!validation.ok || !agent?.online) return;
+    if (!validation.ok || !agent?.online || !linkReady) return;
     setBusy(true);
     setError(null);
     try {
       onStarted(
-        await importIntoVirtualBox(vm, version.id, { agentId, targetName: name, requestId }),
+        await importIntoVirtualBox(vm, version.id, {
+          agentId,
+          targetName: name,
+          requestId,
+          replaceMachineUuid: source?.machineUuid ?? null,
+          replaceSource: source !== null && replace,
+        }),
       );
     } catch (failure) {
       setError(failure);
@@ -901,9 +1094,75 @@ export function ImportIntoVirtualBoxDialog({
       </div>
       <p className="small">
         The agent downloads this version’s OVA, checks its size and SHA-256, has VirtualBox check
-        it, and imports it as a new machine. Nothing already in VirtualBox is changed, and the new
-        machine is not linked until you link it.
+        it, and imports it as a new machine. Nothing already in VirtualBox is changed.
+        {source
+          ? ''
+          : ` Once the import succeeds, the new machine is linked to ${vm.vmName}, and comes from ${version.label}.`}
       </p>
+      {source ? (
+        <fieldset className="mb-3">
+          <legend className="form-label small">
+            {vm.vmName} is linked to <span className="virtualbox-name">{source.displayName}</span> (
+            <code className="vm-identity small">{source.machineUuid}</code>)
+          </legend>
+          <div className="form-check small">
+            <input
+              className="form-check-input"
+              type="radio"
+              name={`${id}-link`}
+              id={`${id}-keep`}
+              checked={!replace}
+              onChange={() => {
+                setReplace(false);
+                setConfirmed(false);
+              }}
+            />
+            <label className="form-check-label" htmlFor={`${id}-keep`}>
+              Keep this link; leave the new machine unlinked
+            </label>
+          </div>
+          <div className="form-check small">
+            <input
+              className="form-check-input"
+              type="radio"
+              name={`${id}-link`}
+              id={`${id}-replace`}
+              checked={replace}
+              onChange={() => setReplace(true)}
+            />
+            <label className="form-check-label" htmlFor={`${id}-replace`}>
+              Replace this link with the new machine
+            </label>
+          </div>
+          {replace ? (
+            <div className="alert alert-warning small mt-2 mb-0">
+              Once the import succeeds, {vm.vmName} runs from the new machine, which comes from{' '}
+              {version.label}, and later snapshots are made from it.{' '}
+              <span className="virtualbox-name">{source.displayName}</span> is not deleted or
+              changed: it stays in VirtualBox, simply no longer linked. It must be powered off, now
+              and when the import finishes; it is never shut down for you.
+              {sourceIdle ? null : (
+                <div className="mt-1 text-danger">
+                  It is not powered off. Shut it down in VirtualBox first.
+                </div>
+              )}
+              <div className="form-check mt-2">
+                <input
+                  className="form-check-input"
+                  type="checkbox"
+                  id={`${id}-confirm`}
+                  checked={confirmed}
+                  disabled={!sourceIdle}
+                  onChange={(event) => setConfirmed(event.target.checked)}
+                />
+                <label className="form-check-label" htmlFor={`${id}-confirm`}>
+                  Replace the link to {source.displayName}
+                </label>
+              </div>
+            </div>
+          ) : null}
+        </fieldset>
+      ) : null}
       <p className="small text-body-secondary">
         An import cannot be cancelled once VirtualBox starts it. If its outcome is not certain, it
         is not repeated automatically.
@@ -913,9 +1172,9 @@ export function ImportIntoVirtualBoxDialog({
         <button
           type="submit"
           className="btn btn-primary"
-          disabled={busy || !validation.ok || !agent?.online}
+          disabled={busy || !validation.ok || !agent?.online || !linkReady}
         >
-          {busy ? 'Working…' : 'Import'}
+          {busy ? 'Working…' : replace ? 'Import and replace link' : 'Import'}
         </button>
         <button type="button" className="btn btn-outline-secondary theme-button" onClick={onClose}>
           Cancel

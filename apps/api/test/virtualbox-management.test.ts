@@ -262,6 +262,9 @@ function importRequest(w: World, versionId: string, overrides: object = {}) {
       agentId: w.paired.agentId,
       targetName: 'Xenix 386 (copy)',
       requestId: randomUUID(),
+      // The page saw MACHINE linked, and keeps it, unless a test says otherwise.
+      replaceMachineUuid: MACHINE,
+      replaceSource: false,
       ...overrides,
     },
   });
@@ -761,6 +764,270 @@ describe('importing a version into VirtualBox', () => {
       state: 'failed',
       error: { code: 'management_unavailable' },
     });
+  });
+});
+
+/** Requests an import, has the agent report that it created IMPORTED, and returns the recorded operation. */
+async function importAndReport(
+  w: World,
+  versionId: string,
+  overrides: object = {},
+  report: object = {},
+): Promise<VirtualBoxOperation> {
+  const response = await importRequest(w, versionId, overrides);
+  expect(response.statusCode, response.body).toBe(202);
+  const queued = virtualBoxOperationSchema.parse(response.json());
+  await w.agent.next('server.virtualbox_import');
+  w.agent.send(envelope('agent.virtualbox_operation_result', result(queued.id, report)));
+  await w.agent.next('server.virtualbox_operation_ack');
+  return operation(w, queued.id);
+}
+
+function retryLinkRequest(w: World, operationId: string) {
+  return w.admin.request({
+    method: 'POST',
+    url: `${VM_PATH}/virtualbox/operations/${operationId}/link`,
+    payload: {},
+  });
+}
+
+/** A VM whose master was registered from MACHINE, then unlinked: it has no machine now. */
+async function unlinkedWorld(): Promise<{ w: World; master: RegistrationOperation }> {
+  const w = await world();
+  const master = await registered(w);
+  expect((await unlinkRequest(w, MACHINE)).statusCode).toBe(200);
+  expect((await w.agent.next('server.virtualbox_watch')).payload.machines).toEqual([]);
+  return { w, master };
+}
+
+describe('linking the machine an import created', () => {
+  it('links it to a VM that had none, as the version it was imported from', async () => {
+    const { w, master } = await unlinkedWorld();
+    const imported = await importAndReport(w, master.versionId, { replaceMachineUuid: null });
+    expect(imported).toMatchObject({
+      state: 'succeeded',
+      machineUuid: IMPORTED_MACHINE,
+      previousMachineUuid: null,
+      autoLink: { intent: 'link', state: 'linked', error: null },
+    });
+    expect((await w.agent.next('server.virtualbox_watch')).payload.machines).toEqual([
+      IMPORTED_MACHINE,
+    ]);
+    const after = await overview(w);
+    expect(after.source).toMatchObject({
+      machineUuid: IMPORTED_MACHINE,
+      agentId: w.paired.agentId,
+    });
+    expect(after.sourceVersionId).toBe(master.versionId);
+    // The link is recorded as its own operation, which the import names.
+    const link = after.operations.find((item) => item.id === imported.autoLink?.linkOperationId);
+    expect(link).toMatchObject({ kind: 'link', state: 'succeeded', machineUuid: IMPORTED_MACHINE });
+    // Nothing was sent to VirtualBox but the one import.
+    expect(w.agent.received.some((m) => m.type === 'server.virtualbox_import')).toBe(false);
+  });
+
+  it('replaces the link only when the administrator confirmed it, leaving the old machine alone', async () => {
+    const w = await world();
+    const master = await registered(w);
+    const imported = await importAndReport(w, master.versionId, { replaceSource: true });
+    expect(imported).toMatchObject({
+      previousMachineUuid: MACHINE,
+      autoLink: { intent: 'relink', state: 'linked' },
+    });
+    expect((await w.agent.next('server.virtualbox_watch')).payload.machines).toEqual([
+      IMPORTED_MACHINE,
+    ]);
+    const after = await overview(w);
+    expect(after.source?.machineUuid).toBe(IMPORTED_MACHINE);
+    expect(after.operations.find((item) => item.kind === 'relink')).toMatchObject({
+      machineUuid: IMPORTED_MACHINE,
+      previousMachineUuid: MACHINE,
+    });
+    // The old machine is neither deleted nor touched.
+    expect(w.agent.received.some((m) => m.type === 'server.virtualbox_delete')).toBe(false);
+  });
+
+  it('keeps the existing link when replacing it was not authorized', async () => {
+    const w = await world();
+    const master = await registered(w);
+    const imported = await importAndReport(w, master.versionId, { replaceSource: false });
+    expect(imported).toMatchObject({ state: 'succeeded', autoLink: null });
+    const after = await overview(w);
+    expect(after.source?.machineUuid).toBe(MACHINE);
+    expect(after.operations.filter((item) => item.kind !== 'import')).toEqual([]);
+    // Replacing a link needs one to replace.
+    const none = await importRequest(w, master.versionId, {
+      replaceMachineUuid: null,
+      replaceSource: true,
+    });
+    expect(none.statusCode).toBe(400);
+  });
+
+  it('refuses to replace a machine that is not powered off, and never shuts it down', async () => {
+    const w = await world();
+    const master = await registered(w);
+    await observe(w, [observation({ state: 'running', rawState: 'running' })]);
+    expect(errorCode(await importRequest(w, master.versionId, { replaceSource: true }))).toBe(
+      'vm_not_powered_off',
+    );
+    expect(await rows(w, 'SELECT 1 FROM virtualbox_operations')).toHaveLength(0);
+    expect(w.agent.received.some((m) => m.type === 'server.virtualbox_delete')).toBe(false);
+    expect((await overview(w)).source).toMatchObject({ machineUuid: MACHINE, state: 'running' });
+  });
+
+  it('refuses an import against a link that changed since the page was loaded', async () => {
+    const w = await world();
+    const master = await registered(w);
+    for (const replaceMachineUuid of [null, OTHER_MACHINE]) {
+      expect(errorCode(await importRequest(w, master.versionId, { replaceMachineUuid }))).toBe(
+        'link_changed',
+      );
+    }
+    expect(await rows(w, 'SELECT 1 FROM virtualbox_operations')).toHaveLength(0);
+  });
+
+  it('keeps a successful import, and links nothing, when the link changed while it ran', async () => {
+    const w = await world();
+    const master = await registered(w);
+    const response = await importRequest(w, master.versionId, { replaceSource: true });
+    const queued = virtualBoxOperationSchema.parse(response.json());
+    await w.agent.next('server.virtualbox_import');
+    // Someone else's change, made behind the import's back.
+    await w.context.pool.query(`UPDATE virtualbox_sources SET machine_uuid = ? WHERE vm_name = ?`, [
+      OTHER_MACHINE,
+      VM_NAME,
+    ]);
+    w.agent.send(envelope('agent.virtualbox_operation_result', result(queued.id)));
+    await w.agent.next('server.virtualbox_operation_ack');
+    expect(await operation(w, queued.id)).toMatchObject({
+      state: 'succeeded',
+      machineUuid: IMPORTED_MACHINE,
+      autoLink: { intent: 'relink', state: 'failed', error: { code: 'link_changed' } },
+    });
+    expect((await overview(w)).source?.machineUuid).toBe(OTHER_MACHINE);
+    // Still stale: a retry is refused the same way, and the import is not repeated.
+    expect(errorCode(await retryLinkRequest(w, queued.id))).toBe('link_changed');
+    expect(w.agent.received.some((m) => m.type === 'server.virtualbox_import')).toBe(false);
+  });
+
+  it('never links a machine that is linked to another VM', async () => {
+    const { w, master } = await unlinkedWorld();
+    await w.context.pool.query(
+      `INSERT INTO virtual_machines (emulator_type, vm_name) VALUES ('virtualbox', 'other-vm')`,
+    );
+    await w.context.pool.query(
+      `INSERT INTO virtualbox_sources
+         (emulator_type, vm_name, agent_id, machine_uuid, display_name, state, present, is_accessible)
+       VALUES ('virtualbox', 'other-vm', ?, ?, 'Other', 'powered_off', TRUE, TRUE)`,
+      [w.paired.agentId, IMPORTED_MACHINE],
+    );
+    const imported = await importAndReport(w, master.versionId, { replaceMachineUuid: null });
+    expect(imported).toMatchObject({
+      state: 'succeeded',
+      machineUuid: IMPORTED_MACHINE,
+      autoLink: { state: 'failed', error: { code: 'virtualbox_already_registered' } },
+    });
+    expect((await overview(w)).source).toBeNull();
+    // Kept: nothing is deleted because its link failed.
+    expect(w.agent.received.some((m) => m.type === 'server.virtualbox_delete')).toBe(false);
+  });
+
+  it('retries only the link once its cause is gone, and never the import', async () => {
+    const w = await world();
+    const master = await registered(w);
+    const response = await importRequest(w, master.versionId, { replaceSource: true });
+    const queued = virtualBoxOperationSchema.parse(response.json());
+    await w.agent.next('server.virtualbox_import');
+    // The old machine was started while the import ran: it is not replaced, nor shut down.
+    await observe(w, [observation({ state: 'running', rawState: 'running' })]);
+    w.agent.send(envelope('agent.virtualbox_operation_result', result(queued.id)));
+    await w.agent.next('server.virtualbox_operation_ack');
+    expect(await operation(w, queued.id)).toMatchObject({
+      state: 'succeeded',
+      autoLink: { state: 'failed', error: { code: 'vm_not_powered_off' } },
+    });
+    expect((await overview(w)).source?.machineUuid).toBe(MACHINE);
+    expect(errorCode(await retryLinkRequest(w, queued.id))).toBe('vm_not_powered_off');
+
+    await observe(w, [observation()]);
+    const retried = await retryLinkRequest(w, queued.id);
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(virtualBoxOperationSchema.parse(retried.json())).toMatchObject({
+      state: 'succeeded',
+      autoLink: { state: 'linked', error: null },
+    });
+    expect((await overview(w)).source?.machineUuid).toBe(IMPORTED_MACHINE);
+    expect(w.agent.received.some((m) => m.type === 'server.virtualbox_import')).toBe(false);
+    // Done once: there is nothing left to retry.
+    expect(errorCode(await retryLinkRequest(w, queued.id))).toBe('already_linked');
+  });
+
+  it('makes a link left pending by a restart when the agent comes back, without importing again', async () => {
+    const { w, master } = await unlinkedWorld();
+    const response = await importRequest(w, master.versionId, { replaceMachineUuid: null });
+    const queued = virtualBoxOperationSchema.parse(response.json());
+    await w.agent.next('server.virtualbox_import');
+    // The API recorded the import, then stopped before linking it.
+    await w.context.pool.query(
+      `UPDATE virtualbox_operations
+       SET state = 'succeeded', machine_uuid = ?, machine_name = 'Xenix 386 (copy)',
+           machine_state = 'powered_off', finished_at = UTC_TIMESTAMP(3)
+       WHERE id = ?`,
+      [IMPORTED_MACHINE, queued.id],
+    );
+    expect((await operation(w, queued.id)).autoLink?.state).toBe('pending');
+    await sync(w.agent, true, [{ operationId: queued.id, phase: 'reported' }]);
+    expect((await operation(w, queued.id)).autoLink?.state).toBe('linked');
+    expect((await overview(w)).source?.machineUuid).toBe(IMPORTED_MACHINE);
+    // The agent's repeated report only gets its answer.
+    w.agent.send(envelope('agent.virtualbox_operation_result', result(queued.id)));
+    await w.agent.next('server.virtualbox_operation_ack');
+    expect(w.agent.received.some((m) => m.type === 'server.virtualbox_import')).toBe(false);
+    expect((await overview(w)).operations.filter((item) => item.kind === 'link')).toHaveLength(1);
+  });
+
+  it('links nothing for an import that failed', async () => {
+    const { w, master } = await unlinkedWorld();
+    const failed = await importAndReport(
+      w,
+      master.versionId,
+      { replaceMachineUuid: null },
+      { outcome: 'failed', code: 'checksum_mismatch', message: 'Bad OVA.', machine: null },
+    );
+    expect(failed).toMatchObject({ state: 'failed', autoLink: { intent: 'link', state: null } });
+    expect(errorCode(await retryLinkRequest(w, failed.id))).toBe('link_not_retryable');
+    expect((await overview(w)).source).toBeNull();
+  });
+
+  it('makes an older version the lineage that later snapshots must come from', async () => {
+    const w = await world();
+    const master = await registered(w);
+    // A snapshot of the master; the linked machine is now that snapshot.
+    const snapshot = registrationOperationSchema.parse(
+      (await snapshotRequest(w, master.versionId)).json(),
+    );
+    await w.agent.next('server.virtualbox_registration_request');
+    await exported(w, snapshot);
+    expect((await overview(w)).sourceVersionId).toBe(snapshot.versionId);
+
+    // Importing the older master in its place makes the machine the master, not the newest version.
+    await importAndReport(w, master.versionId, { replaceSource: true });
+    await w.agent.next('server.virtualbox_watch');
+    expect((await overview(w)).sourceVersionId).toBe(master.versionId);
+    expect(errorCode(await snapshotRequest(w, snapshot.versionId))).toBe(
+      'snapshot_parent_mismatch',
+    );
+    const next = await snapshotRequest(w, master.versionId);
+    expect(next.statusCode, next.body).toBe(202);
+    expect((await w.agent.next('server.virtualbox_registration_request')).payload.machineUuid).toBe(
+      IMPORTED_MACHINE,
+    );
+    // Every version is kept.
+    const kept = await rows(w, 'SELECT id FROM vm_versions WHERE id IN (?, ?)', [
+      master.versionId,
+      snapshot.versionId,
+    ]);
+    expect(kept).toHaveLength(2);
   });
 });
 

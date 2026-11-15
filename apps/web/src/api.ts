@@ -932,6 +932,18 @@ export function importIntoVirtualBox(
   );
 }
 
+/** Links the machine an import created, once more. Never repeats the import. */
+export function retryVirtualBoxImportLink(
+  vm: VmIdentity,
+  operationId: string,
+): Promise<VirtualBoxOperation> {
+  return requestJson(
+    `${virtualBoxPath(vm)}/operations/${encodeURIComponent(operationId)}/link`,
+    virtualBoxOperationSchema,
+    { method: 'POST', body: {} },
+  );
+}
+
 export function deleteFromVirtualBox(
   vm: VmIdentity,
   request: VirtualBoxDeleteRequest,

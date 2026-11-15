@@ -26,6 +26,8 @@ linked machine comes from (its lineage), when that is known.
 **A link changes only when an administrator changes it**, through `POST …/virtualbox/link` or `…/unlink`, and each
 change is recorded in `virtualbox_operations` (`link`, `relink`, `unlink`) with the previous UUID. Never because two
 machines have similar names, never because an agent disconnected, and never as a side effect of an import.
+(Revised by [0047](0047-virtualbox-import-links-and-polling.md): an import links its machine when the VM has none, or
+replaces the link when the administrator explicitly agreed.)
 
 - A machine is linked **by UUID**, from a discovery that saw it, or from an import that created it. Exactly one of
   `discoveryOperationId` and `importOperationId` is named.

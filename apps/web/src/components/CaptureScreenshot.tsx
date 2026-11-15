@@ -6,6 +6,12 @@ import { FormError } from './States';
 
 const EVENT = 'emucat:media-published';
 
+/** While a capture is under way: until it is published or fails. */
+const PENDING_POLL_MS = 2_000;
+/** While the session runs: only whether capturing is available, which rarely changes. */
+const RUNNING_POLL_MS = 15_000;
+const PENDING_STATES = ['requested', 'capturing', 'uploading'];
+
 /** Refresh only the matching gallery and keep its current content and focus during the fetch. */
 export function useCaptureGalleryRefresh(vm: VmIdentity, refresh: () => void) {
   useEffect(() => {
@@ -23,13 +29,21 @@ export function CaptureScreenshot({ session }: { session: VmSession }) {
     (signal: AbortSignal) => fetchCaptureStatus(session.id, signal),
     [session.id],
   );
-  const status = usePolledData(load, 1500);
+  // A session that ended is read once, for a capture it may have left to retry, and only followed again while
+  // one is pending. Its screenshots are in the gallery, which refreshes when a capture is published.
+  const [following, setFollowing] = useState(false);
+  const status = usePolledData(
+    load,
+    following ? PENDING_POLL_MS : session.state === 'running' ? RUNNING_POLL_MS : null,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const requestId = useRef<string | null>(null);
   const completed = useRef<string | null>(null);
   const help = useId();
   const capture = status.data?.operation;
+  const pending = Boolean(capture && PENDING_STATES.includes(capture.state));
+  if (pending !== following) setFollowing(pending);
   const completedId = capture?.state === 'completed' ? capture.id : null;
   useEffect(() => {
     if (completedId && completed.current !== completedId) {
@@ -61,7 +75,6 @@ export function CaptureScreenshot({ session }: { session: VmSession }) {
   };
   if (session.emulatorType !== 'qemu' && session.emulatorType !== 'virtualbox') return null;
   if (session.state !== 'running' && !capture) return null;
-  const pending = capture && ['requested', 'capturing', 'uploading'].includes(capture.state);
   return (
     <section
       className="mt-2"
@@ -76,7 +89,7 @@ export function CaptureScreenshot({ session }: { session: VmSession }) {
             session.state !== 'running' ||
             !session.agentOnline ||
             !status.data?.available ||
-            Boolean(pending)
+            pending
           }
           aria-describedby={help}
           onClick={() => void start(false)}

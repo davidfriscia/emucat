@@ -36,7 +36,8 @@ import { FormError } from './States';
 import {
   ImportIntoVirtualBoxDialog,
   notifyVirtualBoxChanged,
-  useVirtualBoxManagement,
+  VIRTUALBOX_IDLE_POLL_MS,
+  WithVirtualBoxManagement,
 } from './VirtualBoxSource';
 
 /**
@@ -518,8 +519,11 @@ interface VersionHistoryProps {
 }
 
 function VirtualBoxVersionHistory(props: VersionHistoryProps) {
-  const management = useVirtualBoxManagement(props.vm);
-  return <VersionHistory {...props} virtualbox={management.data} />;
+  return (
+    <WithVirtualBoxManagement vm={props.vm}>
+      {(management) => <VersionHistory {...props} virtualbox={management.data} />}
+    </WithVirtualBoxManagement>
+  );
 }
 
 function VersionHistory({
@@ -544,9 +548,15 @@ function VersionHistory({
   );
   const [fastPoll, setFastPoll] = useState(false);
   const interval = fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS;
-  const tree = usePolledData(loadTree, interval);
-  const workspaces = usePolledData(loadWorkspaces, interval);
-  const options = usePolledData(loadOptions, interval);
+  // A VirtualBox VM is never restored and has no working copies (decision 0045), so those are read once and again
+  // after a change made here. Its versions change only by a snapshot or a deletion, which this page follows.
+  const isVirtualBox = emulatorType === 'virtualbox';
+  const tree = usePolledData(
+    loadTree,
+    isVirtualBox && !fastPoll ? VIRTUALBOX_IDLE_POLL_MS : interval,
+  );
+  const workspaces = usePolledData(loadWorkspaces, isVirtualBox ? null : interval);
+  const options = usePolledData(loadOptions, isVirtualBox ? null : interval);
   const [restoring, setRestoring] = useState<string | null>(null);
   const [running, setRunning] = useState<RunPreselection | null>(null);
   const [snapshotting, setSnapshotting] = useState<SnapshotRequest | null>(null);
@@ -728,6 +738,7 @@ function VersionHistory({
           title={title ?? vmName}
           version={{ id: importing.id, label: versionLabel(importing) }}
           agents={virtualbox.agents}
+          source={virtualbox.source}
           onClose={() => setImporting(null)}
           onStarted={() => {
             setImporting(null);

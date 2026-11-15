@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type {
   ServerMessage,
   VirtualBoxAgentOption,
+  VirtualBoxAutoLinkIntent,
+  VirtualBoxAutoLinkState,
   VirtualBoxDeleteRequest,
   VirtualBoxImportRequest,
   VirtualBoxLinkRequest,
@@ -57,6 +59,9 @@ const FAILURE_TEXT = {
     'The agent no longer says that it can import into or delete from VirtualBox. Nothing was sent to it.',
 } as const;
 
+const LINK_CHANGED_DURING_IMPORT =
+  'The machine linked to this VM changed while the import ran, so the imported machine was not linked. It stays in VirtualBox; link it, or not, from here.';
+
 const isDuplicateEntry = (error: unknown): boolean =>
   (error as { code?: string }).code === 'ER_DUP_ENTRY';
 
@@ -84,6 +89,20 @@ function toOperation(row: RowDataPacket): VirtualBoxOperation {
     machineName: row.machine_name as string | null,
     machineState: row.machine_state as VirtualBoxVmState | null,
     previousMachineUuid: row.previous_machine_uuid as string | null,
+    autoLink: row.link_intent
+      ? {
+          intent: row.link_intent as VirtualBoxAutoLinkIntent,
+          state: (row.link_state as VirtualBoxAutoLinkState | null) ?? null,
+          linkOperationId: (row.link_operation_id as string | null) ?? null,
+          error: row.link_error_code
+            ? {
+                code: row.link_error_code as string,
+                message:
+                  (row.link_error_message as string | null) ?? (row.link_error_code as string),
+              }
+            : null,
+        }
+      : null,
     strayMachines: strayMachines(row.stray_machines),
     filesRemoved: row.files_removed === null ? null : Boolean(row.files_removed),
     progress: {
@@ -98,6 +117,14 @@ function toOperation(row: RowDataPacket): VirtualBoxOperation {
   };
 }
 
+/** A link just made, in a transaction not yet committed. */
+interface Linked {
+  /** Its history row. */
+  operationId: string;
+  /** The agent the VM was linked through before, which stops watching that machine. */
+  previousAgent: string | null;
+}
+
 /** A machine named for a link, as its evidence describes it. */
 interface Evidence {
   name: string;
@@ -108,11 +135,12 @@ interface Evidence {
 }
 
 /**
- * Source links, imports and deletions for VirtualBox VMs (decision 0046). A link, relink or unlink is one
- * transaction here, made only when an administrator asks; an import or a deletion runs on the agent, which reports
- * how it ended. Nothing here ever links a machine by itself: not by name, not after an import, and not when an
- * agent comes or goes. Nothing here deletes a machine either, except by sending the one deletion an administrator
- * confirmed, for the one machine they named.
+ * Source links, imports and deletions for VirtualBox VMs (decisions 0046 and 0047). A link, relink or unlink is one
+ * transaction here; an import or a deletion runs on the agent, which reports how it ended. A machine is linked only
+ * when an administrator asks, or when an import they asked for created it: then it is linked to a VM that had none,
+ * or replaces the link they explicitly agreed to replace, once the import succeeded and only if that link is still
+ * the one they saw. Never by name, and never when an agent comes or goes. Nothing here deletes a machine either,
+ * except by sending the one deletion an administrator confirmed, for the one machine they named.
  */
 export class VirtualBoxManagement {
   private readonly policy: VirtualBoxManagementPolicy;
@@ -314,6 +342,14 @@ export class VirtualBoxManagement {
           'No finished import of this VM on this agent created that machine.',
         );
       }
+      const [deleted] = await connection.execute<RowDataPacket[]>(
+        `SELECT 1 FROM virtualbox_operations
+         WHERE kind = 'delete' AND state = 'succeeded' AND agent_id = ? AND machine_uuid = ?`,
+        [agentId, machineUuid],
+      );
+      if (deleted[0]) {
+        throw conflict('machine_already_deleted', 'This machine was deleted from VirtualBox.');
+      }
       return {
         name: (row.machine_name as string | null) ?? vmName,
         state: (row.machine_state as VirtualBoxVmState | null) ?? 'unknown',
@@ -372,98 +408,11 @@ export class VirtualBoxManagement {
     const { agentId, machineUuid } = input;
     this.requireAgent(agentId, false);
 
-    const operationId = randomUUID();
-    let previousAgent: string | null;
+    let linked: Linked;
     const connection = await this.pool.getConnection();
     try {
       await connection.beginTransaction();
-      const [agents] = await connection.execute<RowDataPacket[]>(
-        'SELECT revoked_at, paired_at FROM agents WHERE id = ? LOCK IN SHARE MODE',
-        [agentId],
-      );
-      if (!agents[0] || !agents[0].paired_at) {
-        throw new ApiError(404, 'agent_not_found', 'Agent not found');
-      }
-      if (agents[0].revoked_at) throw conflict('agent_revoked', 'This agent has been revoked.');
-
-      const current = await this.lockSource(connection, vmName);
-      const currentUuid = (current?.machine_uuid as string | undefined) ?? null;
-      if (currentUuid !== input.replaceMachineUuid) {
-        throw conflict(
-          'link_changed',
-          'The machine linked to this VM changed since the page was loaded. Reload it, and choose again.',
-        );
-      }
-      if (current && currentUuid === machineUuid && current.agent_id === agentId) {
-        throw conflict('already_linked', 'This machine is already linked to this VM.');
-      }
-      const [elsewhere] = await connection.execute<RowDataPacket[]>(
-        'SELECT vm_name FROM virtualbox_sources WHERE agent_id = ? AND machine_uuid = ?',
-        [agentId, machineUuid],
-      );
-      if (elsewhere[0]) {
-        throw conflict(
-          'virtualbox_already_registered',
-          `This VirtualBox machine is already linked, to ${elsewhere[0].vm_name as string}.`,
-        );
-      }
-      if (current) this.requireSourceIdle(current);
-      previousAgent = (current?.agent_id as string | undefined) ?? null;
-      await this.requireQuiet(
-        connection,
-        vmName,
-        previousAgent ? [previousAgent, agentId] : [agentId],
-      );
-
-      const evidence = await this.evidence(connection, vmName, input);
-      if (evidence.state !== 'powered_off') {
-        throw conflict(
-          'virtualbox_not_powered_off',
-          'Only a powered-off VirtualBox machine can be linked. Shut it down (a saved state does not count), run discovery again, and choose it from the new report.',
-        );
-      }
-
-      if (current) await this.removeSourceIn(connection, vmName, previousAgent as string);
-      await connection.execute(
-        `INSERT INTO virtualbox_sources
-           (emulator_type, vm_name, agent_id, machine_uuid, display_name, state, raw_state,
-            state_changed_at, present, is_accessible, observed_at)
-         VALUES ('virtualbox', ?, ?, ?, ?, 'powered_off', 'poweroff', ?, TRUE, TRUE, UTC_TIMESTAMP(3))`,
-        [
-          vmName,
-          agentId,
-          machineUuid,
-          evidence.name,
-          evidence.stateChangedAt ? new Date(evidence.stateChangedAt) : null,
-        ],
-      );
-      // A machine imported from a version is that version. One linked from discovery has no known lineage.
-      await connection.execute(
-        `INSERT INTO agent_vm_state
-           (agent_id, emulator_type, vm_name, local_source_version_id, execution_state, content_status)
-         VALUES (?, 'virtualbox', ?, ?, 'idle', 'unverified')
-         ON DUPLICATE KEY UPDATE local_source_version_id = VALUES(local_source_version_id),
-           execution_state = 'idle', content_status = 'unverified'`,
-        [agentId, vmName, evidence.lineage],
-      );
-      await connection.execute(
-        `INSERT INTO virtualbox_operations
-           (id, request_id, kind, state, agent_id, requested_by_user_id, vm_name, version_id,
-            machine_uuid, machine_name, machine_state, previous_machine_uuid, finished_at)
-         VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?, 'powered_off', ?, UTC_TIMESTAMP(3))`,
-        [
-          operationId,
-          randomUUID(),
-          current ? 'relink' : 'link',
-          agentId,
-          userId,
-          vmName,
-          evidence.lineage,
-          machineUuid,
-          evidence.name,
-          currentUuid,
-        ],
-      );
+      linked = await this.linkIn(connection, vmName, input, userId);
       await connection.commit();
     } catch (error) {
       await connection.rollback();
@@ -477,9 +426,112 @@ export class VirtualBoxManagement {
     } finally {
       connection.release();
     }
+    const { previousAgent } = linked;
     this.log.info({ vmName, agentId, machineUuid, previousAgent }, 'VirtualBox machine linked');
     await this.rewatch(previousAgent, agentId);
-    return this.require(operationId);
+    return this.require(linked.operationId);
+  }
+
+  /**
+   * The link itself, in the caller's transaction: every check, then the old link and its agent state go, the new
+   * ones come, and a history row records both.
+   */
+  private async linkIn(
+    connection: PoolConnection,
+    vmName: string,
+    input: VirtualBoxLinkRequest,
+    userId: string | null,
+  ): Promise<Linked> {
+    const { agentId, machineUuid } = input;
+    const operationId = randomUUID();
+    const [agents] = await connection.execute<RowDataPacket[]>(
+      'SELECT revoked_at, paired_at FROM agents WHERE id = ? LOCK IN SHARE MODE',
+      [agentId],
+    );
+    if (!agents[0] || !agents[0].paired_at) {
+      throw new ApiError(404, 'agent_not_found', 'Agent not found');
+    }
+    if (agents[0].revoked_at) throw conflict('agent_revoked', 'This agent has been revoked.');
+
+    const current = await this.lockSource(connection, vmName);
+    const currentUuid = (current?.machine_uuid as string | undefined) ?? null;
+    if (currentUuid !== input.replaceMachineUuid) {
+      throw conflict(
+        'link_changed',
+        'The machine linked to this VM changed since the page was loaded. Reload it, and choose again.',
+      );
+    }
+    if (current && currentUuid === machineUuid && current.agent_id === agentId) {
+      throw conflict('already_linked', 'This machine is already linked to this VM.');
+    }
+    const [elsewhere] = await connection.execute<RowDataPacket[]>(
+      'SELECT vm_name FROM virtualbox_sources WHERE agent_id = ? AND machine_uuid = ?',
+      [agentId, machineUuid],
+    );
+    if (elsewhere[0]) {
+      throw conflict(
+        'virtualbox_already_registered',
+        `This VirtualBox machine is already linked, to ${elsewhere[0].vm_name as string}.`,
+      );
+    }
+    if (current) this.requireSourceIdle(current);
+    const previousAgent = (current?.agent_id as string | undefined) ?? null;
+    await this.requireQuiet(
+      connection,
+      vmName,
+      previousAgent ? [previousAgent, agentId] : [agentId],
+    );
+
+    const evidence = await this.evidence(connection, vmName, input);
+    if (evidence.state !== 'powered_off') {
+      throw conflict(
+        'virtualbox_not_powered_off',
+        'Only a powered-off VirtualBox machine can be linked. Shut it down (a saved state does not count), run discovery again, and choose it from the new report.',
+      );
+    }
+
+    if (current) await this.removeSourceIn(connection, vmName, previousAgent as string);
+    await connection.execute(
+      `INSERT INTO virtualbox_sources
+           (emulator_type, vm_name, agent_id, machine_uuid, display_name, state, raw_state,
+            state_changed_at, present, is_accessible, observed_at)
+         VALUES ('virtualbox', ?, ?, ?, ?, 'powered_off', 'poweroff', ?, TRUE, TRUE, UTC_TIMESTAMP(3))`,
+      [
+        vmName,
+        agentId,
+        machineUuid,
+        evidence.name,
+        evidence.stateChangedAt ? new Date(evidence.stateChangedAt) : null,
+      ],
+    );
+    // A machine imported from a version is that version. One linked from discovery has no known lineage.
+    await connection.execute(
+      `INSERT INTO agent_vm_state
+           (agent_id, emulator_type, vm_name, local_source_version_id, execution_state, content_status)
+         VALUES (?, 'virtualbox', ?, ?, 'idle', 'unverified')
+         ON DUPLICATE KEY UPDATE local_source_version_id = VALUES(local_source_version_id),
+           execution_state = 'idle', content_status = 'unverified'`,
+      [agentId, vmName, evidence.lineage],
+    );
+    await connection.execute(
+      `INSERT INTO virtualbox_operations
+           (id, request_id, kind, state, agent_id, requested_by_user_id, vm_name, version_id,
+            machine_uuid, machine_name, machine_state, previous_machine_uuid, finished_at)
+         VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?, 'powered_off', ?, UTC_TIMESTAMP(3))`,
+      [
+        operationId,
+        randomUUID(),
+        current ? 'relink' : 'link',
+        agentId,
+        userId,
+        vmName,
+        evidence.lineage,
+        machineUuid,
+        evidence.name,
+        currentUuid,
+      ],
+    );
+    return { operationId, previousAgent };
   }
 
   /** Unlinks the VM's machine. The machine stays in VirtualBox as it is; the VM keeps its versions and media. */
@@ -574,8 +626,9 @@ export class VirtualBoxManagement {
   }
 
   /**
-   * Imports one version's OVA into VirtualBox on an agent, as a new machine. The new machine is not linked: the
-   * administrator links it, or not, once it exists. A repeated request finds the operation it created.
+   * Imports one version's OVA into VirtualBox on an agent, as a new machine. Once it exists it is linked to the VM,
+   * if the VM had no machine, or replaces the VM's machine, if the administrator explicitly asked for that; otherwise
+   * it is left unlinked. A repeated request finds the operation it created.
    */
   async importVersion(
     vm: VmIdentity,
@@ -592,7 +645,8 @@ export class VirtualBoxManagement {
         repeated.agent_id !== agentId ||
         repeated.vm_name.toLowerCase() !== vmName.toLowerCase() ||
         repeated.version_id !== versionId ||
-        repeated.target_name !== targetName
+        repeated.target_name !== targetName ||
+        (repeated.link_intent === 'relink') !== input.replaceSource
       ) {
         throw conflict('request_id_reused', 'This request ID belongs to another operation.');
       }
@@ -602,6 +656,8 @@ export class VirtualBoxManagement {
 
     const operationId = randomUUID();
     let payload: Extract<ServerMessage, { type: 'server.virtualbox_import' }>['payload'];
+    let linkIntent: VirtualBoxAutoLinkIntent | null;
+    let replaces: string | null;
     const connection = await this.pool.getConnection();
     try {
       await connection.beginTransaction();
@@ -633,6 +689,19 @@ export class VirtualBoxManagement {
         );
       }
       await lockUsableVersion(connection, versionId);
+      // What becomes of the link is decided now, against the link the administrator saw, and checked again when
+      // the import finishes. Replacing a link needs that machine powered off; keeping it needs nothing.
+      const current = await this.lockSource(connection, vmName);
+      const currentUuid = (current?.machine_uuid as string | undefined) ?? null;
+      if (currentUuid !== input.replaceMachineUuid) {
+        throw conflict(
+          'link_changed',
+          'The machine linked to this VM changed since the page was loaded. Reload it, and choose again.',
+        );
+      }
+      if (current && input.replaceSource) this.requireSourceIdle(current);
+      linkIntent = current === null ? 'link' : input.replaceSource ? 'relink' : null;
+      replaces = linkIntent === 'relink' ? currentUuid : null;
       // An import shares the agent's single operation slot, and a session's machine is not touched by it, but
       // nothing else should be changing this VM while a new machine is made from it.
       await this.requireQuiet(connection, vmName, [agentId]);
@@ -649,8 +718,9 @@ export class VirtualBoxManagement {
       await connection.execute(
         `INSERT INTO virtualbox_operations
            (id, request_id, kind, state, agent_id, requested_by_user_id, vm_name, version_id,
-            repository_id, archive_key, archive_size_bytes, archive_sha256, target_name)
-         VALUES (?, ?, 'import', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            repository_id, archive_key, archive_size_bytes, archive_sha256, target_name,
+            previous_machine_uuid, link_intent, link_state)
+         VALUES (?, ?, 'import', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           operationId,
           requestId,
@@ -663,6 +733,9 @@ export class VirtualBoxManagement {
           payload.archiveSizeBytes,
           payload.archiveSha256,
           targetName,
+          replaces,
+          linkIntent,
+          linkIntent ? 'pending' : null,
         ],
       );
       await connection.commit();
@@ -682,7 +755,10 @@ export class VirtualBoxManagement {
     } finally {
       connection.release();
     }
-    this.log.info({ operationId, vmName, agentId, versionId }, 'VirtualBox import requested');
+    this.log.info(
+      { operationId, vmName, agentId, versionId, linkIntent, replaces },
+      'VirtualBox import requested',
+    );
     // If this cannot be delivered, it stays queued and goes out when the agent reconnects.
     this.link.send(agentId, { type: 'server.virtualbox_import', payload });
     return this.require(operationId);
@@ -864,7 +940,8 @@ export class VirtualBoxManagement {
   ): Promise<void> {
     await this.pool.execute(
       `UPDATE virtualbox_operations
-       SET state = ?, error_code = ?, error_message = ?, finished_at = UTC_TIMESTAMP(3)
+       SET state = ?, error_code = ?, error_message = ?, finished_at = UTC_TIMESTAMP(3),
+           link_state = NULL
        WHERE id = ? AND active_marker = 1`,
       [state, code, FAILURE_TEXT[code], operationId],
     );
@@ -899,6 +976,13 @@ export class VirtualBoxManagement {
       const row = await this.rowFor(agentId, operationId);
       if (!row) this.ack(agentId, operationId);
     }
+    // An import that succeeded before a restart, whose machine was not linked yet.
+    const [unlinked] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT id FROM virtualbox_operations
+       WHERE agent_id = ? AND kind = 'import' AND state = 'succeeded' AND link_state = 'pending'`,
+      [agentId],
+    );
+    for (const row of unlinked) await this.autoLinkSafely(row.id as string);
   }
 
   async progress(agentId: string, payload: VirtualBoxOperationProgressPayload): Promise<void> {
@@ -928,6 +1012,10 @@ export class VirtualBoxManagement {
     }
     const terminal = row.state === 'succeeded' || row.state === 'failed';
     if (terminal) {
+      // Recorded before a restart, perhaps without its link: that is made now, and never the import again.
+      if (row.state === 'succeeded' && row.link_state === 'pending') {
+        await this.autoLinkSafely(operationId);
+      }
       this.ack(agentId, operationId);
       return;
     }
@@ -962,7 +1050,8 @@ export class VirtualBoxManagement {
          SET state = ?, error_code = ?, error_message = ?,
              machine_uuid = COALESCE(?, machine_uuid), machine_name = COALESCE(?, machine_name),
              machine_state = COALESCE(?, machine_state), stray_machines = ?, files_removed = ?,
-             finished_at = UTC_TIMESTAMP(3)
+             finished_at = UTC_TIMESTAMP(3),
+             link_state = CASE WHEN link_intent IS NOT NULL AND ? THEN 'pending' END
          WHERE id = ?`,
         [
           state,
@@ -973,6 +1062,7 @@ export class VirtualBoxManagement {
           machine?.state ?? null,
           payload.strayMachines.length > 0 ? JSON.stringify(payload.strayMachines) : null,
           payload.kind === 'delete' ? payload.filesRemoved : null,
+          succeeded && payload.kind === 'import',
           operationId,
         ],
       );
@@ -1018,6 +1108,150 @@ export class VirtualBoxManagement {
       'VirtualBox operation finished',
     );
     if (rewatch) await this.rewatch(agentId);
+    // The import is recorded as a success whatever becomes of its link, which is a separate step.
+    if (succeeded && payload.kind === 'import') await this.autoLinkSafely(operationId);
     this.ack(agentId, operationId);
+  }
+
+  // Linking what an import created.
+
+  /**
+   * Retries the link of an import whose link was refused, or is still pending. Only the link: the import is never
+   * repeated, and the machine it created is only ever linked, never changed.
+   */
+  async retryLink(
+    vm: VmIdentity,
+    operationId: string,
+    userId: string | null,
+  ): Promise<VirtualBoxOperation> {
+    await this.requireVirtualBoxVm(vm);
+    const operation = await this.get(vm, operationId);
+    if (operation.kind !== 'import' || operation.state !== 'succeeded' || !operation.autoLink) {
+      throw conflict(
+        'link_not_retryable',
+        'Only the link of an import that succeeded, and was to link its machine, can be retried.',
+      );
+    }
+    if (operation.autoLink.state === 'linked') {
+      throw conflict('already_linked', 'The imported machine is already linked.');
+    }
+    this.requireAgent(operation.agentId, false);
+    const refusal = await this.autoLink(operationId, true, userId);
+    if (refusal) throw refusal;
+    return this.get(vm, operationId);
+  }
+
+  /** {@link autoLink}, for a caller that cannot answer for it: an unexpected failure leaves the link pending. */
+  private async autoLinkSafely(operationId: string): Promise<void> {
+    try {
+      await this.autoLink(operationId, false);
+    } catch (error) {
+      this.log.error(
+        { operationId, err: error },
+        'Cannot link an imported VirtualBox machine; the link stays pending',
+      );
+    }
+  }
+
+  /**
+   * Links the machine an import created, as its request said, if every condition of a link still holds: the
+   * machine is this agent's and linked to no other VM, the VM is quiet, and the link is still the one the
+   * administrator saw when they asked (none, or the powered-off machine they agreed to replace). A refusal is
+   * recorded on the import, which stays a success, and is returned; nothing in VirtualBox is changed either way.
+   */
+  private async autoLink(
+    operationId: string,
+    retry: boolean,
+    userId?: string | null,
+  ): Promise<ApiError | null> {
+    let linked: Linked | undefined;
+    let agentId = '';
+    let vmName = '';
+    let machineUuid = '';
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute<RowDataPacket[]>(
+        `SELECT * FROM virtualbox_operations WHERE id = ? AND kind = 'import' FOR UPDATE`,
+        [operationId],
+      );
+      const row = rows[0];
+      const due =
+        row?.state === 'succeeded' &&
+        row.link_intent !== null &&
+        row.machine_uuid !== null &&
+        (row.link_state === 'pending' || (retry && row.link_state === 'failed'));
+      if (!row || !due) {
+        await connection.rollback();
+        return null;
+      }
+      agentId = row.agent_id as string;
+      vmName = row.vm_name as string;
+      machineUuid = row.machine_uuid as string;
+      const [sources] = await connection.execute<RowDataPacket[]>(
+        `SELECT agent_id, machine_uuid FROM virtualbox_sources
+         WHERE emulator_type = 'virtualbox' AND vm_name = ?`,
+        [vmName],
+      );
+      if (sources[0]?.agent_id === agentId && sources[0]?.machine_uuid === machineUuid) {
+        // Linked by hand meanwhile: there is nothing left to do.
+        await connection.execute(
+          `UPDATE virtualbox_operations
+           SET link_state = 'linked', link_error_code = NULL, link_error_message = NULL WHERE id = ?`,
+          [operationId],
+        );
+        await connection.commit();
+        return null;
+      }
+      linked = await this.linkIn(
+        connection,
+        vmName,
+        {
+          agentId,
+          machineUuid,
+          importOperationId: operationId,
+          replaceMachineUuid: (row.previous_machine_uuid as string | null) ?? null,
+        },
+        userId === undefined ? (row.requested_by_user_id as string | null) : userId,
+      );
+      await connection.execute(
+        `UPDATE virtualbox_operations
+         SET link_state = 'linked', link_operation_id = ?, link_error_code = NULL,
+             link_error_message = NULL
+         WHERE id = ?`,
+        [linked.operationId, operationId],
+      );
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      const refusal =
+        error instanceof ApiError
+          ? error.code === 'link_changed'
+            ? conflict('link_changed', LINK_CHANGED_DURING_IMPORT)
+            : error
+          : isDuplicateEntry(error)
+            ? conflict('link_changed', LINK_CHANGED_DURING_IMPORT)
+            : null;
+      if (!refusal) throw error;
+      await this.pool.execute(
+        `UPDATE virtualbox_operations SET link_state = 'failed', link_error_code = ?, link_error_message = ?
+         WHERE id = ? AND link_state IN ('pending', 'failed')`,
+        [refusal.code, refusal.message, operationId],
+      );
+      this.log.warn(
+        { operationId, vmName, agentId, machineUuid, code: refusal.code },
+        'The machine an import created was not linked',
+      );
+      return refusal;
+    } finally {
+      connection.release();
+    }
+    if (!linked) return null;
+    this.log.info(
+      { operationId, vmName, agentId, machineUuid, previousAgent: linked.previousAgent },
+      'The machine an import created was linked',
+    );
+    await this.rewatch(linked.previousAgent, agentId);
+    return null;
   }
 }

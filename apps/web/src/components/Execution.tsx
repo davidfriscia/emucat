@@ -46,9 +46,16 @@ import {
   STATE_BADGE as VIRTUALBOX_STATE_BADGE,
   STATE_TEXT as VIRTUALBOX_STATE_TEXT,
 } from './VirtualBox';
+import { useVirtualBoxChanged } from './VirtualBoxSource';
 
 const ACTIVE_POLL_MS = 1_500;
 const IDLE_POLL_MS = 10_000;
+/** A VirtualBox machine starting or stopping. */
+const VIRTUALBOX_TRANSITION_POLL_MS = 3_000;
+/** A VirtualBox machine running, or a session of it active. */
+const VIRTUALBOX_RUNNING_POLL_MS = 10_000;
+/** A VirtualBox machine powered off: it is started from here, or seen by the agent within this. */
+const VIRTUALBOX_IDLE_POLL_MS = 30_000;
 
 export const SESSION_STATE_TEXT: Record<VmSessionState, string> = {
   requested: 'Requested',
@@ -1280,8 +1287,13 @@ export function VirtualBoxExecutionSection({ vm }: { vm: VmIdentity }) {
     (signal: AbortSignal) => fetchVmSessions({ emulatorType, vmName, limit: 10 }, signal),
     [emulatorType, vmName],
   );
-  const [fastPoll, setFastPoll] = useState(false);
-  const interval = fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+  const [pace, setPace] = useState<'transition' | 'running' | 'idle'>('idle');
+  const interval =
+    pace === 'transition'
+      ? VIRTUALBOX_TRANSITION_POLL_MS
+      : pace === 'running'
+        ? VIRTUALBOX_RUNNING_POLL_MS
+        : VIRTUALBOX_IDLE_POLL_MS;
   const options = usePolledData(loadOptions, interval);
   const sessions = usePolledData(loadSessions, interval);
   const [busy, setBusy] = useState(false);
@@ -1297,12 +1309,22 @@ export function VirtualBoxExecutionSection({ vm }: { vm: VmIdentity }) {
     (source?.state !== null &&
       source?.state !== undefined &&
       ['starting', 'stopping'].includes(source.state));
-  if (transitional !== fastPoll) setFastPoll(transitional);
+  const running =
+    active !== null ||
+    history.some((session) => isSessionActive(session.state)) ||
+    source?.state === 'running' ||
+    source?.state === 'paused';
+  const nextPace = transitional ? 'transition' : running ? 'running' : 'idle';
+  if (nextPace !== pace) setPace(nextPace);
 
-  const refresh = () => {
-    options.refresh();
-    sessions.refresh();
-  };
+  const { refresh: refreshOptions } = options;
+  const { refresh: refreshSessions } = sessions;
+  const refresh = useCallback(() => {
+    refreshOptions();
+    refreshSessions();
+  }, [refreshOptions, refreshSessions]);
+  // A link, relink, unlink, import or deletion changes which machine this runs.
+  useVirtualBoxChanged(vm, refresh);
 
   const start = async () => {
     if (!agent) return;

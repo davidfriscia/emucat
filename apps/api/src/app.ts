@@ -17,6 +17,7 @@ import { WorkspaceCoordinator } from './workspaces/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
 import { registerBrowserRoutes, type BrowserDependencies } from './routes/browser.js';
+import { RequestLogController } from './request-logging.js';
 import { registerSystemRoutes } from './routes/system.js';
 import { zodValidatorCompiler } from './validation.js';
 
@@ -37,6 +38,8 @@ export interface AppDependencies {
 export async function buildApp(dependencies: AppDependencies): Promise<FastifyInstance> {
   const app = Fastify({
     logger: dependencies.logger ?? false,
+    // Keeps routine reads out of an `info` log.
+    logController: new RequestLogController(),
     genReqId: () => randomUUID(),
     bodyLimit: 1024 * 1024,
     routerOptions: { ignoreTrailingSlash: true },

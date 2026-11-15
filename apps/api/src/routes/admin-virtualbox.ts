@@ -75,6 +75,18 @@ export function registerAdminVirtualBoxRoutes(
           ),
       );
 
+      // Only the link of an import that succeeded: the import itself is never repeated.
+      api.post(
+        '/vms/:emulatorType/:vmName/virtualbox/operations/:operationId/link',
+        { schema: { params: operationPathParamsSchema } },
+        async (request): Promise<VirtualBoxOperation> => {
+          const { operationId, ...vm } = request.params as z.infer<
+            typeof operationPathParamsSchema
+          >;
+          return management.retryLink(vm, operationId, sessionOf(request).user.id);
+        },
+      );
+
       api.post(
         '/vms/:emulatorType/:vmName/virtualbox/unlink',
         { schema: { params: vmPathParamsSchema, body: virtualBoxUnlinkRequestSchema } },
