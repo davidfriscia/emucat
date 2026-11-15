@@ -14,8 +14,10 @@ afterEach(async () => {
 interface Line {
   level: number;
   msg: string;
-  req?: { method: string; url: string };
+  reqId?: string;
+  req?: { method: string; url: string; headers?: unknown };
   res?: { statusCode: number };
+  body?: unknown;
 }
 
 /** The app, logging at `level` into an array. */
@@ -33,6 +35,9 @@ async function logged(level: string): Promise<Line[]> {
     logger: { level, stream },
     extraRoutes: (api) => {
       api.post('/test/change', async () => ({ ok: true }));
+      api.get('/test/broken', async () => {
+        throw new Error('database exploded');
+      });
     },
   });
   return lines;
@@ -41,6 +46,7 @@ async function logged(level: string): Promise<Line[]> {
 const completed = (lines: Line[]) => lines.filter((line) => line.msg === 'request completed');
 const INFO = 30;
 const WARN = 40;
+const ERROR = 50;
 
 describe('request logging', () => {
   it('keeps successful reads out of the info log, and every change and failure in it', async () => {
@@ -60,6 +66,36 @@ describe('request logging', () => {
     expect(lines.some((line) => line.msg === 'incoming request')).toBe(false);
   });
 
+  it('logs a server failure as an error, with its cause, and names every request by its ID', async () => {
+    const lines = await logged('info');
+    const response = await app!.inject({ url: '/api/v1/test/broken' });
+    expect(response.statusCode).toBe(500);
+    const [done] = completed(lines);
+    expect(done).toMatchObject({ level: ERROR, res: { statusCode: 500 } });
+    const failed = lines.find((line) => line.msg === 'Request failed');
+    expect(failed?.level).toBe(ERROR);
+    expect(JSON.stringify(failed)).toContain('database exploded');
+    expect(done?.reqId).toBeTruthy();
+    expect(failed?.reqId).toBe(done?.reqId);
+  });
+
+  it('never logs credentials, cookies or request bodies', async () => {
+    const lines = await logged('debug');
+    await app!.inject({
+      method: 'POST',
+      url: '/api/v1/test/change',
+      headers: { authorization: 'Bearer agent-secret-token', cookie: 'emucat_session=s3cret' },
+      payload: { password: 'hunter2-password' },
+    });
+    const text = JSON.stringify(lines);
+    for (const secret of ['agent-secret-token', 's3cret', 'hunter2-password']) {
+      expect(text).not.toContain(secret);
+    }
+    expect(lines.every((line) => line.req?.headers === undefined && line.body === undefined)).toBe(
+      true,
+    );
+  });
+
   it('still logs every request at debug', async () => {
     const lines = await logged('debug');
     await app!.inject({ url: '/api/v1/health' });
@@ -74,6 +110,7 @@ describe('request logging', () => {
     expect(requestLogLevel('POST', 202)).toBe('info');
     expect(requestLogLevel('DELETE', 204)).toBe('info');
     expect(requestLogLevel('GET', 401)).toBe('warn');
-    expect(requestLogLevel('GET', 500)).toBe('warn');
+    expect(requestLogLevel('GET', 500)).toBe('error');
+    expect(requestLogLevel('POST', 503)).toBe('error');
   });
 });

@@ -40,6 +40,12 @@ Manual link, relink and unlink are unchanged.
 - Screenshot status is polled every 15 s for a running session, every 2 s only while a capture is pending, and read
   once for an ended session.
 - A VirtualBox VM's workspaces and restore options are read once; its versions every 30 s.
-- A change of pace only reschedules, and nothing is polled while the browser tab is hidden.
+- A change of pace only reschedules, and nothing is polled while the browser tab is hidden, the API status badge
+  included.
 
-Successful reads are logged at `debug`; changes, failures and WebSocket upgrades stay at `info` or above.
+`apps/web/test/virtualbox-management.test.tsx` measures it: the page of a VirtualBox VM with a running session and
+three ended ones makes 100 requests in 224 simulated seconds, where it made about 600, and each ended session's
+screenshots are read once.
+
+Successful reads are logged at `debug`; changes and WebSocket upgrades at `info`; refusals at `warn` and server
+failures at `error`.

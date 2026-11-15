@@ -12,7 +12,7 @@ import {
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
 import type { RowDataPacket } from 'mysql2/promise';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   envelope,
   GENEROUS_RATE_LIMITS,
@@ -31,9 +31,10 @@ import {
   type BrowserTestContext,
 } from './browser-app.js';
 
+// Closed after each test, not at the end of the file: every world holds a database and its connections.
 const worlds: BrowserTestContext[] = [];
-afterAll(async () => {
-  await Promise.all(worlds.map((world) => world.close()));
+afterEach(async () => {
+  await Promise.all(worlds.splice(0).map((world) => world.close()));
 });
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');

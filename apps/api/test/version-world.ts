@@ -36,7 +36,7 @@ export const MANIFEST_SHA = 'b'.repeat(64);
 
 const worlds: BrowserTestContext[] = [];
 
-/** Closes every world a test file started. Call it from `afterAll`. */
+/** Closes every world a test file started. Call it from `afterEach`, so a file never holds every test's database at once. */
 export async function closeWorlds(): Promise<void> {
   await Promise.all(worlds.splice(0).map((world) => world.close()));
 }

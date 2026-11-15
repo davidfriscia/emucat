@@ -7,8 +7,8 @@ import type {
   VirtualBoxSource,
   VmSession,
 } from '@emucat/contracts';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   adminVm,
   apiError,
@@ -623,6 +623,210 @@ describe('polling the page of a VirtualBox VM', () => {
     expect(api.callsTo('GET', MANAGEMENT_PATH)).toHaveLength(1);
     expect(api.callsTo('GET', `${VM_PATH}/workspaces`)).toHaveLength(1);
     expect(api.callsTo('GET', `${VM_PATH}/restore-options`)).toHaveLength(1);
+  });
+});
+
+/**
+ * The traffic of the whole page, measured: every request the page makes, by endpoint, over simulated time. The
+ * scenario is the one that made about 600 requests in 224 seconds, 444 of them for the screenshots of three ended
+ * sessions: a running session, three ended ones, the machine panel and the version history.
+ */
+describe('the requests the page of a VirtualBox VM makes', () => {
+  const ENDED = [
+    '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f81',
+    '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f82',
+    '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f83',
+  ];
+  let hidden = false;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    hidden = false;
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => (hidden ? 'hidden' : 'visible'),
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    Reflect.deleteProperty(document, 'visibilityState');
+  });
+
+  function session(id: string, state: VmSession['state']): VmSession {
+    return {
+      id,
+      agentId: AGENT_ID,
+      agentName: 'Desk PC',
+      agentOnline: true,
+      emulatorType: 'virtualbox',
+      vmName: 'xenix-386',
+      mode: 'local',
+      state,
+      versionId: null,
+      workspaceId: null,
+      pid: null,
+      processStartedAt: null,
+      requestedAt: WHEN,
+      startedAt: WHEN,
+      endedAt: state === 'running' ? null : WHEN,
+      exitCode: state === 'running' ? null : 0,
+      stopRequested: false,
+      forceRequested: false,
+      gracefulStopAvailable: true,
+      error: null,
+      recovery: null,
+      requestedByDisplayName: 'Ada Admin',
+      updatedAt: WHEN,
+    };
+  }
+
+  /** The page with a running machine; `machine` answers the machine panel's poll. */
+  function page(machine: () => VirtualBoxManagementResponse = () => management()) {
+    const running = session(SESSION_ID, 'running');
+    const execution = options();
+    execution.virtualbox = source({ state: 'running', rawState: 'running' });
+    execution.agents = [
+      {
+        agentId: AGENT_ID,
+        agentName: 'Desk PC',
+        online: true,
+        launch: { eligible: true, reason: null, problem: null },
+        verify: { eligible: false, reason: 'not_supported' },
+        remote: {
+          remote_volatile: { eligible: false, reason: 'mode_not_supported', problem: null },
+          remote_snapshot: { eligible: false, reason: 'mode_not_supported', problem: null },
+        },
+        activeWorkspaceId: null,
+        local: { present: false, contentStatus: null, sourceVersionId: null, lastVerifiedAt: null },
+        activeSession: running,
+        lastSession: null,
+        lastVerification: null,
+      },
+    ] as ExecutionOptionsResponse['agents'];
+    const screenshots = { available: true, reason: null, operation: null };
+    return routes({
+      [`GET ${VM_PATH}/execution-options`]: execution,
+      [`GET ${MANAGEMENT_PATH}`]: () => machine(),
+      'GET /admin/sessions': {
+        sessions: [running, ...ENDED.map((id) => session(id, 'stopped'))],
+      },
+      [`GET /admin/sessions/${SESSION_ID}/screenshots`]: screenshots,
+      ...Object.fromEntries(
+        ENDED.map((id) => [`GET /admin/sessions/${id}/screenshots`, { ...screenshots }]),
+      ),
+    });
+  }
+
+  async function elapse(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  /** Renders the page and lets every first request, and what it leads to, finish. */
+  async function open() {
+    renderAt(VM_PATH);
+    for (let step = 0; step < 20; step++) await elapse(0);
+  }
+
+  function byEndpoint(calls: { method: string; path: string }[]) {
+    const counts: Record<string, number> = {};
+    for (const call of calls) {
+      const key = `${call.method} ${call.path}`;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  it('reads ended sessions once, and polls the rest at their own pace, over 224 seconds', async () => {
+    const api = page();
+    await open();
+    await elapse(224_000);
+    const counts = byEndpoint(api.calls);
+    expect(counts).toEqual({
+      'GET /auth/session': 1,
+      'GET /ready': 15, // every 15 s
+      [`GET ${VM_PATH}`]: 1,
+      [`GET ${VM_PATH}/media`]: 1,
+      // The run panel of a running machine: every 10 s.
+      [`GET ${VM_PATH}/execution-options`]: 23,
+      'GET /admin/sessions': 23,
+      // The machine, once for both panels that show it: every 30 s.
+      [`GET ${MANAGEMENT_PATH}`]: 8,
+      // The version history: versions every 30 s, the rest once.
+      [`GET ${VM_PATH}/versions`]: 8,
+      [`GET ${VM_PATH}/workspaces`]: 1,
+      [`GET ${VM_PATH}/restore-options`]: 1,
+      // The running session's screenshots: every 15 s. Each ended session's: once.
+      [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 15,
+      ...Object.fromEntries(ENDED.map((id) => [`GET /admin/sessions/${id}/screenshots`, 1])),
+    });
+    // Was 601, 444 of them for the three ended sessions.
+    expect(api.calls).toHaveLength(100);
+  });
+
+  it('requests nothing while the tab is hidden, and catches up when it shows', async () => {
+    const api = page();
+    await open();
+    const before = api.calls.length;
+    act(() => {
+      hidden = true;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await elapse(224_000);
+    expect(api.calls.length).toBe(before);
+    act(() => {
+      hidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    for (let step = 0; step < 5; step++) await elapse(0);
+    const caughtUp = byEndpoint(api.calls.slice(before));
+    // What was due is read once; what is read once is not read again.
+    expect(caughtUp).toEqual({
+      'GET /ready': 1,
+      [`GET ${VM_PATH}/execution-options`]: 1,
+      'GET /admin/sessions': 1,
+      [`GET ${MANAGEMENT_PATH}`]: 1,
+      [`GET ${VM_PATH}/versions`]: 1,
+      [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 1,
+    });
+  });
+
+  it('follows an import every 2 seconds, then refreshes the run panel once it is done', async () => {
+    let state: VirtualBoxOperation['state'] = 'running';
+    const api = page(() =>
+      management({
+        operations: [
+          operation({
+            state,
+            stage: state === 'running' ? 'importing' : null,
+            autoLink:
+              state === 'running'
+                ? { intent: 'relink', state: 'pending', linkOperationId: null, error: null }
+                : { intent: 'relink', state: 'linked', linkOperationId: SPARE, error: null },
+          }),
+        ],
+      }),
+    );
+    await open();
+    const machine = () => api.callsTo('GET', MANAGEMENT_PATH).length;
+    const runPanel = () => api.callsTo('GET', `${VM_PATH}/execution-options`).length;
+    const first = machine();
+    await elapse(10_000);
+    expect(machine() - first).toBe(5);
+
+    state = 'succeeded';
+    const optionsBefore = runPanel();
+    await elapse(2_000);
+    for (let step = 0; step < 5; step++) await elapse(0);
+    // Done: the run panel hears of it at once, not at its next poll.
+    expect(runPanel()).toBe(optionsBefore + 1);
+    // And the machine goes back to every 30 seconds.
+    const settled = machine();
+    await elapse(29_000);
+    expect(machine()).toBe(settled);
+    await elapse(1_000);
+    expect(machine()).toBe(settled + 1);
   });
 });
 

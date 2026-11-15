@@ -1,13 +1,14 @@
 import { LogController, type FastifyReply, type FastifyRequest } from 'fastify';
 
-type Level = 'debug' | 'info' | 'warn';
+type Level = 'debug' | 'info' | 'warn' | 'error';
 
 /**
  * How loudly a finished request is logged. The web application rereads the pages it shows, so a successful read is
- * `debug`; everything that changes something, every failure (authentication included), and every WebSocket upgrade,
- * which is how an agent connects, stays at `info` or above.
+ * `debug`; everything that changes something and every WebSocket upgrade, which is how an agent connects, is `info`;
+ * a refusal (authentication included) is `warn`, and a server failure `error`.
  */
 export function requestLogLevel(method: string, statusCode: number): Level {
+  if (statusCode >= 500) return 'error';
   if (statusCode >= 400) return 'warn';
   const read = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
   return read && statusCode >= 200 && statusCode < 400 ? 'debug' : 'info';
