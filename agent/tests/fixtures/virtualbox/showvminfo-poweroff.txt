@@ -1,0 +1,21 @@
+name="Xenix 386"
+groups="/"
+ostype="Other/Unknown"
+UUID="2acda0fc-cea6-406b-8a55-746fac380687"
+CfgFile="C:\Users\someone\VirtualBox VMs\Xenix 386\Xenix 386.vbox"
+SnapFldr="C:\Users\someone\VirtualBox VMs\Xenix 386\Snapshots"
+LogFldr="C:\Users\someone\VirtualBox VMs\Xenix 386\Logs"
+hardwareuuid="2acda0fc-cea6-406b-8a55-746fac380687"
+memory=4
+pagefusion="off"
+vram=8
+cpus=1
+VMState="poweroff"
+VMStateChangeTime="2025-07-18T05:33:15.000000000"
+"IDE-0-0"="C:\Users\someone\VirtualBox VMs\Xenix 386\Xenix 386.vdi"
+"IDE-ImageUUID-0-0"="0c1f2e3d-0000-4000-8000-000000000001"
+SharedFolderNameMachineMapping1="host"
+SharedFolderPathMachineMapping1="D:\Shared"
+description="first line
+VMState="running"
+"

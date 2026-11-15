@@ -74,6 +74,7 @@ async function toOperation(
     emulators: record.emulators,
     vms: record.vms.map((vm) => ({ ...vm, registered: registered.has(vmIdentityKey(vm)) })),
     skipped: record.skipped,
+    virtualbox: record.virtualbox,
     expiresAt:
       record.status === 'completed' && record.finishedAt
         ? new Date(record.finishedAt.getTime() + freshness.maxAgeMs).toISOString()

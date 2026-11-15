@@ -162,6 +162,85 @@
       "message": "A scan is already running"
     }
   },
+  "agentDiscoveryResultWithVirtualBox": {
+    "protocolVersion": 1,
+    "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6e",
+    "correlationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6a",
+    "sentAt": "2026-01-31T15:30:02Z",
+    "type": "agent.discovery_result",
+    "payload": {
+      "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6b",
+      "hostPlatform": "windows",
+      "emulators": [
+        { "emulatorType": "86box", "status": "not_configured", "truncated": false },
+        { "emulatorType": "qemu", "status": "ok", "truncated": false }
+      ],
+      "vms": [
+        {
+          "emulatorType": "qemu",
+          "vmName": "Win98",
+          "markers": ["run.bat"],
+          "hostCompatible": true
+        }
+      ],
+      "skipped": [],
+      "virtualbox": {
+        "status": "ok",
+        "version": "7.1.10r169112",
+        "truncated": false,
+        "vms": [
+          {
+            "uuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+            "name": "Xenix 386",
+            "osType": "Other/Unknown",
+            "state": "powered_off",
+            "rawState": "poweroff",
+            "stateChangedAt": "2025-07-18T05:33:15Z",
+            "accessible": true,
+            "memoryMb": 4,
+            "cpus": 1,
+            "error": null
+          },
+          {
+            "uuid": "14883fa7-b01e-46cc-ba51-04f36f2d7478",
+            "name": "Città \"Ufficio\" {v2}",
+            "osType": "Windows 98",
+            "state": "running",
+            "rawState": "running",
+            "stateChangedAt": "2026-07-20T05:16:34Z",
+            "accessible": true,
+            "memoryMb": 256,
+            "cpus": 1,
+            "error": null
+          },
+          {
+            "uuid": "e725aa3d-977f-4463-918f-93d7a879f841",
+            "name": "<inaccessible>",
+            "osType": null,
+            "state": "inaccessible",
+            "rawState": null,
+            "stateChangedAt": null,
+            "accessible": false,
+            "memoryMb": null,
+            "cpus": null,
+            "error": null
+          },
+          {
+            "uuid": "97910566-2cc6-492b-9dc7-6cc6ee66ffd6",
+            "name": "Windows XP ITA SP3 (x86)",
+            "osType": null,
+            "state": "unknown",
+            "rawState": null,
+            "stateChangedAt": null,
+            "accessible": null,
+            "memoryMb": null,
+            "cpus": null,
+            "error": "timeout"
+          }
+        ]
+      }
+    }
+  },
   "registrationServerMessages": [
     {
       "protocolVersion": 1,

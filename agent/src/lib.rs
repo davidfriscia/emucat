@@ -8,6 +8,7 @@
 //! - [`protocol`]: versioned message envelope shared with the API.
 //! - [`connectivity`]: the outbound WebSocket, heartbeats and reconnection.
 //! - [`discovery`]: read-only scanning of the configured base paths.
+//! - [`virtualbox`]: read-only discovery of the VMs registered with VirtualBox, through VBoxManage.
 //! - [`emulators`]: emulator types, VM names and identity, VM root markers.
 //! - [`filesystem`]: safe path construction. Nothing here writes to disk.
 //! - [`archives`]: version and snapshot domain rules, archive exclusions.
@@ -68,5 +69,6 @@ pub mod sftp;
 pub mod shutdown;
 pub mod state;
 pub mod verification;
+pub mod virtualbox;
 pub mod workspaces;
 pub mod zip_directory;

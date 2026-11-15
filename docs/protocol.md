@@ -96,7 +96,7 @@ handshake, so a client without a valid one gets a plain 401 and never has an ope
 | ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
 | `agent.hello`                      | Agent  | `agentVersion`, `platform`, `architecture`                                                                                                                                                       | `server.welcome`                                         |
 | `agent.heartbeat`                  | Agent  | Empty                                                                                                                                                                                            | `server.heartbeat_ack`                                   |
-| `agent.discovery_result`           | Agent  | `operationId`, `hostPlatform`, `emulators`, `vms`, `skipped`                                                                                                                                     |                                                          |
+| `agent.discovery_result`           | Agent  | `operationId`, `hostPlatform`, `emulators`, `vms`, `skipped`, optional `virtualbox`                                                                                                              |                                                          |
 | `agent.discovery_error`            | Agent  | `operationId`, `code`, `message`                                                                                                                                                                 |                                                          |
 | `server.welcome`                   | Server | `agentId`, `heartbeatIntervalSeconds`                                                                                                                                                            |                                                          |
 | `server.heartbeat_ack`             | Server | Empty                                                                                                                                                                                            |                                                          |
@@ -215,6 +215,23 @@ against the shared rules and every marker against its emulator. `hostCompatible`
 and the platform declared in the connection's hello, rather than believed.
 
 Results never touch `virtual_machines` or `vm_versions`. See [what discovery does](agent.md#discovery).
+
+### VirtualBox
+
+An agent with VirtualBox support adds `virtualbox` to its report: `status`, `version`, `truncated` and `vms`, each
+with `uuid`, `name`, `osType`, `state`, `rawState`, `stateChangedAt`, `accessible`, `memoryMb`, `cpus` and `error`.
+The field is additive, so the protocol version is unchanged:
+
+- **An older server** drops the unknown field, as it drops any, and keeps the 86Box and QEMU results.
+- **An older agent** sends no `virtualbox`. The operation then reads `virtualbox: null`, which the web app shows as
+  an agent that does not report VirtualBox.
+- **A `virtualbox` part that fails validation** is replaced with `status: "invalid_report"` and no machines, rather
+  than failing the operation. A state or per-machine error this version does not know reads as `unknown` or
+  `inspection_failed`, and the machine is kept.
+
+Machines are identified by UUID, lowercase and hyphenated. Names are any text without control characters, up to 256
+UTF-16 units, and are never compared with catalog names. The part shares the report's freshness and connection
+binding. See [decision 0044](decisions/0044-virtualbox-discovery.md).
 
 ## Registration
 

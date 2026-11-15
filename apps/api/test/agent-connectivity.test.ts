@@ -795,6 +795,153 @@ describe('discovery', () => {
   });
 });
 
+describe('VirtualBox discovery', () => {
+  const XENIX = '2acda0fc-cea6-406b-8a55-746fac380687';
+  const machine = (overrides: object = {}) => ({
+    uuid: XENIX,
+    name: 'Xenix 386',
+    osType: 'Other/Unknown',
+    state: 'powered_off',
+    rawState: 'poweroff',
+    stateChangedAt: '2025-07-18T05:33:15Z',
+    accessible: true,
+    memoryMb: 4,
+    cpus: 1,
+    error: null,
+    ...overrides,
+  });
+  const virtualbox = (overrides: object = {}) => ({
+    status: 'ok',
+    version: '7.1.10r169112',
+    truncated: false,
+    vms: [machine()],
+    ...overrides,
+  });
+
+  async function completed(agentId: string): Promise<DiscoveryOperation> {
+    return waitFor(async () => {
+      const operation = await readDiscovery(agentId);
+      return operation?.status === 'completed' ? operation : null;
+    }, 'the result');
+  }
+
+  it('carries what VirtualBox reported to the administrator, beside the other emulators', async () => {
+    const { agentId, agent, started, request } = await scanning();
+    answer(agent, request.id, started.id, {
+      virtualbox: virtualbox({
+        vms: [
+          machine(),
+          machine({
+            uuid: '14883fa7-b01e-46cc-ba51-04f36f2d7478',
+            name: 'Città "Ufficio" {v2}',
+            state: 'running',
+            rawState: 'running',
+          }),
+        ],
+      }),
+    });
+    const finished = await completed(agentId);
+    expect(finished.vms.map((vm) => vm.vmName)).toEqual(['Dos622', 'Win98', 'Tux']);
+    expect(finished.virtualbox?.status).toBe('ok');
+    expect(finished.virtualbox?.version).toBe('7.1.10r169112');
+    expect(finished.virtualbox?.vms.map((vm) => [vm.name, vm.state])).toEqual([
+      ['Xenix 386', 'powered_off'],
+      ['Città "Ufficio" {v2}', 'running'],
+    ]);
+    expect(finished.fromCurrentConnection).toBe(true);
+    expect(finished.expiresAt).not.toBeNull();
+  });
+
+  it('says nothing about VirtualBox for an agent that predates it', async () => {
+    const { agentId, agent, started, request } = await scanning();
+    answer(agent, request.id, started.id);
+    const finished = await completed(agentId);
+    expect(finished.virtualbox).toBeNull();
+    expect(finished.vms).toHaveLength(3);
+  });
+
+  it.each(['not_configured', 'executable_missing', 'command_failed', 'timeout'])(
+    'reports %s without costing the 86Box and QEMU results',
+    async (status) => {
+      const { agentId, agent, started, request } = await scanning();
+      answer(agent, request.id, started.id, {
+        virtualbox: virtualbox({ status, version: null, vms: [] }),
+      });
+      const finished = await completed(agentId);
+      expect(finished.virtualbox).toEqual({ status, version: null, truncated: false, vms: [] });
+      expect(finished.vms).toHaveLength(3);
+    },
+  );
+
+  it('keeps the report when its VirtualBox part is invalid, and says so', async () => {
+    const { agentId, agent, started, request } = await scanning();
+    answer(agent, request.id, started.id, {
+      virtualbox: virtualbox({ vms: [machine({ uuid: '../../etc/passwd' })] }),
+    });
+    const finished = await completed(agentId);
+    expect(finished.virtualbox?.status).toBe('invalid_report');
+    expect(finished.virtualbox?.vms).toEqual([]);
+    expect(finished.vms).toHaveLength(3);
+  });
+
+  it('never marks a VirtualBox machine as registered, nor creates anything', async () => {
+    await insertVm(context.pool, { emulatorType: 'qemu', vmName: 'Xenix 386' });
+    const before = [
+      await count(context.pool, 'virtual_machines'),
+      await count(context.pool, 'vm_versions'),
+      await count(context.pool, 'agent_vm_state'),
+    ];
+    const { agentId, agent, started, request } = await scanning();
+    answer(agent, request.id, started.id, { virtualbox: virtualbox() });
+    const finished = await completed(agentId);
+    expect(finished.virtualbox?.vms[0]).not.toHaveProperty('registered');
+    expect([
+      await count(context.pool, 'virtual_machines'),
+      await count(context.pool, 'vm_versions'),
+      await count(context.pool, 'agent_vm_state'),
+    ]).toEqual(before);
+  });
+
+  it('drops any path a machine claims to have', async () => {
+    const { agentId, agent, started, request } = await scanning();
+    answer(agent, request.id, started.id, {
+      virtualbox: virtualbox({
+        vms: [machine({ cfgFile: 'C:\\Users\\secret\\x.vbox', disks: ['D:\\hidden.vdi'] })],
+        settingsPath: 'C:\\Users\\secret',
+      }),
+    });
+    await completed(agentId);
+    const raw = (await admin.get(`/admin/agents/${agentId}/discovery`)).body;
+    expect(raw).not.toContain('secret');
+    expect(raw).not.toContain('hidden');
+  });
+
+  it('is stale once the agent reconnects, like the rest of the report', async () => {
+    const { agentId, credential, agent, started, request } = await scanning();
+    answer(agent, request.id, started.id, { virtualbox: virtualbox() });
+    await completed(agentId);
+    const newer = await connect(credential);
+    await newer.hello();
+    await agent.closed();
+    const after = await readDiscovery(agentId);
+    expect(after?.fromCurrentConnection).toBe(false);
+    expect(after?.virtualbox?.vms).toHaveLength(1);
+  });
+
+  it('ignores a VirtualBox report from a connection that was not asked', async () => {
+    const { agentId, credential, agent: older, started, request } = await scanning();
+    const newer = await connect(credential);
+    await newer.hello();
+    await older.closed();
+    answer(newer, request.id, started.id, { virtualbox: virtualbox() });
+    newer.send(envelope('agent.heartbeat', {}));
+    await newer.next('server.heartbeat_ack');
+    const operation = await readDiscovery(agentId);
+    expect(operation?.status).toBe('failed');
+    expect(operation?.virtualbox).toBeNull();
+  });
+});
+
 describe('server restart', () => {
   it('shows nobody as online afterwards, and accepts the same credential again', async () => {
     const first = await startBrowserApp(

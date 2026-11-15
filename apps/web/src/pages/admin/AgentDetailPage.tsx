@@ -38,6 +38,7 @@ import {
 } from '../../components/Registration';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
 import { AgentRestores } from '../../components/Restore';
+import { VirtualBoxMachines } from '../../components/VirtualBox';
 import { usePolledData } from '../../usePolledData';
 import { NotFoundPage } from '../NotFoundPage';
 
@@ -529,7 +530,8 @@ function RegistrationWorkspace({ agent }: { agent: AgentSummary }) {
         </h2>
         <p className="text-body-secondary">
           Asks the agent to look, read-only, inside its configured VM directories, and shows which
-          of the virtual machines it finds are not in the catalog yet.
+          of the virtual machines it finds are not in the catalog yet. If VirtualBox is configured,
+          the agent also lists the machines registered with it.
         </p>
         {unavailable ? (
           <div className="alert alert-secondary" role="status">
@@ -581,6 +583,11 @@ function RegistrationWorkspace({ agent }: { agent: AgentSummary }) {
               </div>
             ) : null}
             <DiscoveryResults operation={operation} actions={actions} />
+            <VirtualBoxMachines
+              virtualbox={operation.virtualbox}
+              observedAt={operation.finishedAt}
+              stale={stale}
+            />
           </>
         ) : null}
         {!operation && !discovery.loading && !unavailable ? (

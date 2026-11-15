@@ -33,6 +33,7 @@ use crate::protocol::{
     DiscoveryResult, Empty, Envelope, Message, close_codes, decode,
 };
 use crate::registration::AgentOperations;
+use crate::virtualbox::{VirtualBoxConfig, VirtualBoxLimits};
 
 pub const AGENT_WS_PATH: &str = "/api/v1/agent/ws";
 /// How often a change in screenshot synchronization is reported. Far below the server's message limit.
@@ -158,6 +159,9 @@ pub struct ConnectionSettings {
     pub host: Platform,
     pub emulators: Arc<BTreeMap<EmulatorType, EmulatorConfig>>,
     pub scan_limits: ScanLimits,
+    /// VirtualBox, if configured. Discovery asks it for its machines alongside the directory scan.
+    pub virtualbox: Option<Arc<VirtualBoxConfig>>,
+    pub virtualbox_limits: VirtualBoxLimits,
     pub connect_timeout: Duration,
     pub welcome_timeout: Duration,
     pub backoff: Backoff,
@@ -182,6 +186,8 @@ impl ConnectionSettings {
             host,
             emulators: Arc::new(emulators),
             scan_limits: ScanLimits::default(),
+            virtualbox: None,
+            virtualbox_limits: VirtualBoxLimits::default(),
             connect_timeout: Duration::from_secs(15),
             welcome_timeout: Duration::from_secs(15),
             backoff: Backoff::default(),
@@ -639,9 +645,19 @@ fn start_scan(
     let emulators = Arc::clone(&settings.emulators);
     let host = settings.host;
     let limits = settings.scan_limits;
+    let virtualbox = settings.virtualbox.clone();
+    let virtualbox_limits = settings.virtualbox_limits;
     tokio::spawn(async move {
-        let scan =
-            tokio::task::spawn_blocking(move || discovery::scan(&emulators, host, &limits)).await;
+        let scan = tokio::task::spawn_blocking(move || {
+            discovery::scan_all(
+                &emulators,
+                virtualbox.as_deref(),
+                host,
+                &limits,
+                &virtualbox_limits,
+            )
+        })
+        .await;
         let outcome = match scan {
             Ok(report) => ScanOutcome::Done(operation_id, request_id, report),
             Err(error) => {

@@ -1,0 +1,7 @@
+name="Città \"Ufficio\" {v2}"
+ostype="Windows 98"
+UUID="14883fa7-b01e-46cc-ba51-04f36f2d7478"
+memory=256
+cpus=1
+VMState="saved"
+VMStateChangeTime="2026-07-20T05:16:34.000000000"

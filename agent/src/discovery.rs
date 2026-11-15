@@ -22,6 +22,7 @@ use crate::config::EmulatorConfig;
 use crate::emulators::{EmulatorType, VmName, VmNameError, VmRootEntry, is_valid_vm_root};
 use crate::platform::Platform;
 use crate::protocol::AGENT_MAX_MESSAGE_BYTES;
+use crate::virtualbox::{self, VirtualBoxConfig, VirtualBoxLimits, VirtualBoxReport};
 
 pub const MAX_VMS: usize = 256;
 pub const MAX_SKIPPED: usize = 64;
@@ -108,6 +109,10 @@ pub struct DiscoveryReport {
     pub emulators: Vec<EmulatorReport>,
     pub vms: Vec<DiscoveredVm>,
     pub skipped: Vec<SkippedEntry>,
+    /// The machines registered with VirtualBox. Absent from an agent that predates VirtualBox, and
+    /// left out of a filesystem-only scan, so a report without it is still a valid report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtualbox: Option<VirtualBoxReport>,
 }
 
 /// The launch scripts a host can run. Mirrors `QEMU_HOST_LAUNCH_SCRIPTS` in `@emucat/contracts`.
@@ -369,6 +374,45 @@ pub fn scan(
     host: Platform,
     limits: &ScanLimits,
 ) -> DiscoveryReport {
+    let mut report = scan_filesystem(emulators, host, limits);
+    fit_to_message(&mut report);
+    report
+}
+
+/// Scans every configured emulator and asks VirtualBox for its machines, at the same time, so that
+/// neither waits for the other. A failure of either is reported in its own part, and never costs the
+/// other its result. This blocks; call it from `spawn_blocking`.
+pub fn scan_all(
+    emulators: &BTreeMap<EmulatorType, EmulatorConfig>,
+    virtualbox: Option<&VirtualBoxConfig>,
+    host: Platform,
+    limits: &ScanLimits,
+    virtualbox_limits: &VirtualBoxLimits,
+) -> DiscoveryReport {
+    let (mut report, machines) = std::thread::scope(|scope| {
+        let machines = scope.spawn(|| virtualbox::discover(virtualbox, virtualbox_limits));
+        let report = scan_filesystem(emulators, host, limits);
+        let machines = machines.join().unwrap_or_else(|_| {
+            tracing::error!("VirtualBox discovery failed");
+            VirtualBoxReport {
+                status: virtualbox::VirtualBoxStatus::CommandFailed,
+                version: None,
+                truncated: false,
+                vms: Vec::new(),
+            }
+        });
+        (report, machines)
+    });
+    report.virtualbox = Some(machines);
+    fit_to_message(&mut report);
+    report
+}
+
+fn scan_filesystem(
+    emulators: &BTreeMap<EmulatorType, EmulatorConfig>,
+    host: Platform,
+    limits: &ScanLimits,
+) -> DiscoveryReport {
     let deadline = Instant::now() + limits.time_budget;
     let mut vms = Vec::new();
     let mut skipped = Vec::new();
@@ -391,14 +435,13 @@ pub fn scan(
             ),
         })
         .collect();
-    let mut report = DiscoveryReport {
+    DiscoveryReport {
         host_platform: host,
         emulators: reports,
         vms,
         skipped,
-    };
-    fit_to_message(&mut report);
-    report
+        virtualbox: None,
+    }
 }
 
 /// Most of a message may be report. The rest is left for the envelope.
@@ -406,16 +449,31 @@ const REPORT_MAX_BYTES: usize = AGENT_MAX_MESSAGE_BYTES - 1024;
 
 /// A last guarantee that the report fits in one message. The limits on counts and names already make
 /// this true, so this should never have anything to do.
+/// What goes first is what matters least: skipped directories, then VirtualBox machines, then VMs.
 fn fit_to_message(report: &mut DiscoveryReport) {
     let size =
         |report: &DiscoveryReport| serde_json::to_vec(report).map_or(usize::MAX, |b| b.len());
     while size(report) > REPORT_MAX_BYTES {
-        if report.skipped.pop().is_none() && report.vms.pop().is_none() {
+        if report.skipped.pop().is_some() {
+            mark_emulators_truncated(report);
+            continue;
+        }
+        if let Some(machines) = report.virtualbox.as_mut()
+            && machines.vms.pop().is_some()
+        {
+            machines.truncated = true;
+            continue;
+        }
+        if report.vms.pop().is_none() {
             return;
         }
-        for emulator in &mut report.emulators {
-            emulator.truncated = true;
-        }
+        mark_emulators_truncated(report);
+    }
+}
+
+fn mark_emulators_truncated(report: &mut DiscoveryReport) {
+    for emulator in &mut report.emulators {
+        emulator.truncated = true;
     }
 }
 
@@ -460,10 +518,58 @@ mod tests {
                 };
                 1000
             ],
+            virtualbox: None,
         };
         fit_to_message(&mut report);
         assert!(serde_json::to_vec(&report).unwrap().len() <= REPORT_MAX_BYTES);
         assert!(report.emulators[0].truncated);
         assert!(!report.skipped.is_empty());
+    }
+
+    #[test]
+    fn the_size_guard_trims_virtualbox_machines_before_vms() {
+        use crate::virtualbox::{VirtualBoxStatus, VirtualBoxVm, VirtualBoxVmState};
+        let machine = |index: usize| VirtualBoxVm {
+            uuid: uuid::Uuid::from_u128(index as u128),
+            name: "ü".repeat(crate::virtualbox::VIRTUALBOX_NAME_MAX_CHARS),
+            os_type: Some("o".repeat(crate::virtualbox::VIRTUALBOX_OS_TYPE_MAX_CHARS)),
+            state: VirtualBoxVmState::PoweredOff,
+            raw_state: Some("poweroff".to_owned()),
+            state_changed_at: Some("2026-04-10T12:27:31Z".to_owned()),
+            accessible: Some(true),
+            memory_mb: Some(4096),
+            cpus: Some(4),
+            error: None,
+        };
+        let mut report = DiscoveryReport {
+            host_platform: Platform::Windows,
+            emulators: vec![EmulatorReport {
+                emulator_type: EmulatorType::Qemu,
+                status: EmulatorStatus::Ok,
+                truncated: false,
+            }],
+            vms: vec![DiscoveredVm {
+                emulator_type: EmulatorType::Qemu,
+                vm_name: VmName::new("Win98").unwrap(),
+                markers: vec!["run.bat".to_owned()],
+                host_compatible: Some(true),
+            }],
+            skipped: Vec::new(),
+            virtualbox: Some(VirtualBoxReport {
+                status: VirtualBoxStatus::Ok,
+                version: Some("7.1.10r169112".to_owned()),
+                truncated: false,
+                vms: (0..crate::virtualbox::VIRTUALBOX_MAX_VMS)
+                    .map(machine)
+                    .collect(),
+            }),
+        };
+        fit_to_message(&mut report);
+        assert!(serde_json::to_vec(&report).unwrap().len() <= REPORT_MAX_BYTES);
+        let machines = report.virtualbox.as_ref().unwrap();
+        assert!(machines.truncated);
+        assert!(!machines.vms.is_empty());
+        assert_eq!(report.vms.len(), 1, "the filesystem VMs are untouched");
+        assert!(!report.emulators[0].truncated);
     }
 }

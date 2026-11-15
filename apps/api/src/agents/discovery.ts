@@ -8,6 +8,7 @@ import {
   type DiscoverySkipped,
   type EmulatorType,
   type Platform,
+  type VirtualBoxDiscovery,
 } from '@emucat/contracts';
 
 /** Everything known about one operation. Held in memory only: discovery is not persisted. */
@@ -29,6 +30,11 @@ export interface DiscoveryRecord {
     hostCompatible: boolean | null;
   }[];
   skipped: DiscoverySkipped[];
+  /**
+   * What VirtualBox reported, or `null` when the agent said nothing about it, as an agent older than
+   * VirtualBox support does. Observations only: no catalog identity is derived from them.
+   */
+  virtualbox: VirtualBoxDiscovery | null;
 }
 
 const FAILURE_MESSAGES: Record<DiscoveryFailureCode, string> = {
@@ -76,6 +82,7 @@ export class DiscoveryCoordinator {
       emulators: [],
       vms: [],
       skipped: [],
+      virtualbox: null,
     };
     this.latest.set(agentId, record);
     const timer = setTimeout(() => this.fail(record, 'timeout'), this.options.timeoutMs);
@@ -101,6 +108,7 @@ export class DiscoveryCoordinator {
     record.hostPlatform = platform;
     record.emulators = report.emulators;
     record.skipped = report.skipped;
+    record.virtualbox = report.virtualbox ?? null;
     // Recomputed, not believed: it follows from the markers and the host this connection declared.
     record.vms = report.vms.map((vm) => ({
       emulatorType: vm.emulatorType,

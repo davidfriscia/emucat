@@ -95,6 +95,125 @@ export const discoveryEmulatorReportSchema = z.object({
 });
 export type DiscoveryEmulatorReport = z.infer<typeof discoveryEmulatorReportSchema>;
 
+// VirtualBox, which keeps its own list of machines. See decision 0044.
+
+/** Limits on the VirtualBox part of one report. Mirrored by the agent. */
+export const VIRTUALBOX_MAX_VMS = 128;
+/** In UTF-16 code units. The agent cuts names to 128 characters, which is never more than this. */
+export const VIRTUALBOX_NAME_MAX_LENGTH = 256;
+export const VIRTUALBOX_OS_TYPE_MAX_LENGTH = 128;
+export const VIRTUALBOX_RAW_STATE_MAX_LENGTH = 32;
+export const VIRTUALBOX_VERSION_MAX_LENGTH = 64;
+
+export const VIRTUALBOX_DISCOVERY_STATUSES = [
+  'ok',
+  'not_configured',
+  'executable_missing',
+  'unrecognized_version',
+  'unrecognized_output',
+  'command_failed',
+  'timeout',
+  /** Assigned by the server, never sent: the agent sent a VirtualBox part that failed validation. */
+  'invalid_report',
+] as const;
+export const virtualBoxDiscoveryStatusSchema = z.enum(VIRTUALBOX_DISCOVERY_STATUSES);
+export type VirtualBoxDiscoveryStatus = z.infer<typeof virtualBoxDiscoveryStatusSchema>;
+
+/**
+ * A machine's state, grouped into what EmuCat tells apart. A state this version does not know reads
+ * as `unknown`, so that a newer agent never costs a report its other machines.
+ */
+export const VIRTUALBOX_VM_STATES = [
+  'powered_off',
+  'running',
+  'paused',
+  'saved',
+  'starting',
+  'stopping',
+  'aborted',
+  'stuck',
+  'busy',
+  'inaccessible',
+  'unknown',
+] as const;
+export const virtualBoxVmStateSchema = z.enum(VIRTUALBOX_VM_STATES);
+export type VirtualBoxVmState = z.infer<typeof virtualBoxVmStateSchema>;
+
+export const VIRTUALBOX_VM_ERRORS = [
+  'inspection_failed',
+  'timeout',
+  'vanished',
+  'not_inspected',
+] as const;
+export const virtualBoxVmErrorSchema = z.enum(VIRTUALBOX_VM_ERRORS);
+export type VirtualBoxVmError = z.infer<typeof virtualBoxVmErrorSchema>;
+
+/** Display text from VirtualBox: anything but control characters, bounded. */
+const virtualBoxText = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .regex(/^\P{Cc}*$/u);
+
+/** VirtualBox's own identity for a machine, lowercase and hyphenated. Any UUID version. */
+export const virtualBoxUuidSchema = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+
+export const virtualBoxVmSchema = z.object({
+  uuid: virtualBoxUuidSchema,
+  /** For display only. Never used to name the machine in a command, and never a catalog identity. */
+  name: virtualBoxText(VIRTUALBOX_NAME_MAX_LENGTH),
+  osType: virtualBoxText(VIRTUALBOX_OS_TYPE_MAX_LENGTH).nullable(),
+  state: virtualBoxVmStateSchema.catch('unknown'),
+  /** The `VMState` VirtualBox printed, kept so that an unknown state can still be shown. */
+  rawState: z
+    .string()
+    .max(VIRTUALBOX_RAW_STATE_MAX_LENGTH)
+    .regex(/^[\x21-\x7e]*$/)
+    .nullable(),
+  stateChangedAt: timestampSchema.nullable(),
+  /** Unknown when the machine could not be inspected. */
+  accessible: z.boolean().nullable(),
+  memoryMb: z
+    .number()
+    .int()
+    .min(0)
+    .max(16 * 1024 * 1024)
+    .nullable(),
+  cpus: z.number().int().min(0).max(1024).nullable(),
+  error: virtualBoxVmErrorSchema.catch('inspection_failed').nullable(),
+});
+export type VirtualBoxVm = z.infer<typeof virtualBoxVmSchema>;
+
+export const virtualBoxDiscoverySchema = z
+  .object({
+    status: virtualBoxDiscoveryStatusSchema,
+    version: z
+      .string()
+      .max(VIRTUALBOX_VERSION_MAX_LENGTH)
+      .regex(/^[A-Za-z0-9._-]+$/)
+      .nullable(),
+    /** Some machines were not listed or not inspected, because a limit was reached. */
+    truncated: z.boolean(),
+    vms: z.array(virtualBoxVmSchema).max(VIRTUALBOX_MAX_VMS),
+  })
+  .superRefine((report, context) => {
+    const uuids = report.vms.map((vm) => vm.uuid);
+    if (new Set(uuids).size !== uuids.length) {
+      context.addIssue({ code: 'custom', message: 'Repeated VirtualBox UUID' });
+    }
+  });
+export type VirtualBoxDiscovery = z.infer<typeof virtualBoxDiscoverySchema>;
+
+/** What a VirtualBox part that fails validation is read as. The rest of the report still counts. */
+export const INVALID_VIRTUALBOX_DISCOVERY: VirtualBoxDiscovery = {
+  status: 'invalid_report',
+  version: null,
+  truncated: false,
+  vms: [],
+};
+
 export const discoveryRequestPayloadSchema = z.strictObject({ operationId: z.uuid() });
 export type DiscoveryRequestPayload = z.infer<typeof discoveryRequestPayloadSchema>;
 
@@ -109,6 +228,11 @@ export const discoveryResultPayloadSchema = z
     emulators: z.array(discoveryEmulatorReportSchema).max(2),
     vms: z.array(discoveredVmSchema).max(DISCOVERY_MAX_VMS),
     skipped: z.array(discoverySkippedSchema).max(DISCOVERY_MAX_SKIPPED),
+    /**
+     * Absent from an agent that predates VirtualBox. A part that fails validation is replaced rather
+     * than refused, so that it can never cost the 86Box and QEMU results.
+     */
+    virtualbox: virtualBoxDiscoverySchema.optional().catch(() => INVALID_VIRTUALBOX_DISCOVERY),
   })
   .superRefine((report, context) => {
     const identities = report.vms.map((vm) => `${vm.emulatorType}/${vmNameKey(vm.vmName)}`);
@@ -175,6 +299,11 @@ export const discoveryOperationSchema = z.object({
    * says nothing reliable about the disk any more, and the server refuses to register from it.
    */
   fromCurrentConnection: z.boolean().default(true),
+  /**
+   * What VirtualBox reported, or `null` when the agent did not report on VirtualBox at all, as an
+   * agent older than VirtualBox support does. These machines are observations: none is registered.
+   */
+  virtualbox: virtualBoxDiscoverySchema.nullable().default(null),
 });
 export type DiscoveryOperation = z.infer<typeof discoveryOperationSchema>;
 

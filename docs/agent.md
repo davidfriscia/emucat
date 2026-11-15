@@ -7,35 +7,36 @@ is committed.
 
 ## Commands
 
-| Command                                   | What it does                                                       |
-| ----------------------------------------- | ------------------------------------------------------------------ |
-| `run`                                     | Connects, and stays connected until stopped. The default           |
-| `pair`, `unpair`                          | Pairs with a server, or removes the local credential               |
-| `discover`                                | Scans the configured directories, read-only, and prints the report |
-| `media-status`                            | Prints what the screenshot queue holds, without connecting         |
-| `cache-status`                            | Prints what the archive cache holds, without connecting            |
-| `launch-check --emulator E --vm NAME`     | Prints the command line the agent would use, and starts nothing    |
-| `repository-check --repository UUID`      | Tests a configured repository directly                             |
-| `repository-passphrase --repository UUID` | Stores the passphrase of a repository's key, protected with DPAPI  |
-| `check-config`, `info`                    | Validates the configuration, or prints versions and default paths  |
+| Command                                   | What it does                                                                           |
+| ----------------------------------------- | -------------------------------------------------------------------------------------- |
+| `run`                                     | Connects, and stays connected until stopped. The default                               |
+| `pair`, `unpair`                          | Pairs with a server, or removes the local credential                                   |
+| `discover`                                | Scans the configured directories and asks VirtualBox, read-only, and prints the report |
+| `media-status`                            | Prints what the screenshot queue holds, without connecting                             |
+| `cache-status`                            | Prints what the archive cache holds, without connecting                                |
+| `launch-check --emulator E --vm NAME`     | Prints the command line the agent would use, and starts nothing                        |
+| `repository-check --repository UUID`      | Tests a configured repository directly                                                 |
+| `repository-passphrase --repository UUID` | Stores the passphrase of a repository's key, protected with DPAPI                      |
+| `check-config`, `info`                    | Validates the configuration, or prints versions and default paths                      |
 
 ## Configuration
 
 Copy [`agent/agent.example.toml`](../agent/agent.example.toml) to the path `emucat-agent info` shows, or pass
 `--config`. Command-line options override the environment, and the environment overrides the file.
 
-| Setting                                                     | Environment variable                          | Meaning                                        |
-| ----------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------- |
-| `[server] api_url`                                          | `EMUCAT_AGENT_API_URL`                        | The server. `https`, or `http` for this PC     |
-| `[agent] name`                                              | `EMUCAT_AGENT_NAME`                           | The name to pair under. Default: computer name |
-| `[emulators.86box]`                                         | `EMUCAT_AGENT_86BOX_BASE_PATH`, `_EXECUTABLE` | Base VM directory and executable               |
-| `[emulators.qemu]`                                          | `EMUCAT_AGENT_QEMU_BASE_PATH`, `_EXECUTABLE`  | Base VM directory and executable               |
-| `[state] dir`                                               | `EMUCAT_AGENT_STATE_DIR`                      | The agent's own data, including its credential |
-| `[storage] staging_dir`                                     | `EMUCAT_AGENT_STAGING_DIR`                    | Archives being built or downloaded             |
-| `[storage] cache_dir`                                       | `EMUCAT_AGENT_CACHE_DIR`                      | Verified master ZIPs                           |
-| `[storage] cache_max_bytes`                                 |                                               | The cache's limit. 20 GiB by default, 0 is off |
-| `[storage] restore_max_files`, `restore_max_expanded_bytes` |                                               | What a restore accepts from an archive         |
-| `[logging] level`, `format`                                 | `EMUCAT_AGENT_LOG_LEVEL`, `_FORMAT`           | Filter, and `text` or `json`                   |
+| Setting                                                     | Environment variable                          | Meaning                                             |
+| ----------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------- |
+| `[server] api_url`                                          | `EMUCAT_AGENT_API_URL`                        | The server. `https`, or `http` for this PC          |
+| `[agent] name`                                              | `EMUCAT_AGENT_NAME`                           | The name to pair under. Default: computer name      |
+| `[emulators.86box]`                                         | `EMUCAT_AGENT_86BOX_BASE_PATH`, `_EXECUTABLE` | Base VM directory and executable                    |
+| `[emulators.qemu]`                                          | `EMUCAT_AGENT_QEMU_BASE_PATH`, `_EXECUTABLE`  | Base VM directory and executable                    |
+| `[platforms.virtualbox] vboxmanage`                         | `EMUCAT_AGENT_VIRTUALBOX_VBOXMANAGE`          | VBoxManage, for [VirtualBox](#virtualbox). Optional |
+| `[state] dir`                                               | `EMUCAT_AGENT_STATE_DIR`                      | The agent's own data, including its credential      |
+| `[storage] staging_dir`                                     | `EMUCAT_AGENT_STAGING_DIR`                    | Archives being built or downloaded                  |
+| `[storage] cache_dir`                                       | `EMUCAT_AGENT_CACHE_DIR`                      | Verified master ZIPs                                |
+| `[storage] cache_max_bytes`                                 |                                               | The cache's limit. 20 GiB by default, 0 is off      |
+| `[storage] restore_max_files`, `restore_max_expanded_bytes` |                                               | What a restore accepts from an archive              |
+| `[logging] level`, `format`                                 | `EMUCAT_AGENT_LOG_LEVEL`, `_FORMAT`           | Filter, and `text` or `json`                        |
 
 The base directory is the folder that _holds_ the VM folders. It is often not where the emulator is installed, and
 the agent never guesses it from the executable's location.
@@ -162,6 +163,53 @@ are not candidates and are not mentioned.
 - **Changing disks are normal.** Something that vanishes mid-scan is reported, not a failure. A missing base
   directory is reported as `base_path_missing`, and is not created. An agent also refuses to _start_ with a
   missing base directory, as `check-config` does.
+
+### VirtualBox
+
+VirtualBox keeps its own list of machines, so nothing is scanned for it, and it has no base path. When
+`[platforms.virtualbox]` names `VBoxManage`, each discovery also runs, directly and never through a shell:
+
+1. `VBoxManage --version`, which is shown beside the results;
+2. `VBoxManage list vms`, for the UUID and name of every machine registered under the account the agent runs as;
+3. `VBoxManage showvminfo <uuid> --machinereadable` for each machine, one at a time, for its guest OS type, state,
+   when that last changed, whether it is accessible, its memory and its CPU count.
+
+```toml
+[platforms.virtualbox]
+vboxmanage = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
+```
+
+- **Every machine VBoxManage shows is in scope.** There is no allowlist: the Windows account the agent runs as is the
+  boundary. Run the agent as the account whose VirtualBox machines you collect.
+- **Read-only.** Nothing is started, stopped, registered, exported or changed. A machine is always named by its UUID,
+  never by its display name, which may hold any characters, and which two machines may share.
+- **No paths leave the agent.** The settings files, disk images, logs and shared folders that `showvminfo` prints are
+  read past and never reported.
+- **Bounded.** Each command has 10 seconds and 1 MiB of output, VirtualBox has 20 seconds in all, alongside the
+  directory scan, and a report lists at most 128 machines. Machines not reached in time are listed as
+  `not_inspected`, and the report is marked `truncated`.
+- **Isolated.** A machine that cannot be inspected is reported with an `error`, and the others still are. If
+  VBoxManage is missing or fails, its own `status` says so, and the 86Box and QEMU results are unaffected.
+  `check-config` warns about a missing VBoxManage, and does not refuse to start.
+- **Observed, not registered.** These machines are never matched to catalog entries by name, and nothing can be
+  registered or launched from them yet. EmuCat will run VirtualBox machines locally only.
+
+| `state`        | VirtualBox `VMState`                                          |
+| -------------- | ------------------------------------------------------------- |
+| `powered_off`  | `poweroff`, `teleported`                                      |
+| `running`      | `running`, and live snapshots or teleporting                  |
+| `paused`       | `paused`, and its variants                                    |
+| `saved`        | `saved`, `aborted-saved`                                      |
+| `starting`     | `starting`, `restoring`, `teleportingin`                      |
+| `stopping`     | `stopping`, `saving`                                          |
+| `aborted`      | `aborted`                                                     |
+| `stuck`        | `gurumeditation`                                              |
+| `busy`         | Taking, restoring or deleting a snapshot offline, `settingup` |
+| `inaccessible` | VirtualBox cannot read the machine's settings                 |
+| `unknown`      | Anything else. `rawState` keeps what VirtualBox said          |
+
+VBoxManage writes UTF-8 where it can, and the ANSI code page otherwise. A name with characters outside that code page
+may reach EmuCat with them replaced. The UUID is unaffected.
 
 ## Registering VMs
 

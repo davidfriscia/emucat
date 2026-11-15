@@ -1,0 +1,4 @@
+"Xenix 386" {2acda0fc-cea6-406b-8a55-746fac380687}
+"Windows XP ITA SP3 (x86)" {97910566-2cc6-492b-9dc7-6cc6ee66ffd6}
+"Città "Ufficio" {v2}" {14883fa7-b01e-46cc-ba51-04f36f2d7478}
+"<inaccessible>" {e725aa3d-977f-4463-918f-93d7a879f841}

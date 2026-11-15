@@ -744,6 +744,12 @@ main.container:has(> .page-wide) {
   overflow-wrap: anywhere;
 }
 
+/* VirtualBox names can be long and in any script. They wrap rather than widen the table. */
+.virtualbox-machines .virtualbox-name {
+  min-width: 10rem;
+  overflow-wrap: anywhere;
+}
+
 /*
  * A scrolling table's visually hidden caption and headers are absolutely positioned. Without a
  * positioned scroller they escape it, and widen the whole page on a phone.

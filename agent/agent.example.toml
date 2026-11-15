@@ -9,6 +9,7 @@
 #   EMUCAT_AGENT_86BOX_EXECUTABLE      [emulators.86box] executable
 #   EMUCAT_AGENT_QEMU_BASE_PATH        [emulators.qemu] base_path
 #   EMUCAT_AGENT_QEMU_EXECUTABLE       [emulators.qemu] executable
+#   EMUCAT_AGENT_VIRTUALBOX_VBOXMANAGE [platforms.virtualbox] vboxmanage
 #   EMUCAT_AGENT_STATE_DIR             [state] dir
 #   EMUCAT_AGENT_STAGING_DIR           [storage] staging_dir
 #   EMUCAT_AGENT_CACHE_DIR             [storage] cache_dir
@@ -27,8 +28,9 @@ api_url = "http://127.0.0.1:4000"
 # The name an administrator sees when approving this agent. Defaults to the computer's name.
 # name = "Study PC"
 
-# Each VM lives in BASE_PATH/VM_NAME. Configure at least one emulator, with both values. The base path
-# is the folder that holds the VM folders, which is usually not where the emulator is installed.
+# Each VM lives in BASE_PATH/VM_NAME. Configure at least one emulator, with both values, or VirtualBox
+# below. The base path is the folder that holds the VM folders, which is usually not where the
+# emulator is installed.
 # Use single quotes for Windows paths so that backslashes are taken literally.
 [emulators.86box]
 base_path = 'C:\path\to\86box-vms'
@@ -37,6 +39,12 @@ executable = 'C:\path\to\86Box.exe'
 [emulators.qemu]
 base_path = 'C:\path\to\qemu-vms'
 executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
+
+# VirtualBox keeps its own list of machines, so it has no base path: discovery asks VBoxManage for
+# every VM registered under the Windows account the agent runs as, read-only. Optional. Without this
+# section VBoxManage is never run. See docs/agent.md#virtualbox.
+# [platforms.virtualbox]
+# vboxmanage = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
 
 [state]
 # Where the agent keeps its own data, including its encrypted credential. Defaults to a per-user location; see `emucat-agent info`.

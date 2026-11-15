@@ -109,6 +109,7 @@ function discovery(): DiscoveryOperation {
     skipped: [],
     expiresAt: null,
     fromCurrentConnection: true,
+    virtualbox: null,
   };
 }
 

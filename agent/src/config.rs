@@ -20,6 +20,7 @@ use crate::execution::ExecutionSettings;
 use crate::extraction::ExtractionLimits;
 use crate::pairing::sanitize_agent_name;
 use crate::restore::RestoreSettings;
+use crate::virtualbox::{VirtualBoxConfig, executable_problem};
 
 pub const CONFIG_PATH_ENV: &str = "EMUCAT_AGENT_CONFIG";
 
@@ -91,6 +92,9 @@ pub struct Config {
     /// The name to pair under. Defaults to the computer name.
     pub agent_name: Option<String>,
     pub emulators: BTreeMap<EmulatorType, EmulatorConfig>,
+    /// VirtualBox, which is asked for its machines rather than scanned for them. Optional: without
+    /// it, discovery does not run VBoxManage at all.
+    pub virtualbox: Option<VirtualBoxConfig>,
     pub state_dir: Option<PathBuf>,
     /// Where archives are built. Defaults to `staging` in the state directory.
     pub staging_dir: Option<PathBuf>,
@@ -147,6 +151,8 @@ struct FileConfig {
     agent: AgentSection,
     #[serde(default)]
     emulators: EmulatorsSection,
+    #[serde(default)]
+    platforms: PlatformsSection,
     #[serde(default)]
     state: StateSection,
     #[serde(default)]
@@ -401,6 +407,44 @@ struct EmulatorSection {
     executable: Option<PathBuf>,
 }
 
+/// Platforms that keep their own list of machines, so that no base path is involved.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatformsSection {
+    virtualbox: Option<VirtualBoxSection>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VirtualBoxSection {
+    vboxmanage: Option<PathBuf>,
+}
+
+pub const VIRTUALBOX_ENV: &str = "EMUCAT_AGENT_VIRTUALBOX_VBOXMANAGE";
+
+/// The environment wins over the file, as for every other setting. A section without a path is an
+/// error rather than a silent "not configured".
+fn resolve_virtualbox(
+    section: Option<VirtualBoxSection>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<VirtualBoxConfig>, ConfigError> {
+    if let Some(path) = env(VIRTUALBOX_ENV) {
+        return Ok(Some(VirtualBoxConfig {
+            vboxmanage: PathBuf::from(path),
+        }));
+    }
+    match section {
+        None => Ok(None),
+        Some(VirtualBoxSection {
+            vboxmanage: Some(vboxmanage),
+        }) => Ok(Some(VirtualBoxConfig { vboxmanage })),
+        Some(VirtualBoxSection { vboxmanage: None }) => Err(ConfigError::Invalid {
+            field: "platforms.virtualbox.vboxmanage",
+            message: "is required in a [platforms.virtualbox] section".to_owned(),
+        }),
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StateSection {
@@ -649,6 +693,7 @@ impl Config {
             api_url: parse_api_url(&api_url)?,
             agent_name,
             emulators,
+            virtualbox: resolve_virtualbox(file.platforms.virtualbox, env)?,
             state_dir: env("EMUCAT_AGENT_STATE_DIR")
                 .map(PathBuf::from)
                 .or(file.state.dir)
@@ -743,8 +788,24 @@ pub fn validate(config: &Config) -> Vec<ValidationIssue> {
         });
     };
 
-    if config.emulators.is_empty() {
-        error("no emulator is configured; set a base path and executable for at least one".into());
+    if config.emulators.is_empty() && config.virtualbox.is_none() {
+        error(
+            "no emulator is configured; set a base path and executable for at least one, or \
+             configure [platforms.virtualbox]"
+                .into(),
+        );
+    }
+
+    // Not an error: discovery reports it, and the other emulators work without VirtualBox.
+    if let Some(problem) = config
+        .virtualbox
+        .as_ref()
+        .and_then(|virtualbox| executable_problem(&virtualbox.vboxmanage))
+    {
+        issues_later.push(ValidationIssue {
+            severity: Severity::Warning,
+            message: format!("VirtualBox discovery will fail: {problem}"),
+        });
     }
 
     for (emulator, paths) in &config.emulators {

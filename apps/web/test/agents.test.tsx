@@ -97,6 +97,7 @@ function operation(overrides: Partial<DiscoveryOperation> = {}): DiscoveryOperat
     ],
     expiresAt: null,
     fromCurrentConnection: true,
+    virtualbox: null,
     ...overrides,
   };
 }
@@ -643,5 +644,177 @@ describe('discovery', () => {
     renderAt(AGENT_PATH);
     fireEvent.click(await screen.findByRole('button', { name: 'Discover virtual machines' }));
     expect((await screen.findByRole('alert')).textContent).toContain('This agent is offline.');
+  });
+});
+
+describe('VirtualBox discovery', () => {
+  const machine = (
+    overrides: Partial<NonNullable<DiscoveryOperation['virtualbox']>['vms'][number]> = {},
+  ): NonNullable<DiscoveryOperation['virtualbox']>['vms'][number] => ({
+    uuid: '2acda0fc-cea6-406b-8a55-746fac380687',
+    name: 'Xenix 386',
+    osType: 'Other/Unknown',
+    state: 'powered_off',
+    rawState: 'poweroff',
+    stateChangedAt: WHEN,
+    accessible: true,
+    memoryMb: 4,
+    cpus: 1,
+    error: null,
+    ...overrides,
+  });
+
+  function showing(virtualbox: DiscoveryOperation['virtualbox'], extra: object = {}) {
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${AGENT_PATH}`]: agent(),
+      [`GET ${AGENT_PATH}/discovery`]: { operation: operation({ virtualbox, ...extra }) },
+    });
+    renderAt(AGENT_PATH);
+  }
+
+  const section = async () =>
+    (await screen.findByRole('heading', { name: /VirtualBox — Discovered machines/ })).closest(
+      'section',
+    ) as HTMLElement;
+
+  it('lists the machines in their own table, with the version, apart from the directory scan', async () => {
+    showing({
+      status: 'ok',
+      version: '7.1.10r169112',
+      truncated: false,
+      vms: [
+        machine(),
+        machine({
+          uuid: '97910566-2cc6-492b-9dc7-6cc6ee66ffd6',
+          name: 'Windows XP',
+          state: 'running',
+          rawState: 'running',
+        }),
+        machine({
+          uuid: '14883fa7-b01e-46cc-ba51-04f36f2d7478',
+          name: 'Win 98',
+          state: 'saved',
+          rawState: 'saved',
+        }),
+      ],
+    });
+    const box = await section();
+    expect(within(box).getByText('VirtualBox 7.1.10r169112')).toBeTruthy();
+    const table = within(box).getByRole('table', { name: 'Machines registered with VirtualBox' });
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows.map((row) => within(row).getAllByRole('cell')[0]?.textContent)).toEqual([
+      'Xenix 386',
+      'Windows XP',
+      'Win 98',
+    ]);
+    expect(within(rows[0]!).getByText('2acda0fc-cea6-406b-8a55-746fac380687')).toBeTruthy();
+    expect(within(rows[0]!).getByText('Other/Unknown')).toBeTruthy();
+    expect(within(rows[0]!).getByText('Powered off')).toBeTruthy();
+    expect(within(rows[0]!).getByText('Accessible')).toBeTruthy();
+    expect(within(rows[1]!).getByText('Running')).toBeTruthy();
+    expect(within(rows[2]!).getByText('Saved')).toBeTruthy();
+    // The filesystem discovery is still there, unchanged.
+    expect(screen.getByText('Dos622')).toBeTruthy();
+    // VirtualBox machines are not in the directory scan's cards.
+    expect(screen.queryAllByText('Xenix 386')).toHaveLength(1);
+  });
+
+  it('offers nothing to do with a machine: no registration, no launch', async () => {
+    showing({ status: 'ok', version: '7.1.10r169112', truncated: false, vms: [machine()] });
+    const box = await section();
+    expect(within(box).queryAllByRole('button')).toEqual([]);
+    expect(within(box).queryAllByRole('link')).toEqual([]);
+    // Nothing claims a catalog status for it, whatever the catalog holds.
+    expect(within(box).queryByText(/already registered|not registered|Register|Launch/)).toBeNull();
+  });
+
+  it('shows an inaccessible machine, and one that could not be inspected', async () => {
+    showing({
+      status: 'ok',
+      version: '7.1.10r169112',
+      truncated: false,
+      vms: [
+        machine({
+          name: '<inaccessible>',
+          osType: null,
+          state: 'inaccessible',
+          rawState: null,
+          accessible: false,
+        }),
+        machine({
+          uuid: '97910566-2cc6-492b-9dc7-6cc6ee66ffd6',
+          name: 'Slow',
+          osType: null,
+          state: 'unknown',
+          rawState: null,
+          accessible: null,
+          error: 'timeout',
+        }),
+        machine({
+          uuid: '14883fa7-b01e-46cc-ba51-04f36f2d7478',
+          name: 'Future',
+          state: 'unknown',
+          rawState: 'hyperspace',
+        }),
+      ],
+    });
+    const box = await section();
+    expect(within(box).getAllByText('Inaccessible')).toHaveLength(2);
+    expect(within(box).getByText('Inspection timed out')).toBeTruthy();
+    expect(within(box).getByText('Unknown (hyperspace)')).toBeTruthy();
+  });
+
+  it('keeps a long Unicode name whole', async () => {
+    const name = 'Città 日本語 '.repeat(12).trim();
+    showing({ status: 'ok', version: '7.1.10r169112', truncated: false, vms: [machine({ name })] });
+    const box = await section();
+    const cell = within(box).getByText(name);
+    expect(cell.className).toContain('virtualbox-name');
+  });
+
+  it('has an empty state', async () => {
+    showing({ status: 'ok', version: '7.1.10r169112', truncated: false, vms: [] });
+    expect(await screen.findByRole('heading', { name: 'No VirtualBox machines' })).toBeTruthy();
+  });
+
+  it.each([
+    ['executable_missing', /VBoxManage cannot be found/],
+    ['command_failed', /VBoxManage reported an error/],
+    ['timeout', /did not answer in time/],
+    ['invalid_report', /failed validation/],
+  ] as const)('reports %s, and keeps the other results', async (status, message) => {
+    showing({ status, version: null, truncated: false, vms: [] });
+    const box = await section();
+    expect(within(box).getByRole('alert').textContent).toMatch(message);
+    expect(screen.getByText('Dos622')).toBeTruthy();
+  });
+
+  it('says quietly when VirtualBox is not configured', async () => {
+    showing({ status: 'not_configured', version: null, truncated: false, vms: [] });
+    const box = await section();
+    expect(within(box).getByText(/not configured on this agent/)).toBeTruthy();
+    expect(within(box).queryByRole('alert')).toBeNull();
+  });
+
+  it('says when the agent does not report VirtualBox at all', async () => {
+    showing(null);
+    const box = await section();
+    expect(within(box).getByText(/does not report VirtualBox machines/)).toBeTruthy();
+  });
+
+  it('warns that a stale report may no longer describe the machines', async () => {
+    showing(
+      { status: 'ok', version: '7.1.10r169112', truncated: false, vms: [machine()] },
+      { fromCurrentConnection: false },
+    );
+    const box = await section();
+    expect(within(box).getByText(/may be out of date/)).toBeTruthy();
+  });
+
+  it('warns when not every machine is described', async () => {
+    showing({ status: 'ok', version: '7.1.10r169112', truncated: true, vms: [machine()] });
+    const box = await section();
+    expect(within(box).getByRole('alert').textContent).toMatch(/Not every machine/);
   });
 });

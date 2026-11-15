@@ -18,6 +18,7 @@ use emucat_agent::protocol::AgentHello;
 use emucat_agent::registration::{AgentOperations, OperationsConfig, RepositoryProvider};
 use emucat_agent::repository::CancelFlag;
 use emucat_agent::sftp::ConfiguredRepositories;
+use emucat_agent::virtualbox::VirtualBoxLimits;
 use emucat_agent::{logging, platform, protocol, shutdown};
 use uuid::Uuid;
 
@@ -142,6 +143,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         api_url = %config.api_url,
         agent_id = %stored.agent_id,
         emulators = config.emulators.len(),
+        virtualbox = config.virtualbox.is_some(),
         "Agent started"
     );
 
@@ -157,6 +159,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         host,
         config.emulators.clone(),
     );
+    settings.virtualbox = config.virtualbox.clone().map(Arc::new);
     let agent_id = stored.agent_id;
     let runtime = runtime()?;
     let end = runtime.block_on(async {
@@ -389,7 +392,13 @@ fn unpair(cli: &Cli) -> Result<(), String> {
 fn discover(cli: &Cli) -> Result<(), String> {
     let config = load(cli).map_err(|error| error.to_string())?;
     let (host, _) = identity()?;
-    let report = discovery::scan(&config.emulators, host, &ScanLimits::default());
+    let report = discovery::scan_all(
+        &config.emulators,
+        config.virtualbox.as_ref(),
+        host,
+        &ScanLimits::default(),
+        &VirtualBoxLimits::default(),
+    );
     let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
     println!("{json}");
     Ok(())
