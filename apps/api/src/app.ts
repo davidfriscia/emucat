@@ -12,6 +12,7 @@ import { ExecutionCoordinator } from './execution/coordinator.js';
 import { RegistrationCoordinator } from './registration/coordinator.js';
 import { RestoreCoordinator } from './restore/coordinator.js';
 import { VirtualBoxCoordinator } from './virtualbox/coordinator.js';
+import { VirtualBoxManagement } from './virtualbox/management.js';
 import { WorkspaceCoordinator } from './workspaces/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
@@ -82,7 +83,28 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           },
           app.log,
         );
-        hub.setVirtualBox(virtualbox);
+        const virtualboxManagement = new VirtualBoxManagement(
+          browser.pool,
+          {
+            isOnline: (agentId) => hub.isOnline(agentId),
+            isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
+            isVirtualBoxManagementCapable: (agentId) => hub.isVirtualBoxManagementCapable(agentId),
+            activeConnectionId: (agentId) => hub.activeConnectionId(agentId),
+            latestDiscovery: (agentId) => hub.discovery.get(agentId),
+            send: (agentId, message) => hub.sendToAgent(agentId, message),
+          },
+          virtualbox,
+          app.log,
+          browser.registrationPolicy,
+        );
+        hub.setVirtualBox({
+          watch: (agentId) => virtualbox.watch(agentId),
+          states: (agentId, payload) => virtualbox.states(agentId, payload),
+          controlResult: (agentId, payload) => virtualbox.controlResult(agentId, payload),
+          operationsSynced: (agentId, entries) => virtualboxManagement.synced(agentId, entries),
+          operationProgress: (agentId, payload) => virtualboxManagement.progress(agentId, payload),
+          operationResult: (agentId, payload) => virtualboxManagement.result(agentId, payload),
+        });
         // A new master is a machine to watch: the agent's list is replaced at once.
         registrations.onVirtualBoxRegistered = (agentId) => {
           virtualbox.watch(agentId).catch((error: unknown) => {
@@ -169,6 +191,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             execution,
             captures,
             workspaces,
+            virtualboxManagement,
             { removals, deletions },
             dependencies.authenticateAgent,
           ),

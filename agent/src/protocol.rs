@@ -164,6 +164,20 @@ pub enum Message {
     ServerVirtualBoxWatch(VirtualBoxWatch),
     #[serde(rename = "agent.virtualbox_states")]
     AgentVirtualBoxStates(VirtualBoxStates),
+    #[serde(rename = "server.virtualbox_import")]
+    ServerVirtualBoxImport(VirtualBoxImport),
+    #[serde(rename = "server.virtualbox_delete")]
+    ServerVirtualBoxDelete(VirtualBoxDelete),
+    #[serde(rename = "server.virtualbox_operation_ack")]
+    ServerVirtualBoxOperationAck(VirtualBoxOperationAck),
+    #[serde(rename = "agent.virtualbox_operation_progress")]
+    AgentVirtualBoxOperationProgress(VirtualBoxOperationProgress),
+    #[serde(rename = "agent.virtualbox_operation_result")]
+    AgentVirtualBoxOperationResult(VirtualBoxOperationResult),
+    #[serde(rename = "server.virtualbox_capture")]
+    ServerVirtualBoxCapture(VirtualBoxCaptureCommand),
+    #[serde(rename = "agent.virtualbox_capture")]
+    AgentVirtualBoxCapture(VirtualBoxCaptureReport),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -369,6 +383,13 @@ pub struct RegistrationSync {
     /// it, and only an agent with VirtualBox configured says so.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub virtualbox: bool,
+    /// This agent can also import OVAs into VirtualBox, delete machines from it and capture screenshots of them
+    /// (decision 0046). An older server ignores it, and never sends those commands to an agent that does not say it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub virtualbox_management: bool,
+    /// The imports and deletions this agent has journals for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub virtualbox_operations: Vec<VirtualBoxOperationSyncEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -895,6 +916,13 @@ fn is_known_type(message_type: &str) -> bool {
             | "agent.virtualbox_control_result"
             | "server.virtualbox_watch"
             | "agent.virtualbox_states"
+            | "server.virtualbox_import"
+            | "server.virtualbox_delete"
+            | "server.virtualbox_operation_ack"
+            | "agent.virtualbox_operation_progress"
+            | "agent.virtualbox_operation_result"
+            | "server.virtualbox_capture"
+            | "agent.virtualbox_capture"
     )
 }
 
@@ -1174,6 +1202,140 @@ pub struct VirtualBoxObservation {
     pub accessible: Option<bool>,
     #[serde(with = "time::serde::rfc3339")]
     pub observed_at: OffsetDateTime,
+}
+
+// VirtualBox management (decision 0046): imports into VirtualBox, deletions from it, and screenshots. A machine is
+// still only ever named by its UUID; a machine's name is only compared, never used to choose one.
+
+/// Imports one version's OVA as a new machine called `target_name`. Nothing existing is replaced or removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualBoxImport {
+    pub operation_id: Uuid,
+    pub vm_name: VmName,
+    pub version_id: Uuid,
+    pub repository_id: Uuid,
+    pub archive_key: String,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+    pub target_name: String,
+}
+
+/// `unregistervm <uuid> --delete` for exactly this machine, only if VirtualBox still calls it `machine_name` and it
+/// is powered off when the agent looks again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualBoxDelete {
+    pub operation_id: Uuid,
+    pub machine_uuid: Uuid,
+    pub machine_name: String,
+}
+
+/// The server recorded the result: the journal can go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualBoxOperationAck {
+    pub operation_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualBoxOperationStage {
+    Checking,
+    Downloading,
+    Verifying,
+    DryRun,
+    Importing,
+    Discovering,
+    Deleting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxOperationProgress {
+    pub operation_id: Uuid,
+    pub stage: VirtualBoxOperationStage,
+    pub done_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualBoxOperationKind {
+    Import,
+    Delete,
+}
+
+/// `uncertain` is never success: VirtualBox may have done something this agent cannot confirm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualBoxOperationOutcome {
+    Succeeded,
+    Failed,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxMachine {
+    pub uuid: Uuid,
+    pub name: String,
+    pub state: crate::virtualbox::VirtualBoxVmState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxOperationResult {
+    pub operation_id: Uuid,
+    pub kind: VirtualBoxOperationKind,
+    pub outcome: VirtualBoxOperationOutcome,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub machine: Option<VirtualBoxMachine>,
+    #[serde(default)]
+    pub stray_machines: Vec<VirtualBoxMachine>,
+    pub files_removed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualBoxOperationPhase {
+    /// Nothing irreversible has happened yet.
+    Running,
+    /// VBoxManage was asked to import or delete. After a restart this is reconciled, never repeated.
+    Irreversible,
+    Reported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxOperationSyncEntry {
+    pub operation_id: Uuid,
+    pub phase: VirtualBoxOperationPhase,
+}
+
+/// `controlvm <uuid> screenshotpng` of a watched, running machine. Acknowledged and retried with
+/// `server.qemu_capture_ack` and `server.qemu_capture_retry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualBoxCaptureCommand {
+    pub operation_id: Uuid,
+    pub session_id: Uuid,
+    pub vm_name: VmName,
+    pub machine_uuid: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxCaptureReport {
+    #[serde(flatten)]
+    pub request: VirtualBoxCaptureCommand,
+    /// `capturing`, `uploading` or `failed`.
+    pub state: String,
+    pub sha256: Option<String>,
+    pub uncertain: bool,
+    pub code: Option<String>,
+    pub message: Option<String>,
 }
 
 /// `complete` answers a watch, with every watched machine that could be inspected; otherwise only the

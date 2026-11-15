@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
 import { virtualBoxUuidSchema } from './discovery.js';
+import { virtualBoxOperationSyncEntrySchema } from './virtualbox-management.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
 
@@ -306,6 +307,13 @@ export const registrationSyncPayloadSchema = z.object({
    * knows the messages of decision 0045. Older agents do not say, and are never sent them.
    */
   virtualbox: z.boolean().optional(),
+  /**
+   * Whether this agent can also import OVAs into VirtualBox, delete machines from it and capture screenshots of
+   * them (decision 0046). Older agents do not say, and are never sent those messages.
+   */
+  virtualboxManagement: z.boolean().optional(),
+  /** The imports and deletions this agent has journals for. */
+  virtualboxOperations: z.array(virtualBoxOperationSyncEntrySchema).max(256).optional(),
 });
 export type RegistrationSyncPayload = z.infer<typeof registrationSyncPayloadSchema>;
 

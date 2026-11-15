@@ -59,11 +59,14 @@ export function CaptureScreenshot({ session }: { session: VmSession }) {
       setBusy(false);
     }
   };
-  if (session.emulatorType !== 'qemu') return null;
+  if (session.emulatorType !== 'qemu' && session.emulatorType !== 'virtualbox') return null;
   if (session.state !== 'running' && !capture) return null;
   const pending = capture && ['requested', 'capturing', 'uploading'].includes(capture.state);
   return (
-    <section className="mt-2" aria-label="QEMU screenshot capture">
+    <section
+      className="mt-2"
+      aria-label={`${session.emulatorType === 'virtualbox' ? 'VirtualBox' : 'QEMU'} screenshot capture`}
+    >
       <div className="d-flex flex-wrap align-items-center gap-2">
         <button
           type="button"

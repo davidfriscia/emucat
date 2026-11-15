@@ -505,12 +505,18 @@ export class RegistrationCoordinator {
     const repeated = await this.byRequest(requestId);
     if (repeated) return this.sameSnapshotRequest(repeated, vm, input);
 
-    // A VirtualBox snapshot is a fresh OVA export, which VB3 adds (decision 0045).
-    if (vm.emulatorType === 'virtualbox') throw refuseSnapshot('not_supported');
+    // A VirtualBox snapshot is a fresh OVA export of the linked machine, made by the same command as its
+    // master (decision 0046). It has no working copies: a VirtualBox machine only runs in place.
+    const virtualbox = vm.emulatorType === 'virtualbox';
+    if (virtualbox && workspaceId) throw refuseSnapshot('not_supported');
     if (!this.link.isOnline(agentId)) throw refuseSnapshot('agent_offline');
-    if (!this.link.isRegistrationCapable(agentId) || !this.link.isSnapshotCapable(agentId)) {
+    const capable = virtualbox
+      ? this.link.isVirtualBoxCapable(agentId)
+      : this.link.isSnapshotCapable(agentId);
+    if (!this.link.isRegistrationCapable(agentId) || !capable) {
       throw refuseSnapshot('agent_cannot_snapshot');
     }
+    let machineUuid: string | null = null;
 
     const operationId = randomUUID();
     const versionId = randomUUID();
@@ -554,8 +560,20 @@ export class RegistrationCoordinator {
          UNION ALL SELECT 1 FROM registration_operations WHERE agent_id = ? AND active_marker = 1
          UNION ALL SELECT 1 FROM local_copy_removals WHERE agent_id = ? AND active_marker = 1
          UNION ALL SELECT 1 FROM registration_operations
-           WHERE emulator_type = ? AND vm_name = ? AND active_marker = 1`,
-        [agentId, agentId, agentId, agentId, vm.emulatorType, canonicalName],
+           WHERE emulator_type = ? AND vm_name = ? AND active_marker = 1
+         UNION ALL SELECT 1 FROM virtualbox_operations
+           WHERE (agent_id = ? OR (emulator_type = ? AND vm_name = ?)) AND active_marker = 1`,
+        [
+          agentId,
+          agentId,
+          agentId,
+          agentId,
+          vm.emulatorType,
+          canonicalName,
+          agentId,
+          vm.emulatorType,
+          canonicalName,
+        ],
       );
       if (busy.length > 0) throw refuseSnapshot('operation_in_progress');
       // Unknown sessions count: an emulator that may be running describes no moment of its disks.
@@ -594,6 +612,13 @@ export class RegistrationCoordinator {
         if (workspace.source_version_id !== parentVersionId) {
           throw refuseSnapshot('snapshot_parent_mismatch');
         }
+      } else if (virtualbox) {
+        machineUuid = await this.snapshotSourceIn(
+          connection,
+          agentId,
+          canonicalName,
+          parentVersionId,
+        );
       } else {
         const [states] = await connection.execute<RowDataPacket[]>(
           `SELECT execution_state, local_source_version_id FROM agent_vm_state
@@ -618,8 +643,9 @@ export class RegistrationCoordinator {
         await connection.execute(
           `INSERT INTO registration_operations
              (id, agent_id, repository_id, requested_by_user_id, request_id, emulator_type, vm_name,
-              mode, version_id, parent_version_id, snapshot_name, workspace_id, archive_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'snapshot', ?, ?, ?, ?, ?)`,
+              virtualbox_uuid, mode, version_id, parent_version_id, snapshot_name, workspace_id,
+              archive_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot', ?, ?, ?, ?, ?)`,
           [
             operationId,
             agentId,
@@ -628,6 +654,7 @@ export class RegistrationCoordinator {
             requestId,
             vm.emulatorType,
             canonicalName,
+            machineUuid,
             versionId,
             parentVersionId,
             formatSnapshotName(canonicalName, new Date()),
@@ -656,6 +683,37 @@ export class RegistrationCoordinator {
     // If this cannot be delivered, the operation stays queued and goes out when the agent reconnects.
     if (row) this.dispatch(requestFor(row), agentId);
     return this.require(operationId);
+  }
+
+  /**
+   * The machine a VirtualBox snapshot exports: the one linked to this VM on this agent, present, readable and
+   * last seen powered off. The agent inspects it again before exporting, so a machine started since is still
+   * refused. Its lineage is known when EmuCat registered, snapshotted or imported it, and then the parent must
+   * be that version; a machine linked by hand has none, and the administrator's choice of parent stands.
+   */
+  private async snapshotSourceIn(
+    connection: PoolConnection,
+    agentId: string,
+    vmName: string,
+    parentVersionId: string,
+  ): Promise<string> {
+    const [sources] = await connection.execute<RowDataPacket[]>(
+      `SELECT src.machine_uuid, src.state, src.present, src.is_accessible, s.local_source_version_id
+       FROM virtualbox_sources AS src
+       LEFT JOIN agent_vm_state AS s
+         ON s.agent_id = src.agent_id AND s.emulator_type = src.emulator_type AND s.vm_name = src.vm_name
+       WHERE src.emulator_type = 'virtualbox' AND src.vm_name = ? AND src.agent_id = ?
+       LOCK IN SHARE MODE`,
+      [vmName, agentId],
+    );
+    const source = sources[0];
+    if (!source || !source.present || !source.is_accessible) {
+      throw refuseSnapshot('source_unavailable');
+    }
+    if (source.state !== 'powered_off') throw refuseSnapshot('vm_not_powered_off');
+    const lineage = source.local_source_version_id as string | null;
+    if (lineage && lineage !== parentVersionId) throw refuseSnapshot('snapshot_parent_mismatch');
+    return source.machine_uuid as string;
   }
 
   private async byRequest(requestId: string): Promise<OperationRow | null> {
@@ -1406,6 +1464,17 @@ export class RegistrationCoordinator {
         `UPDATE vm_workspaces SET source_version_id = ?, may_have_changes = FALSE
          WHERE id = ? AND agent_id = ?`,
         [row.version_id, row.workspace_id, row.agent_id],
+      );
+    } else if (row.emulator_type === 'virtualbox') {
+      // The machine is now what this snapshot was exported from. Nothing verifies it against the OVA, so it is
+      // never recorded as verified (decision 0046).
+      await connection.execute(
+        `INSERT INTO agent_vm_state
+           (agent_id, emulator_type, vm_name, local_source_version_id, execution_state, content_status)
+         VALUES (?, 'virtualbox', ?, ?, 'idle', 'unverified')
+         ON DUPLICATE KEY UPDATE local_source_version_id = VALUES(local_source_version_id),
+           content_status = 'unverified'`,
+        [row.agent_id, row.vm_name, row.version_id],
       );
     } else {
       await connection.execute(

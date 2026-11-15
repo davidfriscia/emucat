@@ -8,8 +8,11 @@ refused, and why. The decisions behind it are [0028](decisions/0028-launcher-arc
 A VirtualBox VM is different: VirtualBox runs it in place, on the agent that registered it, and only in Local mode.
 The agent starts, shuts down (ACPI) or powers it off with VBoxManage by UUID, and a session follows what the agent
 observes, including starts and stops made outside EmuCat. Verification, restore and the remote modes are refused for
-it. See [the agent guide](agent.md#registering-and-running-a-virtualbox-machine) and
-[decision 0045](decisions/0045-virtualbox-masters-and-local-execution.md).
+it. It runs from the machine it is linked to; a VM with no linked machine cannot be started until an administrator
+links one, or imports a version into VirtualBox and links that. A running or paused linked machine can be captured
+with `controlvm <uuid> screenshotpng`. See [the agent guide](agent.md#registering-and-running-a-virtualbox-machine) and
+decisions [0045](decisions/0045-virtualbox-masters-and-local-execution.md) and
+[0046](decisions/0046-virtualbox-management.md).
 
 ## Who does what
 

@@ -148,6 +148,11 @@ fn run(cli: &Cli) -> Result<(), String> {
     );
 
     let media_api = HttpMediaApi::new(&config.api_url, stored.credential.clone())?;
+    // VirtualBox screenshots go through the same media endpoint, by their own path (decision 0046).
+    let capture_api = Arc::new(HttpMediaApi::new(
+        &config.api_url,
+        stored.credential.clone(),
+    )?);
     let mut settings = ConnectionSettings::new(
         &config.api_url,
         stored.credential,
@@ -176,12 +181,9 @@ fn run(cli: &Cli) -> Result<(), String> {
         })?;
         settings.media = Some(Arc::clone(&media));
         // Loading resumes interrupted work, which needs the runtime.
-        settings.operations = Some(operations(
-            &config,
-            agent_id,
-            &settings,
-            Arc::clone(&media),
-        )?);
+        let operations = operations(&config, agent_id, &settings, Arc::clone(&media))?;
+        operations.set_capture_uploader(capture_api);
+        settings.operations = Some(operations);
         let watcher = tokio::spawn(Arc::clone(&media).run());
         let end = connectivity::run(settings, stop_requested()).await;
         media.shutdown();

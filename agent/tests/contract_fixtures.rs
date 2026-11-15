@@ -595,3 +595,59 @@ fn a_virtualbox_archive_key_matches_the_contracts() {
         request["archiveKey"].as_str().unwrap()
     );
 }
+
+#[test]
+fn virtualbox_management_messages_match_the_contracts_in_both_directions() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in [
+        "virtualboxManagementServerMessages",
+        "virtualboxManagementAgentMessages",
+    ] {
+        let examples = wire[key].as_array().unwrap();
+        assert!(!examples.is_empty());
+        for example in examples {
+            let envelope: Envelope = serde_json::from_value(example.clone())
+                .unwrap_or_else(|error| panic!("{example}: {error}"));
+            let round_trip = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(round_trip["type"], example["type"]);
+            assert_eq!(round_trip["payload"], example["payload"], "{example}");
+        }
+    }
+}
+
+#[test]
+fn a_virtualbox_management_command_naming_a_machine_by_anything_but_its_uuid_is_refused() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    let refused: Vec<_> = wire["virtualboxManagementRefused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|example| {
+            example["payload"]["machineUuid"]
+                .as_str()
+                .is_some_and(|value| Uuid::parse_str(value).is_err())
+        })
+        .collect();
+    assert_eq!(refused.len(), 2);
+    for example in refused {
+        assert!(
+            serde_json::from_value::<Envelope>(example.clone()).is_err(),
+            "{example}"
+        );
+        assert!(
+            matches!(decode(&example.to_string()), Decoded::InvalidPayload { .. }),
+            "{example}"
+        );
+    }
+}
+
+#[test]
+fn the_registration_sync_of_an_agent_that_predates_management_says_so() {
+    let sync: emucat_agent::protocol::RegistrationSync = serde_json::from_value(
+        serde_json::json!({ "operations": [], "snapshots": true, "virtualbox": true }),
+    )
+    .unwrap();
+    assert!(sync.virtualbox);
+    assert!(!sync.virtualbox_management);
+    assert!(sync.virtualbox_operations.is_empty());
+}

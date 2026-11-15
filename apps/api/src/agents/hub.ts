@@ -35,9 +35,13 @@ import type {
   LocalCopyRemoveResultPayload,
   ArchiveDeleteResultPayload,
   VirtualBoxControlResultPayload,
+  VirtualBoxOperationProgressPayload,
+  VirtualBoxOperationResultPayload,
+  VirtualBoxOperationSyncEntry,
   VirtualBoxRegistrationResultPayload,
   VirtualBoxStatesPayload,
 } from '@emucat/contracts';
+import type { CaptureAgentReport } from '../execution/captures.js';
 import { DiscoveryCoordinator, type DiscoveryRecord } from './discovery.js';
 
 /**
@@ -76,6 +80,13 @@ export interface AgentVirtualBoxHandler {
   watch(agentId: string): Promise<void>;
   states(agentId: string, payload: VirtualBoxStatesPayload): Promise<void>;
   controlResult(agentId: string, payload: VirtualBoxControlResultPayload): Promise<void>;
+  /**
+   * After `agent.registration_sync` said the agent can import into and delete from VirtualBox (decision 0046),
+   * with the operations it has journals for.
+   */
+  operationsSynced(agentId: string, entries: VirtualBoxOperationSyncEntry[] | null): Promise<void>;
+  operationProgress(agentId: string, payload: VirtualBoxOperationProgressPayload): Promise<void>;
+  operationResult(agentId: string, payload: VirtualBoxOperationResultPayload): Promise<void>;
 }
 
 /** What is done with restore messages. Every call is for the agent's active connection. */
@@ -171,6 +182,20 @@ interface Connection {
   workspacesSupported: boolean;
   /** Whether `agent.registration_sync` said this agent can export and run VirtualBox machines. */
   virtualboxCapable: boolean;
+  /** Whether it also said it can import, delete and capture VirtualBox machines (decision 0046). */
+  virtualboxManagementCapable: boolean;
+}
+
+/**
+ * A screenshot report in the capture coordinator's terms. A VirtualBox one names its machine as well, which the
+ * coordinator checks against the capture it asked for (decision 0046).
+ */
+function captureReport(
+  message: Extract<AgentMessage, { type: 'agent.qemu_capture' | 'agent.virtualbox_capture' }>,
+): CaptureAgentReport {
+  if (message.type === 'agent.qemu_capture') return message.payload;
+  const { machineUuid, ...rest } = message.payload;
+  return { ...rest, emulatorType: 'virtualbox', machineUuid };
 }
 
 /** What `ws` calls a frame over its `maxPayload`. */
@@ -257,6 +282,13 @@ export class AgentHub {
     return this.active.get(agentId)?.virtualboxCapable ?? false;
   }
 
+  isVirtualBoxManagementCapable(agentId: string): boolean {
+    const connection = this.active.get(agentId);
+    return (
+      (connection?.virtualboxCapable ?? false) && (connection?.virtualboxManagementCapable ?? false)
+    );
+  }
+
   isSnapshotCapable(agentId: string): boolean {
     return this.active.get(agentId)?.snapshotCapable ?? false;
   }
@@ -326,6 +358,7 @@ export class AgentHub {
       snapshotCapable: false,
       workspacesSupported: false,
       virtualboxCapable: false,
+      virtualboxManagementCapable: false,
     };
     this.connections.add(connection);
     log.info({ agentId, connectionId: connection.id }, 'Agent connected');
@@ -553,6 +586,8 @@ export class AgentHub {
         break;
       case 'agent.virtualbox_states':
       case 'agent.virtualbox_control_result':
+      case 'agent.virtualbox_operation_progress':
+      case 'agent.virtualbox_operation_result':
         if (this.active.get(agentId) !== connection || !this.virtualbox) {
           connection.log.warn({ agentId }, 'Ignored a message from an inactive connection');
           break;
@@ -560,8 +595,12 @@ export class AgentHub {
         try {
           if (message.type === 'agent.virtualbox_states') {
             await this.virtualbox.states(agentId, message.payload);
-          } else {
+          } else if (message.type === 'agent.virtualbox_control_result') {
             await this.virtualbox.controlResult(agentId, message.payload);
+          } else if (message.type === 'agent.virtualbox_operation_progress') {
+            await this.virtualbox.operationProgress(agentId, message.payload);
+          } else {
+            await this.virtualbox.operationResult(agentId, message.payload);
           }
         } catch (error) {
           // No answer: the agent reports again on its next poll.
@@ -575,9 +614,10 @@ export class AgentHub {
         await this.handleRestoreMessage(connection, message);
         break;
       case 'agent.qemu_capture':
+      case 'agent.virtualbox_capture':
         if (this.active.get(agentId) === connection) {
           try {
-            await this.captures?.report(agentId, message.payload);
+            await this.captures?.report(agentId, captureReport(message));
           } catch (error) {
             connection.log.error(
               { err: error, operationId: message.payload.operationId },
@@ -654,8 +694,20 @@ export class AgentHub {
           connection.registrationCapable = true;
           connection.snapshotCapable = message.payload.snapshots === true;
           connection.virtualboxCapable = message.payload.virtualbox === true;
+          connection.virtualboxManagementCapable =
+            connection.virtualboxCapable && message.payload.virtualboxManagement === true;
           await operations.synced(agentId, message.payload);
           if (connection.virtualboxCapable) await this.virtualbox?.watch(agentId);
+          // An agent that cannot import or delete gets nothing sent; what was queued for it is closed.
+          await this.virtualbox?.operationsSynced(
+            agentId,
+            connection.virtualboxManagementCapable
+              ? (message.payload.virtualboxOperations ?? [])
+              : null,
+          );
+          if (connection.virtualboxManagementCapable) {
+            await this.captures?.synced(agentId, 'virtualbox');
+          }
           break;
         case 'agent.virtualbox_registration_result':
           await operations.virtualBoxResult(agentId, message.payload);

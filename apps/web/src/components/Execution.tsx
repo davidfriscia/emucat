@@ -291,7 +291,7 @@ export function SessionCard({ session, onChange }: { session: VmSession; onChang
           </div>
         ) : null}
         <FormError error={error} />
-        {session.emulatorType === 'qemu' ? (
+        {session.emulatorType === 'qemu' || session.emulatorType === 'virtualbox' ? (
           <CaptureScreenshot key={session.id} session={session} />
         ) : null}
         {active ? (

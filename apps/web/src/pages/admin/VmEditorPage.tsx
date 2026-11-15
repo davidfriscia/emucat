@@ -26,6 +26,7 @@ import {
 } from '../../components/Execution';
 import { VmRestoreSection } from '../../components/Restore';
 import { VmVersionsSection } from '../../components/Versions';
+import { VirtualBoxSourceSection } from '../../components/VirtualBoxSource';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
 import { VmMediaGrid } from '../../components/VmMediaGrid';
 import { useAsync } from '../../useAsync';
@@ -301,7 +302,10 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
       <div className="vm-admin-panels">
         {identity.emulatorType === 'virtualbox' ? (
           // Run in place only: never restored, and no remote mode (decision 0045).
-          <VirtualBoxExecutionSection vm={identity} />
+          <>
+            <VirtualBoxExecutionSection vm={identity} />
+            <VirtualBoxSourceSection vm={identity} />
+          </>
         ) : (
           <>
             <VmExecutionSection vm={identity} preselect={preselect} />
@@ -310,6 +314,7 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
         )}
         <VmVersionsSection
           vm={identity}
+          title={vmTitle(vm)}
           onRun={(choice) => {
             runToken.current += 1;
             setPreselect({ ...choice, token: runToken.current });

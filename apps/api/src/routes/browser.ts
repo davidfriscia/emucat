@@ -28,6 +28,8 @@ import { registerAdminRegistrationRoutes } from './admin-registrations.js';
 import { registerAdminRestoreRoutes } from './admin-restores.js';
 import { registerAdminSystemRoutes, type DeploymentDependencies } from './admin-system.js';
 import { registerAdminVersionRoutes } from './admin-versions.js';
+import { registerAdminVirtualBoxRoutes } from './admin-virtualbox.js';
+import type { VirtualBoxManagement } from '../virtualbox/management.js';
 import { registerAgentMediaRoutes } from './agent-media.js';
 import { registerAgentPairingRoutes, type PairingRateLimits } from './agent-pairing.js';
 import { registerAuthRoutes, type AuthRateLimits } from './auth.js';
@@ -67,6 +69,7 @@ export async function registerBrowserRoutes(
   execution: ExecutionCoordinator,
   captures: import('../execution/captures.js').CaptureCoordinator,
   workspaces: WorkspaceCoordinator,
+  virtualbox: VirtualBoxManagement,
   cleanup: { removals: LocalCopyRemovalCoordinator; deletions: VersionDeletionCoordinator },
   authenticateAgent: AgentAuthenticator,
 ): Promise<void> {
@@ -88,4 +91,5 @@ export async function registerBrowserRoutes(
   registerAdminVersionRoutes(api, dependencies, registrations, workspaces, cleanup.deletions);
   registerAdminCleanupRoutes(api, dependencies, cleanup.removals, cleanup.deletions);
   registerAdminSystemRoutes(api, dependencies);
+  registerAdminVirtualBoxRoutes(api, dependencies, virtualbox);
 }

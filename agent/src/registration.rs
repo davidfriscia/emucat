@@ -161,6 +161,10 @@ struct Inner {
 pub struct AgentOperations {
     inner: Arc<Inner>,
     virtualbox: Arc<crate::virtualbox_registration::VirtualBoxRegistrations>,
+    /// Imports into VirtualBox and deletions from it (decision 0046).
+    management: Arc<crate::virtualbox_management::VirtualBoxManagement>,
+    /// Screenshots of running VirtualBox machines (decision 0046).
+    virtualbox_captures: Arc<crate::virtualbox_capture::VirtualBoxCaptures>,
     monitor: Option<Arc<crate::virtualbox_monitor::VirtualBoxMonitor>>,
     restores: Arc<RestoreManager>,
     execution: Arc<ExecutionManager>,
@@ -246,18 +250,49 @@ impl AgentOperations {
             Arc::clone(&running),
             stopping.clone(),
         )?;
+        let management = crate::virtualbox_management::VirtualBoxManagement::load(
+            crate::virtualbox_management::VirtualBoxManagementConfig {
+                settings: config.virtualbox.clone(),
+                state_dir: config.state_dir.clone(),
+                staging_dir: config.staging_dir.clone(),
+                repositories: Arc::clone(&config.repositories),
+            },
+            outbound.clone(),
+            Arc::clone(&running),
+            stopping.clone(),
+        )?;
+        let virtualbox_captures = crate::virtualbox_capture::VirtualBoxCaptures::load(
+            config.virtualbox.clone(),
+            &config.state_dir,
+            outbound.clone(),
+            stopping.clone(),
+        )?;
         let monitor = config.virtualbox.clone().map(|settings| {
             let monitor = crate::virtualbox_monitor::VirtualBoxMonitor::new(
                 settings,
                 outbound.clone(),
                 stopping.clone(),
             );
-            let exports = Arc::downgrade(&virtualbox);
+            // Nothing starts a machine that is being exported or deleted.
+            let (exports, deletions) = (Arc::downgrade(&virtualbox), Arc::downgrade(&management));
             monitor.set_busy_probe(Arc::new(move || {
-                exports
+                let mut busy = exports
                     .upgrade()
                     .map(|exports| exports.exporting())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                busy.extend(
+                    deletions
+                        .upgrade()
+                        .map(|deletions| deletions.deleting())
+                        .unwrap_or_default(),
+                );
+                busy
+            }));
+            let watching = Arc::downgrade(&monitor);
+            virtualbox_captures.set_watch_probe(Arc::new(move |machine| {
+                watching
+                    .upgrade()
+                    .is_some_and(|monitor| monitor.watches(machine))
             }));
             if tokio::runtime::Handle::try_current().is_ok() {
                 monitor.spawn();
@@ -307,6 +342,8 @@ impl AgentOperations {
         Ok(Arc::new(Self {
             inner,
             virtualbox,
+            management,
+            virtualbox_captures,
             monitor,
             restores,
             execution,
@@ -317,6 +354,14 @@ impl AgentOperations {
 
     pub fn execution(&self) -> &Arc<ExecutionManager> {
         &self.execution
+    }
+
+    /// Where VirtualBox screenshots are uploaded. Without one, none are taken.
+    pub fn set_capture_uploader(
+        &self,
+        uploader: Arc<dyn crate::virtualbox_capture::CaptureUploader>,
+    ) {
+        self.virtualbox_captures.set_uploader(uploader);
     }
 
     /// What a new connection must tell the server: which operations exist here, and every report the
@@ -337,6 +382,8 @@ impl AgentOperations {
             operations,
             snapshots: true,
             virtualbox: self.monitor.is_some(),
+            virtualbox_management: self.monitor.is_some() && self.management.available(),
+            virtualbox_operations: self.management.sync_entries(),
         })];
         messages.push(self.restores.sync_message());
         // Leftovers of a removed copy are deleted again on each connection, off the connection's task.
@@ -357,6 +404,8 @@ impl AgentOperations {
     pub fn pending_reports(&self) -> Vec<Message> {
         let mut reports = self.pending_registration_reports();
         reports.extend(self.virtualbox.pending_reports());
+        reports.extend(self.management.pending_reports());
+        reports.extend(self.virtualbox_captures.reports());
         reports.extend(self.restores.pending_reports());
         reports.extend(self.execution.pending_reports());
         reports.extend(self.captures.reports());
@@ -396,6 +445,23 @@ impl AgentOperations {
     pub fn handle(&self, message: Message) {
         match message {
             Message::ServerQemuCapture(request) => self.captures.start(request),
+            // VirtualBox captures share the QEMU answers, routed by operation.
+            Message::ServerQemuCaptureAck(ack)
+                if self.virtualbox_captures.owns(ack.operation_id) =>
+            {
+                let captures = self.virtualbox_captures.clone();
+                tokio::task::spawn_blocking(move || captures.acknowledge(ack));
+            }
+            Message::ServerQemuCaptureRetry(retry)
+                if self.virtualbox_captures.owns(retry.operation_id) =>
+            {
+                let captures = self.virtualbox_captures.clone();
+                tokio::task::spawn_blocking(move || captures.retry(retry));
+            }
+            Message::ServerVirtualBoxCapture(request) => self.virtualbox_captures.start(request),
+            Message::ServerVirtualBoxImport(request) => self.management.start_import(request),
+            Message::ServerVirtualBoxDelete(request) => self.management.start_delete(request),
+            Message::ServerVirtualBoxOperationAck(ack) => self.management.acknowledged(ack),
             Message::ServerQemuCaptureAck(ack) => {
                 let captures = self.captures.clone();
                 tokio::task::spawn_blocking(move || captures.acknowledge(ack));
@@ -621,6 +687,7 @@ impl AgentOperations {
             .copied()
             .collect();
         open.extend(self.virtualbox.open_operations());
+        open.extend(self.management.open_operations());
         open
     }
 }

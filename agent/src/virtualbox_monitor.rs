@@ -172,6 +172,16 @@ impl VirtualBoxMonitor {
         self.wake.notify_one();
     }
 
+    /// Whether the server asked for this machine to be watched: whether it is linked to a catalog VM here.
+    pub fn watches(&self, machine: Uuid) -> bool {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .watched
+            .as_ref()
+            .is_some_and(|watched| watched.contains(&machine))
+    }
+
     /// Queues a command. It runs on the monitor's task, between two inspections.
     pub fn control(&self, control: VirtualBoxControl) {
         self.state

@@ -54,6 +54,8 @@ pub struct VirtualBoxSettings {
     pub command_timeout: Duration,
     /// An export copies every disk of the machine, so it may take hours. It is cancelled, never cut short.
     pub export_timeout: Duration,
+    /// An import copies every disk of an OVA into a new machine (decision 0046). As long as an export may take.
+    pub import_timeout: Duration,
     pub max_output_bytes: usize,
     /// How often `list runningvms` runs, and how often an active machine is inspected.
     pub active_poll: Duration,
@@ -70,6 +72,7 @@ impl VirtualBoxSettings {
             config,
             command_timeout: Duration::from_secs(30),
             export_timeout: Duration::from_secs(12 * 60 * 60),
+            import_timeout: Duration::from_secs(12 * 60 * 60),
             max_output_bytes: 1024 * 1024,
             active_poll: Duration::from_secs(15),
             inactive_poll: Duration::from_secs(60),
@@ -848,6 +851,85 @@ pub fn control_arguments(
     }
 }
 
+// Imports, deletions and screenshots (decision 0046). Every command names an OVA, an output file in the agent's
+// own directories, or a machine by UUID. None names a machine by its display name.
+
+/// `list vms`: every machine VirtualBox has registered, by UUID. What an import is found by: the machines after
+/// it, less those before it.
+pub fn list_vms(runner: &dyn CommandRunner, timeout: Duration) -> Result<VmList, RunError> {
+    let output = runner.run(&args(&["list", "vms"]), timeout)?;
+    if !output.success {
+        return Err(RunError::Spawn(io::Error::other("list vms failed")));
+    }
+    Ok(parse_vm_list(&output.stdout))
+}
+
+/// `import <ova> --dry-run` to check an OVA, or `import <ova> --vsys=0 --vmname=<name>` to create one new machine
+/// from it. VirtualBox never replaces a machine on import: a name already in use makes it fail.
+pub fn import_arguments(ova: &Path, target_name: &str, dry_run: bool) -> Vec<std::ffi::OsString> {
+    let mut arguments: Vec<std::ffi::OsString> = vec!["import".into(), ova.as_os_str().to_owned()];
+    if dry_run {
+        arguments.push("--dry-run".into());
+    }
+    arguments.push("--vsys=0".into());
+    arguments.push(format!("--vmname={target_name}").into());
+    arguments
+}
+
+pub fn import(
+    runner: &dyn CommandRunner,
+    ova: &Path,
+    target_name: &str,
+    dry_run: bool,
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CommandOutput, RunError> {
+    let arguments = import_arguments(ova, target_name, dry_run);
+    let arguments: Vec<&OsStr> = arguments.iter().map(|value| value.as_os_str()).collect();
+    runner.run_cancellable(&arguments, timeout, cancelled)
+}
+
+/// `unregistervm <uuid> --delete`: VirtualBox's own removal of one machine and of the files it owns. EmuCat never
+/// removes a machine's files itself. Never `--delete-all`, which would also take media other machines could use.
+pub fn delete_arguments(uuid: Uuid) -> Vec<String> {
+    vec![
+        "unregistervm".into(),
+        uuid.hyphenated().to_string(),
+        "--delete".into(),
+    ]
+}
+
+pub fn unregister_delete(
+    runner: &dyn CommandRunner,
+    uuid: Uuid,
+    timeout: Duration,
+) -> Result<CommandOutput, RunError> {
+    let arguments = delete_arguments(uuid);
+    let arguments: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+    runner.run(&arguments, timeout)
+}
+
+/// `controlvm <uuid> screenshotpng <file>`: the first display of a running machine, as a PNG.
+pub fn screenshot_arguments(uuid: Uuid, output: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "controlvm".into(),
+        uuid.hyphenated().to_string().into(),
+        "screenshotpng".into(),
+        output.as_os_str().to_owned(),
+    ]
+}
+
+pub fn screenshot(
+    runner: &dyn CommandRunner,
+    uuid: Uuid,
+    output: &Path,
+    timeout: Duration,
+) -> Result<CommandOutput, RunError> {
+    let arguments = screenshot_arguments(uuid, output);
+    let arguments: Vec<&OsStr> = arguments.iter().map(|value| value.as_os_str()).collect();
+    runner.run(&arguments, timeout)
+}
+
 /// The error VirtualBox named, such as `VBOX_E_INVALID_VM_STATE`, for a message. Only this token is kept:
 /// the rest of what VBoxManage prints can hold paths, which never leave this module.
 pub fn error_token(stderr: &str) -> Option<String> {
@@ -873,6 +955,55 @@ mod tests {
             Some("VBOX_E_INVALID_OBJECT_STATE")
         );
         assert_eq!(error_token("nothing useful"), None);
+    }
+
+    #[test]
+    fn imports_deletions_and_screenshots_are_argument_vectors() {
+        let ova = Path::new("C:\\EmuCat\\staging\\virtualbox-import-x\\x.ova");
+        let strings = |values: Vec<std::ffi::OsString>| {
+            values
+                .into_iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        // A name with spaces and quotes is one argument, never split or interpreted.
+        assert_eq!(
+            strings(import_arguments(ova, "Xenix \"386\" & co", true)),
+            vec![
+                "import",
+                "C:\\EmuCat\\staging\\virtualbox-import-x\\x.ova",
+                "--dry-run",
+                "--vsys=0",
+                "--vmname=Xenix \"386\" & co",
+            ]
+        );
+        assert_eq!(
+            strings(import_arguments(ova, "Xenix", false)),
+            vec![
+                "import",
+                "C:\\EmuCat\\staging\\virtualbox-import-x\\x.ova",
+                "--vsys=0",
+                "--vmname=Xenix",
+            ]
+        );
+        let uuid = Uuid::parse_str("2acda0fc-cea6-406b-8a55-746fac380687").unwrap();
+        assert_eq!(
+            delete_arguments(uuid),
+            vec![
+                "unregistervm",
+                "2acda0fc-cea6-406b-8a55-746fac380687",
+                "--delete"
+            ]
+        );
+        assert_eq!(
+            strings(screenshot_arguments(uuid, Path::new("out.png"))),
+            vec![
+                "controlvm",
+                "2acda0fc-cea6-406b-8a55-746fac380687",
+                "screenshotpng",
+                "out.png"
+            ]
+        );
     }
 
     #[test]

@@ -225,8 +225,10 @@ agent only ever acts on a machine by UUID, and only on what the server asks for:
   registered in VirtualBox, untouched; there is no local copy to remove. Exports have 12 hours.
 - **Execution is local only, in place.** The agent runs `VBoxManage startvm <uuid> --type gui`, `controlvm <uuid>
 acpipowerbutton` (Shut down, which the guest may ignore) or `controlvm <uuid> poweroff` (Power off, which the web
-  app confirms by name). It never imports, unregisters, deletes, snapshots or modifies a machine. Remote Volatile and
-  Remote Snapshot are refused for VirtualBox machines, and so are restore and verification.
+  app confirms by name). Remote Volatile and Remote Snapshot are refused for VirtualBox machines, and so are
+  restore and verification.
+- **Snapshots are exports too.** A snapshot of a VirtualBox VM is the same export of its linked, powered-off machine,
+  recorded as a new version. VirtualBox's own snapshots are never made or used.
 - **Only watched machines.** The server tells the agent which machines are registered to it; a command for any
   other UUID is refused by the agent itself.
 - **One poller.** A single task runs `VBoxManage list runningvms` every 15 seconds while a watched machine runs, and
@@ -236,6 +238,31 @@ acpipowerbutton` (Shut down, which the guest may ignore) or `controlvm <uuid> po
   the guest are detected the same way, and the server records them as sessions.
 - **No paths leave the agent.** A VBoxManage failure is reported as its `VBOX_E_*`, `E_*` or `NS_ERROR_*` code
   only.
+
+#### Importing, deleting and capturing VirtualBox machines
+
+An agent that can do these says so (`virtualboxManagement`) when it connects; an older one is never asked. They follow
+[decision 0046](decisions/0046-virtualbox-management.md):
+
+- **Import creates a new machine and touches nothing else.** The agent checks the name, refuses one VirtualBox
+  already has, downloads the OVA to `staging/virtualbox-import-<operation>/<operation>.ova`, checks its size and
+  SHA-256, runs `import <ova> --dry-run --vsys=0 --vmname=<name>`, then the import itself (12 hours, not cancellable),
+  removes only its own download, and compares VirtualBox's machine list before and after. Exactly one new machine with
+  that name is a success. Anything else is reported as failed or uncertain, with every new machine listed; none is
+  removed, and nothing is linked automatically.
+- **Deletion is VirtualBox's, once.** For a machine the server names by UUID and by the name an administrator typed,
+  the agent looks again with `showvminfo`, refuses a machine that is missing, renamed, unreadable or not powered off,
+  and then runs `unregistervm <uuid> --delete` once. It never deletes files itself and never repeats the command; a
+  machine still listed afterwards is reported as uncertain.
+- **Interrupted operations are reconciled, never repeated.** The journal in `state/virtualbox-operations` is marked
+  irreversible before the import or deletion command runs. After a restart, an irreversible operation is settled by
+  listing or inspecting VirtualBox, and reported as uncertain when that proves nothing.
+- **Screenshots** of a watched, running or paused machine use `controlvm <uuid> screenshotpng`. The PNG is
+  validated, kept in `state/virtualbox-captures` (at most 8 unpublished), uploaded as a screenshot of the catalog VM,
+  and removed once the server acknowledges it.
+
+Test import and deletion against a disposable machine made for the purpose, never against a machine in your
+collection.
 
 ## Registering VMs
 

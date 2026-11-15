@@ -13,8 +13,21 @@ import { ApiError } from '../errors.js';
 interface Link {
   isOnline(id: string): boolean;
   executionCapabilities(id: string): ExecutionSyncPayload['capabilities'] | null;
+  /** Whether the agent can capture a running VirtualBox machine (decision 0046). */
+  isVirtualBoxManagementCapable(id: string): boolean;
   sendToAgent(id: string, message: Pick<ServerMessage, 'type' | 'payload'>): boolean;
 }
+
+/**
+ * What an agent reports about a capture. A VirtualBox report names the machine it captured as well, and has to
+ * name the one this capture was asked of.
+ */
+export type CaptureAgentReport =
+  | CaptureReport
+  | (Omit<CaptureReport, 'emulatorType'> & { emulatorType: 'virtualbox'; machineUuid: string });
+
+/** The screenshot types, and what an agent must be able to do for each. */
+type CaptureKind = 'qemu' | 'virtualbox';
 
 function operation(row: RowDataPacket): CaptureOperation {
   return {
@@ -22,7 +35,7 @@ function operation(row: RowDataPacket): CaptureOperation {
     requestId: row.request_id as string,
     sessionId: row.session_id as string,
     agentId: row.agent_id as string,
-    emulatorType: 'qemu',
+    emulatorType: row.emulator_type as CaptureKind,
     vmName: row.vm_name as string,
     mode: row.mode as CaptureOperation['mode'],
     versionId: row.source_version_id as string | null,
@@ -70,8 +83,24 @@ export class CaptureCoordinator {
     return rows[0];
   }
 
-  private reason(session: RowDataPacket): string | null {
-    if (session.emulator_type !== 'qemu') return 'Screenshot capture is available only for QEMU.';
+  /** The machine a VirtualBox session runs, when the VM is linked to one on the session's agent. */
+  private async machineOf(
+    executor: Pick<Pool, 'execute'>,
+    session: RowDataPacket,
+  ): Promise<string | null> {
+    if (session.emulator_type !== 'virtualbox') return null;
+    const [rows] = await executor.execute<RowDataPacket[]>(
+      `SELECT machine_uuid FROM virtualbox_sources
+       WHERE emulator_type = 'virtualbox' AND vm_name = ? AND agent_id = ?`,
+      [session.vm_name, session.agent_id],
+    );
+    return (rows[0]?.machine_uuid as string | undefined) ?? null;
+  }
+
+  private reason(session: RowDataPacket, machineUuid: string | null): string | null {
+    if (session.emulator_type === 'virtualbox') return this.virtualBoxReason(session, machineUuid);
+    if (session.emulator_type !== 'qemu')
+      return 'Screenshot capture is available only for QEMU and VirtualBox.';
     if (session.revoked_at !== null) return 'The session agent was revoked.';
     if (session.execution_state !== 'running')
       return 'The QEMU session must be running and not stopping.';
@@ -83,8 +112,24 @@ export class CaptureCoordinator {
     return null;
   }
 
+  /**
+   * A VirtualBox screenshot is `controlvm screenshotpng` of the linked machine (decision 0046). It needs the
+   * machine running and an agent that can do it; the agent checks the machine again before it captures.
+   */
+  private virtualBoxReason(session: RowDataPacket, machineUuid: string | null): string | null {
+    if (session.revoked_at !== null) return 'The session agent was revoked.';
+    if (session.execution_state !== 'running')
+      return 'The VirtualBox machine must be running and not stopping.';
+    if (!this.link.isOnline(session.agent_id as string)) return 'The session agent is offline.';
+    if (!this.link.isVirtualBoxManagementCapable(session.agent_id as string))
+      return 'Update the agent to enable VirtualBox screenshot capture.';
+    if (!machineUuid) return 'This VM has no linked VirtualBox machine on the session agent.';
+    return null;
+  }
+
   async status(sessionId: string): Promise<CaptureStatus> {
     const session = await this.session(sessionId);
+    const machineUuid = await this.machineOf(this.pool, session);
     const [rows] = await this.pool.execute<RowDataPacket[]>(
       'SELECT * FROM qemu_captures WHERE session_id = ? ORDER BY active_marker DESC, created_at DESC, id DESC LIMIT 1',
       [sessionId],
@@ -92,7 +137,8 @@ export class CaptureCoordinator {
     const capture = rows[0] ? operation(rows[0]) : null;
     const busy = capture && ['requested', 'capturing', 'uploading'].includes(capture.state);
     const reason =
-      this.reason(session) ?? (busy ? 'A screenshot capture is already in progress.' : null);
+      this.reason(session, machineUuid) ??
+      (busy ? 'A screenshot capture is already in progress.' : null);
     return { available: reason === null, reason, operation: capture };
   }
 
@@ -115,19 +161,23 @@ export class CaptureCoordinator {
         );
         const session = sessions[0];
         if (!session) throw new ApiError(404, 'session_not_found', 'Session not found');
-        const reason = this.reason(session);
+        const machineUuid = await this.machineOf(connection, session);
+        const reason = this.reason(session, machineUuid);
         if (reason) throw new ApiError(409, 'capture_unavailable', reason);
         await connection.execute(
           `INSERT INTO qemu_captures
-          (id, request_id, session_id, agent_id, requested_by_user_id, emulator_type, vm_name, mode, source_version_id)
-          VALUES (?, ?, ?, ?, ?, 'qemu', ?, ?, ?)`,
+          (id, request_id, session_id, agent_id, requested_by_user_id, emulator_type, vm_name, machine_uuid,
+           mode, source_version_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             id,
             requestId,
             sessionId,
             session.agent_id,
             userId,
+            session.emulator_type,
             session.vm_name,
+            machineUuid,
             session.mode,
             session.source_version_id,
           ],
@@ -147,7 +197,7 @@ export class CaptureCoordinator {
       );
     }
     const capture = await this.get(sessionId, id);
-    this.dispatch(capture);
+    this.dispatch(capture, await this.capturedMachine(id));
     return capture;
   }
 
@@ -160,7 +210,20 @@ export class CaptureCoordinator {
     return operation(rows[0]);
   }
 
-  private dispatch(capture: CaptureOperation): void {
+  private dispatch(capture: CaptureOperation, machineUuid: string | null): void {
+    if (capture.emulatorType === 'virtualbox') {
+      if (!machineUuid) return;
+      this.link.sendToAgent(capture.agentId, {
+        type: 'server.virtualbox_capture',
+        payload: {
+          operationId: capture.id,
+          sessionId: capture.sessionId,
+          vmName: capture.vmName,
+          machineUuid,
+        },
+      });
+      return;
+    }
     this.link.sendToAgent(capture.agentId, {
       type: 'server.qemu_capture',
       payload: {
@@ -172,16 +235,32 @@ export class CaptureCoordinator {
     });
   }
 
-  async synced(agentId: string): Promise<void> {
-    if (this.link.executionCapabilities(agentId)?.qemuScreenshot !== true) return;
+  private async capturedMachine(id: string): Promise<string | null> {
     const [rows] = await this.pool.execute<RowDataPacket[]>(
-      "SELECT * FROM qemu_captures WHERE agent_id = ? AND state <> 'completed'",
-      [agentId],
+      'SELECT machine_uuid FROM qemu_captures WHERE id = ?',
+      [id],
+    );
+    return (rows[0]?.machine_uuid as string | null | undefined) ?? null;
+  }
+
+  /**
+   * Redelivers the unfinished captures of one kind, once the agent has said it can do them: QEMU ones after its
+   * execution sync, VirtualBox ones after its registration sync.
+   */
+  async synced(agentId: string, kind: CaptureKind = 'qemu'): Promise<void> {
+    const capable =
+      kind === 'qemu'
+        ? this.link.executionCapabilities(agentId)?.qemuScreenshot === true
+        : this.link.isVirtualBoxManagementCapable(agentId);
+    if (!capable) return;
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      "SELECT * FROM qemu_captures WHERE agent_id = ? AND emulator_type = ? AND state <> 'completed'",
+      [agentId, kind],
     );
     for (const row of rows) {
       const capture = operation(row);
       // Redelivery asks an existing journal for its state; it never authorizes a second capture.
-      this.dispatch(capture);
+      this.dispatch(capture, row.machine_uuid as string | null);
       if (capture.retryAttempts > 0)
         this.link.sendToAgent(agentId, {
           type: 'server.qemu_capture_retry',
@@ -190,18 +269,20 @@ export class CaptureCoordinator {
     }
   }
 
-  async report(agentId: string, report: CaptureReport): Promise<void> {
+  async report(agentId: string, report: CaptureAgentReport): Promise<void> {
     const [rows] = await this.pool.execute<RowDataPacket[]>(
       'SELECT * FROM qemu_captures WHERE id = ? AND agent_id = ? AND session_id = ? AND emulator_type = ? AND vm_name = ?',
       [report.operationId, agentId, report.sessionId, report.emulatorType, report.vmName],
     );
     const row = rows[0];
     if (!row || (row.sha256 !== null && report.sha256 !== row.sha256)) return;
+    // A report about another machine than the one captured belongs to no capture here.
+    if (report.emulatorType === 'virtualbox' && row.machine_uuid !== report.machineUuid) return;
     // Never trust an upload claim. Only a committed media row for this VM proves publication.
     if (report.sha256) {
       const [media] = await this.pool.execute<RowDataPacket[]>(
         'SELECT id FROM vm_media WHERE emulator_type = ? AND vm_name = ? AND original_sha256 = ?',
-        ['qemu', row.vm_name, report.sha256],
+        [row.emulator_type, row.vm_name, report.sha256],
       );
       if (media[0]) {
         await this.pool.execute(

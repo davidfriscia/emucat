@@ -132,12 +132,14 @@ repo/
     .staging/                         incomplete uploads, removed afterwards
     qemu/win98/{version_id}.zip       one verified, immutable archive per version
     86box/dos 6.22/{version_id}.zip
-    virtualbox/xenix-386/{version_id}.ova   a VirtualBox master: the OVA VirtualBox exported
+    virtualbox/xenix-386/{version_id}.ova   a VirtualBox master or snapshot: the OVA VirtualBox exported
 ```
 
 The directory is the lowercase VM name. The file name is the version's UUID, so nothing ever collides. A VirtualBox
-master is the OVA itself, uploaded and verified by size and SHA-256 like any archive, with no manifest of EmuCat's. Nothing overwrites or
-modifies an archive once it is there. Never edit them by hand: the database holds their hashes.
+master or snapshot is the OVA itself, uploaded and verified by size and SHA-256 like any archive, with no manifest of EmuCat's. Importing one
+into VirtualBox downloads it into the agent's staging directory, checks its size and SHA-256 again, and removes only that
+download afterwards ([decision 0046](decisions/0046-virtualbox-management.md)). Deleting a
+machine from VirtualBox never touches the repository. Nothing overwrites or modifies an archive once it is there. Never edit them by hand: the database holds their hashes.
 
 Restoring only reads these. The agent downloads over the same connection, with the same host-key checks and the same key, and needs no more access than registration does. A damaged object is noticed by its hash, and fails the restore without changing anything on the agent.
 

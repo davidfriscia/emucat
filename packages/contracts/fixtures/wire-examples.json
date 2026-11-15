@@ -1749,5 +1749,262 @@
         "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601"
       }
     }
+  ],
+  "virtualboxManagementServerMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8100",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_import",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "vmName": "xenix-386",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e7002",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova",
+        "archiveSizeBytes": 734003200,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "targetName": "Xenix 386 (v2)"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8101",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_delete",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "machineName": "Xenix 386"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8102",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_operation_ack",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8103",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_capture",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8002",
+        "vmName": "xenix-386",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687"
+      }
+    }
+  ],
+  "virtualboxManagementAgentMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8104",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "agent.virtualbox_operation_progress",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "stage": "downloading",
+        "doneBytes": 1048576,
+        "totalBytes": 734003200
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8105",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "agent.virtualbox_operation_progress",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "stage": "importing",
+        "doneBytes": null,
+        "totalBytes": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8106",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "agent.virtualbox_operation_result",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "kind": "import",
+        "outcome": "succeeded",
+        "code": null,
+        "message": null,
+        "machine": {
+          "uuid": "5b0a7f0e-91c4-4d8e-b0c2-0f5f8d0a1e11",
+          "name": "Xenix 386 (v2)",
+          "state": "powered_off"
+        },
+        "strayMachines": [],
+        "filesRemoved": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8107",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "agent.virtualbox_operation_result",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "kind": "import",
+        "outcome": "uncertain",
+        "code": "import_ambiguous",
+        "message": "VirtualBox registered machines that cannot be attributed to this import",
+        "machine": null,
+        "strayMachines": [
+          {
+            "uuid": "5b0a7f0e-91c4-4d8e-b0c2-0f5f8d0a1e11",
+            "name": "Xenix 386 (v2)",
+            "state": "powered_off"
+          },
+          {
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "name": "Someone else's",
+            "state": "powered_off"
+          }
+        ],
+        "filesRemoved": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8108",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "agent.virtualbox_operation_result",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "kind": "delete",
+        "outcome": "succeeded",
+        "code": null,
+        "message": null,
+        "machine": null,
+        "strayMachines": [],
+        "filesRemoved": true
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8109",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "agent.virtualbox_capture",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8002",
+        "vmName": "xenix-386",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "state": "uploading",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "uncertain": false,
+        "code": null,
+        "message": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e810a",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "agent.virtualbox_capture",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8002",
+        "vmName": "xenix-386",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "state": "failed",
+        "sha256": null,
+        "uncertain": false,
+        "code": "machine_not_running",
+        "message": "The machine is not running"
+      }
+    }
+  ],
+  "virtualboxManagementRefused": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e810b",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_import",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "vmName": "xenix-386",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e7002",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova",
+        "archiveSizeBytes": 734003200,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "targetName": "--options=keepallmacs"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e810c",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_import",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "vmName": "xenix-386",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e7002",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova",
+        "archiveSizeBytes": 734003200,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "targetName": "C:\\Windows\\x"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e810d",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_import",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "vmName": "xenix-386",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e7002",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova",
+        "archiveSizeBytes": 734003200,
+        "archiveSha256": "not-a-hash",
+        "targetName": "Xenix 386 (v2)"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e810e",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_delete",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "machineUuid": "Xenix 386",
+        "machineName": "Xenix 386"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e810f",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_delete",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "machineName": ""
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8110",
+      "sentAt": "2026-11-15T10:00:00Z",
+      "type": "server.virtualbox_capture",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8001",
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8002",
+        "vmName": "xenix-386",
+        "machineUuid": "*"
+      }
+    }
   ]
 }

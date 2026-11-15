@@ -260,11 +260,39 @@ older agent omits it and is never sent the messages below; a queued VirtualBox r
   could inspect. Later reports carry changed observations only. An observation has `machineUuid`, `present`,
   `name`, `state`, `rawState`, `stateChangedAt`, `accessible` and `observedAt`; `present: false` means
   VBoxManage no longer lists the machine. `available: false` means the agent cannot run VBoxManage.
+- **Snapshots reuse registration.** A snapshot of a VirtualBox VM is a `server.virtualbox_registration_request` for
+  a `snapshot` operation, of the linked machine.
 - **Sessions follow observations, not commands.** An accepted `start` moves a session from `requested` to
   `starting` only; it is `running` once a running state is observed, and ends once an ended state is: `stopped`
   after a stop was asked, `exited` otherwise, `failed` (`vm_aborted`) for an abort nobody forced, and
   `interrupted` (`source_unavailable`) when the machine disappears. A running machine with no session gets one,
   with no user. A refused command records its `code`; a refused stop leaves the session running.
+
+### VirtualBox import, deletion and screenshots
+
+An agent that can import, delete and capture adds `virtualboxManagement: true` to `agent.registration_sync`, with
+`virtualboxOperations`: its open journals, each `operationId` and `phase` (`running`, `irreversible` or
+`reported`). An older agent omits both and is never sent the messages below. See
+[decision 0046](decisions/0046-virtualbox-management.md).
+
+| Type                                  | From   | Payload                                                                                                                              |
+| ------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `server.virtualbox_import`            | Server | `operationId`, `vmName`, `versionId`, `repositoryId`, `archiveKey` (`.ova`), `archiveSizeBytes`, `archiveSha256`, `targetName`       |
+| `server.virtualbox_delete`            | Server | `operationId`, `machineUuid`, `machineName` (as typed by the administrator)                                                          |
+| `server.virtualbox_operation_ack`     | Server | `operationId`: the result is recorded, and the agent forgets the journal                                                             |
+| `agent.virtualbox_operation_progress` | Agent  | `operationId`, `stage`, `doneBytes`, `totalBytes`                                                                                    |
+| `agent.virtualbox_operation_result`   | Agent  | `operationId`, `kind`, `outcome` (`succeeded`, `failed`, `uncertain`), `code`, `message`, `machine`, `strayMachines`, `filesRemoved` |
+| `server.virtualbox_capture`           | Server | `operationId`, `sessionId`, `vmName`, `machineUuid`                                                                                  |
+| `agent.virtualbox_capture`            | Agent  | the request, `state` (`capturing`, `uploading`, `failed`), `sha256`, `uncertain`, `code`, `message`                                  |
+
+- **A result repeats until acknowledged.** The agent sends it again on every reconnection; the server records it
+  once and answers `server.virtualbox_operation_ack`.
+- **`uncertain` is never success.** An import is a success only with exactly one new machine of the requested name,
+  given in `machine`; any other new machine is a stray. No result links a machine.
+- **Lost operations are settled, not retried.** An operation the agent no longer reports is failed if it never
+  became irreversible, and uncertain (`agent_lost_operation`) otherwise.
+- **Captures are acknowledged like QEMU's**, with `server.qemu_capture_ack` and `server.qemu_capture_retry` by
+  operation id. The PNG travels over the media upload, never over the WebSocket.
 
 ## Registration
 

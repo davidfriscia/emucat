@@ -436,10 +436,18 @@ export class ExecutionCoordinator {
             'This agent cannot run VirtualBox machines. Update it, or check its platforms.virtualbox setting.',
         };
       }
-      if (!source || source.agentId !== agentId) {
+      if (!source) {
         return {
           reason: 'vm_not_on_agent',
-          problem: 'This VirtualBox machine is registered on another agent, and runs only there.',
+          problem:
+            'This VM is not linked to a VirtualBox machine. Link one, or import a version into VirtualBox and link that.',
+        };
+      }
+      if (source.agentId !== agentId) {
+        return {
+          reason: 'vm_not_on_agent',
+          problem:
+            'This VM is linked to a VirtualBox machine on another agent, and runs only there.',
         };
       }
       if (source.present === false || source.accessible === false) {

@@ -278,6 +278,59 @@ impl HttpMediaApi {
     }
 }
 
+/// A VirtualBox screenshot (decision 0046): the same upload, under the catalog VM, with the capture's own label.
+impl crate::virtualbox_capture::CaptureUploader for HttpMediaApi {
+    fn upload<'a>(
+        &'a self,
+        vm_name: &'a VmName,
+        capture_id: Uuid,
+        sha256: &'a str,
+        file: &'a Path,
+    ) -> BoxFuture<'a, Result<(), ApiFailure>> {
+        Box::pin(async move {
+            let opened = std::fs::File::open(file).map_err(|error| ApiFailure::Permanent {
+                code: "capture_unreadable".to_owned(),
+                message: format!("Cannot read the screenshot: {}", error.kind()),
+            })?;
+            let size = opened
+                .metadata()
+                .map_err(|_| ApiFailure::Permanent {
+                    code: "capture_unreadable".to_owned(),
+                    message: "Cannot read the screenshot".to_owned(),
+                })?
+                .len();
+            let url =
+                self.endpoint(&["vms", "virtualbox", vm_name.as_str(), "screenshots", sha256]);
+            let captured_at = OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_default();
+            let mut request = self
+                .authorized(self.client.put(url))
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .header(reqwest::header::CONTENT_LENGTH, size)
+                .header(
+                    "x-emucat-source-path",
+                    percent_encode(&crate::virtualbox_capture::source_label(capture_id)),
+                )
+                .header("x-emucat-capture-id", capture_id.to_string());
+            if !captured_at.is_empty() {
+                request = request.header("x-emucat-captured-at", captured_at);
+            }
+            let response = request
+                .body(reqwest::Body::from(tokio::fs::File::from_std(opened)))
+                .timeout(Duration::from_secs(600))
+                .send()
+                .await
+                .map_err(|error| network_failure(&error))?;
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                Err(failure_from(response).await)
+            }
+        })
+    }
+}
+
 impl MediaApi for HttpMediaApi {
     fn list_vms(&self) -> BoxFuture<'_, Result<AgentMediaVms, ApiFailure>> {
         Box::pin(async move {

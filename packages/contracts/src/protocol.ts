@@ -53,6 +53,15 @@ import {
   virtualBoxWatchPayloadSchema,
 } from './virtualbox.js';
 import {
+  virtualBoxCapturePayloadSchema,
+  virtualBoxCaptureReportPayloadSchema,
+  virtualBoxDeletePayloadSchema,
+  virtualBoxImportPayloadSchema,
+  virtualBoxOperationAckPayloadSchema,
+  virtualBoxOperationProgressPayloadSchema,
+  virtualBoxOperationResultPayloadSchema,
+} from './virtualbox-management.js';
+import {
   restoreAckPayloadSchema,
   restoreCancelPayloadSchema,
   restoreErrorPayloadSchema,
@@ -217,6 +226,18 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.virtualbox_states'),
     payload: virtualBoxStatesPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.virtualbox_operation_progress'),
+    payload: virtualBoxOperationProgressPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.virtualbox_operation_result'),
+    payload: virtualBoxOperationResultPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.virtualbox_capture'),
+    payload: virtualBoxCaptureReportPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -308,6 +329,22 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.virtualbox_watch'),
     payload: virtualBoxWatchPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.virtualbox_import'),
+    payload: virtualBoxImportPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.virtualbox_delete'),
+    payload: virtualBoxDeletePayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.virtualbox_operation_ack'),
+    payload: virtualBoxOperationAckPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.virtualbox_capture'),
+    payload: virtualBoxCapturePayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

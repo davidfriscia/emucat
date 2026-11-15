@@ -1,4 +1,14 @@
-import { captureOperationSchema, captureStatusSchema } from '@emucat/contracts';
+import {
+  captureOperationSchema,
+  captureStatusSchema,
+  virtualBoxManagementResponseSchema,
+  virtualBoxOperationSchema,
+  type VirtualBoxDeleteRequest,
+  type VirtualBoxImportRequest,
+  type VirtualBoxLinkRequest,
+  type VirtualBoxManagementResponse,
+  type VirtualBoxOperation,
+} from '@emucat/contracts';
 import {
   adminCatalogResponseSchema,
   adminMediaListResponseSchema,
@@ -874,4 +884,60 @@ export function retryCapture(sessionId: string, operationId: string) {
     captureOperationSchema,
     { method: 'POST', body: {} },
   );
+}
+
+// A VirtualBox VM's machine (decision 0046): its link, imports into VirtualBox and deletions from it. A request
+// names a machine by its UUID only; its name is only ever typed again, to confirm a deletion.
+
+function virtualBoxPath(vm: VmIdentity): string {
+  return `${relative(adminVmApiPath(vm))}/virtualbox`;
+}
+
+export function fetchVirtualBoxManagement(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<VirtualBoxManagementResponse> {
+  return requestJson(virtualBoxPath(vm), virtualBoxManagementResponseSchema, { signal });
+}
+
+export function linkVirtualBoxMachine(
+  vm: VmIdentity,
+  request: VirtualBoxLinkRequest,
+): Promise<VirtualBoxOperation> {
+  return requestJson(`${virtualBoxPath(vm)}/link`, virtualBoxOperationSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function unlinkVirtualBoxMachine(
+  vm: VmIdentity,
+  machineUuid: string,
+): Promise<VirtualBoxOperation> {
+  return requestJson(`${virtualBoxPath(vm)}/unlink`, virtualBoxOperationSchema, {
+    method: 'POST',
+    body: { machineUuid },
+  });
+}
+
+export function importIntoVirtualBox(
+  vm: VmIdentity,
+  versionId: string,
+  request: VirtualBoxImportRequest,
+): Promise<VirtualBoxOperation> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${encodeURIComponent(versionId)}/virtualbox-import`,
+    virtualBoxOperationSchema,
+    { method: 'POST', body: request },
+  );
+}
+
+export function deleteFromVirtualBox(
+  vm: VmIdentity,
+  request: VirtualBoxDeleteRequest,
+): Promise<VirtualBoxOperation> {
+  return requestJson(`${virtualBoxPath(vm)}/delete`, virtualBoxOperationSchema, {
+    method: 'POST',
+    body: request,
+  });
 }

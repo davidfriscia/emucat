@@ -26,12 +26,13 @@ export const captureRetrySchema = z.strictObject({
   operationId: z.uuid(),
   attempt: z.number().int().min(1).max(3),
 });
+/** A QEMU capture goes through QMP, a VirtualBox one through `controlvm screenshotpng` (decision 0046). */
 export const captureOperationSchema = z.object({
   id: z.uuid(),
   requestId: z.uuid(),
   sessionId: z.uuid(),
   agentId: z.uuid(),
-  emulatorType: z.literal('qemu'),
+  emulatorType: z.enum(['qemu', 'virtualbox']),
   vmName: z.string(),
   mode: executionModeSchema,
   versionId: z.uuid().nullable(),

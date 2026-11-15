@@ -622,7 +622,11 @@ async fn run_session<F: Future<Output = ()>>(
                         | Message::ServerArchiveDelete(_)
                         | Message::ServerVirtualBoxRegistrationRequest(_)
                         | Message::ServerVirtualBoxControl(_)
-                        | Message::ServerVirtualBoxWatch(_)) => {
+                        | Message::ServerVirtualBoxWatch(_)
+                        | Message::ServerVirtualBoxImport(_)
+                        | Message::ServerVirtualBoxDelete(_)
+                        | Message::ServerVirtualBoxOperationAck(_)
+                        | Message::ServerVirtualBoxCapture(_)) => {
                             match &settings.operations {
                                 Some(operations) if welcomed => operations.handle(message),
                                 _ => tracing::warn!("Ignored a repository command"),

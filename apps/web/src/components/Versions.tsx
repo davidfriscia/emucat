@@ -6,6 +6,7 @@ import {
   type RestoreOptionsResponse,
   type VersionNode,
   type VersionTreeEntry,
+  type VirtualBoxManagementResponse,
   type VmIdentity,
 } from '@emucat/contracts';
 import { useCallback, useRef, useState } from 'react';
@@ -32,6 +33,11 @@ import {
   type SnapshotRequest,
 } from './Snapshots';
 import { FormError } from './States';
+import {
+  ImportIntoVirtualBoxDialog,
+  notifyVirtualBoxChanged,
+  useVirtualBoxManagement,
+} from './VirtualBoxSource';
 
 /**
  * A VM's version history: an immutable master and its snapshots, drawn as the tree they are, with what
@@ -77,9 +83,14 @@ function VersionItem({
   onRun,
   onDelete,
   onRetryDelete,
+  virtualbox,
+  onImport,
 }: {
   entry: VersionTreeEntry;
   vm: VmIdentity;
+  /** For a VirtualBox VM, its machine and agents; `null` while unknown or for another emulator. */
+  virtualbox: VirtualBoxManagementResponse | null;
+  onImport: (node: VersionNode) => void;
   /** The version's name for assistive technology: unique in the tree, even when labels repeat. */
   nameOf: (node: VersionNode) => string;
   restoreOptions: RestoreOptionsResponse | null;
@@ -96,8 +107,17 @@ function VersionItem({
   const headingId = `version-${node.id}`;
   const canRestore = node.available && (restoreOptions?.agents.some((a) => a.online) ?? false);
   const localHolders = node.holders.filter((holder) => holder.kind === 'local');
-  // An OVA master is kept, and nothing else: restoring, remote modes and snapshots come later (VB3).
-  const virtualbox = vm.emulatorType === 'virtualbox';
+  // An OVA is imported into VirtualBox as a new machine, never restored over one, and a VirtualBox VM has no
+  // remote mode. A snapshot is a new OVA of the linked machine, made from the version it comes from (decision 0046).
+  const isVirtualBox = vm.emulatorType === 'virtualbox';
+  const source = virtualbox?.source ?? null;
+  const lineage = virtualbox?.sourceVersionId ?? null;
+  const snapshotParent =
+    source !== null && (lineage === null ? node.kind === 'master' : lineage === node.id);
+  const importer = virtualbox?.agents.some((agent) => agent.management && agent.online) ?? false;
+  const virtualBoxBusy =
+    virtualbox?.operations.some((item) => item.state === 'queued' || item.state === 'running') ??
+    false;
   return (
     <li
       role="treeitem"
@@ -193,13 +213,72 @@ function VersionItem({
               ))}
             </ul>
           ) : null}
-          {virtualbox ? (
-            <p className="small text-body-secondary mb-0">
-              An OVA exported by VirtualBox. The machine runs in place in VirtualBox; restoring it,
-              remote modes and snapshots are not available for VirtualBox machines yet.
-            </p>
+          {isVirtualBox ? (
+            <>
+              <p className="small text-body-secondary mb-1">
+                An OVA exported by VirtualBox. It can be imported into VirtualBox as a new machine;
+                nothing already there is replaced.
+                {source && lineage === node.id
+                  ? ' The linked machine comes from this version.'
+                  : ''}
+              </p>
+              <div className="d-flex flex-wrap gap-2 mt-1">
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-primary"
+                  disabled={
+                    !node.available || node.deletion !== null || !importer || virtualBoxBusy
+                  }
+                  aria-label={`Import ${nameOf(node)} into VirtualBox`}
+                  aria-haspopup="dialog"
+                  onClick={() => onImport(node)}
+                >
+                  Import into VirtualBox…
+                </button>
+                {snapshotParent && source ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-secondary theme-button"
+                    disabled={
+                      !node.available ||
+                      node.deletion !== null ||
+                      virtualBoxBusy ||
+                      source.state !== 'powered_off' ||
+                      !source.agentOnline
+                    }
+                    aria-label={`Create snapshot of ${source.displayName} from ${nameOf(node)}`}
+                    onClick={() => onSnapshot(node, source.agentId, source.agentName)}
+                  >
+                    Create snapshot…
+                  </button>
+                ) : null}
+                {node.kind === 'snapshot' && !node.deletion ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-danger"
+                    disabled={!node.deletable.eligible}
+                    aria-label={`Delete ${nameOf(node)}`}
+                    aria-describedby={deleteReason ? deleteHelpId : undefined}
+                    aria-haspopup="dialog"
+                    onClick={() => onDelete(node)}
+                  >
+                    Delete snapshot…
+                  </button>
+                ) : null}
+              </div>
+              {virtualbox && !importer ? (
+                <p className="small text-body-secondary mt-1 mb-0">
+                  No online agent can import into VirtualBox.
+                </p>
+              ) : null}
+              {snapshotParent && source && source.state !== 'powered_off' ? (
+                <p className="small text-body-secondary mt-1 mb-0">
+                  Power the machine off to create a snapshot.
+                </p>
+              ) : null}
+            </>
           ) : null}
-          <div className={`d-flex flex-wrap gap-2 mt-1${virtualbox ? ' d-none' : ''}`}>
+          <div className={`d-flex flex-wrap gap-2 mt-1${isVirtualBox ? ' d-none' : ''}`}>
             <button
               type="button"
               className="btn btn-sm btn-outline-primary"
@@ -271,6 +350,8 @@ function VersionItem({
               onRun={onRun}
               onDelete={onDelete}
               onRetryDelete={onRetryDelete}
+              virtualbox={virtualbox}
+              onImport={onImport}
             />
           ))}
         </ul>
@@ -421,13 +502,32 @@ function WorkspaceCard({
  * A VM's version history. Running a version is done in the run panel: these buttons only choose the
  * version and mode there (`onRun`), or, where there is no run panel, open it over the page.
  */
-export function VmVersionHistory({
-  vm,
-  onRun,
-}: {
+export function VmVersionHistory(props: VersionHistoryProps) {
+  return props.vm.emulatorType === 'virtualbox' ? (
+    <VirtualBoxVersionHistory {...props} />
+  ) : (
+    <VersionHistory {...props} virtualbox={null} />
+  );
+}
+
+interface VersionHistoryProps {
   vm: VmIdentity;
+  /** The VM's title, which names what an import creates. */
+  title?: string | undefined;
   onRun?: ((preselect: Omit<RunPreselection, 'token'>) => void) | undefined;
-}) {
+}
+
+function VirtualBoxVersionHistory(props: VersionHistoryProps) {
+  const management = useVirtualBoxManagement(props.vm);
+  return <VersionHistory {...props} virtualbox={management.data} />;
+}
+
+function VersionHistory({
+  vm,
+  title,
+  onRun,
+  virtualbox,
+}: VersionHistoryProps & { virtualbox: VirtualBoxManagementResponse | null }) {
   const { emulatorType, vmName } = vm;
   const identity = { emulatorType, vmName };
   const loadTree = useCallback(
@@ -452,6 +552,7 @@ export function VmVersionHistory({
   const [snapshotting, setSnapshotting] = useState<SnapshotRequest | null>(null);
   const [snapshotOperation, setSnapshotOperation] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<VersionNode | null>(null);
+  const [importing, setImporting] = useState<VersionNode | null>(null);
   const [retryError, setRetryError] = useState<unknown>(null);
   const runToken = useRef(0);
 
@@ -551,11 +652,14 @@ export function VmVersionHistory({
                   agentName,
                   parentVersionId: node.id,
                   parentLabel: versionLabel(node),
+                  machineName: virtualbox?.source?.displayName,
                 })
               }
               onRun={run}
               onDelete={setDeleting}
               onRetryDelete={(node) => void retryDelete(node)}
+              virtualbox={virtualbox}
+              onImport={setImporting}
             />
           </ul>
         </>
@@ -618,6 +722,19 @@ export function VmVersionHistory({
           onClose={() => setRunning(null)}
         />
       ) : null}
+      {importing && virtualbox ? (
+        <ImportIntoVirtualBoxDialog
+          vm={identity}
+          title={title ?? vmName}
+          version={{ id: importing.id, label: versionLabel(importing) }}
+          agents={virtualbox.agents}
+          onClose={() => setImporting(null)}
+          onStarted={() => {
+            setImporting(null);
+            notifyVirtualBoxChanged(identity);
+          }}
+        />
+      ) : null}
       {snapshotting ? (
         <CreateSnapshotDialog
           vm={identity}
@@ -637,9 +754,11 @@ export function VmVersionHistory({
 /** The version history as a section of the VM's administration page. */
 export function VmVersionsSection({
   vm,
+  title,
   onRun,
 }: {
   vm: VmIdentity;
+  title?: string | undefined;
   onRun?: ((preselect: Omit<RunPreselection, 'token'>) => void) | undefined;
 }) {
   return (
@@ -648,7 +767,7 @@ export function VmVersionsSection({
         <h2 id="vm-versions-heading" className="h6 card-title">
           Version history
         </h2>
-        <VmVersionHistory vm={vm} onRun={onRun} />
+        <VmVersionHistory vm={vm} title={title} onRun={onRun} />
       </div>
     </section>
   );

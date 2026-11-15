@@ -43,7 +43,15 @@ function header(request: FastifyRequest, name: string): string | undefined {
  * The path is stored as a label for an administrator, and is never used as a path. It still has to look
  * like what an agent can really have found: this VM's watched locations, and nothing else.
  */
-function parseSourcePath(request: FastifyRequest, vm: VmIdentity): string {
+/**
+ * A VirtualBox VM has no screenshots directory (decision 0045): its only screenshots are captures, whose label is
+ * exactly `captureLabel`. A filesystem VM's path must be one the agent watches.
+ */
+function parseSourcePath(
+  request: FastifyRequest,
+  vm: VmIdentity,
+  captureLabel: string | null = null,
+): string {
   const invalid = () =>
     new ApiError(400, 'invalid_source_path', 'The source path is missing or not acceptable');
   const raw = header(request, MEDIA_SOURCE_PATH_HEADER);
@@ -57,8 +65,9 @@ function parseSourcePath(request: FastifyRequest, vm: VmIdentity): string {
   if (
     Buffer.byteLength(path, 'utf8') > MAX_SOURCE_PATH_BYTES ||
     /\p{Cc}/u.test(path) ||
-    !isFilesystemEmulatorType(vm.emulatorType) ||
-    !isWatchedMediaPath(vm.emulatorType, path)
+    !(isFilesystemEmulatorType(vm.emulatorType)
+      ? isWatchedMediaPath(vm.emulatorType, path)
+      : captureLabel !== null && path === captureLabel)
   ) {
     throw invalid();
   }
@@ -164,8 +173,11 @@ export function registerAgentMediaRoutes(
           const captureId = captureHeader === undefined ? undefined : z.uuid().parse(captureHeader);
           if (captureId) await requireCaptureUpload(pool, agentId, vm, captureId, declaredSha256);
           else await requireAgentVm(pool, agentId, vm);
-          const sourcePath = parseSourcePath(request, vm);
-          if (captureId && sourcePath !== `emucat-capture-${captureId}.ppm`)
+          // QEMU's capture is a PPM from QMP, VirtualBox's a PNG from VBoxManage (decision 0046).
+          const captureExtension = vm.emulatorType === 'virtualbox' ? 'png' : 'ppm';
+          const captureLabel = captureId ? `emucat-capture-${captureId}.${captureExtension}` : null;
+          const sourcePath = parseSourcePath(request, vm, captureLabel);
+          if (captureId && sourcePath !== captureLabel)
             throw new ApiError(
               400,
               'invalid_source_path',

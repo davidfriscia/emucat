@@ -92,6 +92,8 @@ export interface SnapshotRequest {
   agentName: string;
   parentVersionId: string;
   parentLabel: string;
+  /** For a VirtualBox VM: VirtualBox's name for the linked machine, which is exported. */
+  machineName?: string | undefined;
 }
 
 /** Confirms a snapshot of an agent's persistent local copy. One request ID per dialog. */
@@ -121,13 +123,28 @@ export function CreateSnapshotDialog({
         onStarted(operation);
       }}
     >
-      <p>
-        The agent archives its local copy of {vm.vmName} as a new, immutable snapshot whose parent
-        is <strong>{request.parentLabel}</strong>, the version that copy came from. The archive is
-        uploaded and verified in the repository before anything is recorded, and no existing version
-        is changed. The local copy is read, never removed.
-      </p>
-      <p className="mb-0">The VM must not be running on that agent.</p>
+      {vm.emulatorType === 'virtualbox' ? (
+        <>
+          <p>
+            VirtualBox exports <strong>{request.machineName ?? 'the linked machine'}</strong> into a
+            new OVA, a new, immutable snapshot of {vm.vmName} whose parent is{' '}
+            <strong>{request.parentLabel}</strong>. The OVA is uploaded and verified in the
+            repository before anything is recorded, and no existing version is changed. The machine
+            is only read: VirtualBox snapshots are neither made nor used.
+          </p>
+          <p className="mb-0">The machine must stay powered off until the export finishes.</p>
+        </>
+      ) : (
+        <>
+          <p>
+            The agent archives its local copy of {vm.vmName} as a new, immutable snapshot whose
+            parent is <strong>{request.parentLabel}</strong>, the version that copy came from. The
+            archive is uploaded and verified in the repository before anything is recorded, and no
+            existing version is changed. The local copy is read, never removed.
+          </p>
+          <p className="mb-0">The VM must not be running on that agent.</p>
+        </>
+      )}
     </ConfirmDialog>
   );
 }

@@ -204,8 +204,12 @@ export const SNAPSHOT_INELIGIBLE_REASONS = [
   'repository_disabled',
   'vm_running',
   'operation_in_progress',
-  /** A VirtualBox VM: snapshots of it are not implemented yet (decision 0045). */
+  /** A kind of VM whose snapshots this server cannot create. */
   'not_supported',
+  /** A VirtualBox VM with no linked machine, or one VirtualBox does not list or cannot read (decision 0046). */
+  'source_unavailable',
+  /** A VirtualBox machine that is not powered off: an export would describe no single moment of it. */
+  'vm_not_powered_off',
 ] as const;
 export type SnapshotIneligibleReason = (typeof SNAPSHOT_INELIGIBLE_REASONS)[number];
 
@@ -227,8 +231,11 @@ export const SNAPSHOT_INELIGIBLE_TEXT: Record<SnapshotIneligibleReason, string> 
   vm_running:
     'This VM is running on this agent, or may be. Stop it, or dismiss the session, before creating a snapshot.',
   operation_in_progress: 'This agent, or this VM, is busy with another operation.',
-  not_supported:
-    'Snapshots of VirtualBox machines are not available yet. The master is the only version.',
+  not_supported: 'Snapshots of this VM cannot be created.',
+  source_unavailable:
+    'This VM has no linked VirtualBox machine on this agent, or VirtualBox there does not list it or cannot read it. Link one first.',
+  vm_not_powered_off:
+    'The VirtualBox machine is not powered off. Shut it down (a saved state does not count), then create the snapshot.',
 };
 
 // Working copies, and the remote sessions that run them (decisions 0038 and 0040).
