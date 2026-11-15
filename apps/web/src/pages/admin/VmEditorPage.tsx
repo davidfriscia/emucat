@@ -19,7 +19,11 @@ import {
   updateVmVisibility,
 } from '../../api';
 import { EmulatorBadge, VisibilityBadge } from '../../components/Catalog';
-import { VmExecutionSection, type RunPreselection } from '../../components/Execution';
+import {
+  VirtualBoxExecutionSection,
+  VmExecutionSection,
+  type RunPreselection,
+} from '../../components/Execution';
 import { VmRestoreSection } from '../../components/Restore';
 import { VmVersionsSection } from '../../components/Versions';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
@@ -295,8 +299,15 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
         </section>
       </div>
       <div className="vm-admin-panels">
-        <VmExecutionSection vm={identity} preselect={preselect} />
-        <VmRestoreSection vm={identity} />
+        {identity.emulatorType === 'virtualbox' ? (
+          // Run in place only: never restored, and no remote mode (decision 0045).
+          <VirtualBoxExecutionSection vm={identity} />
+        ) : (
+          <>
+            <VmExecutionSection vm={identity} preselect={preselect} />
+            <VmRestoreSection vm={identity} />
+          </>
+        )}
         <VmVersionsSection
           vm={identity}
           onRun={(choice) => {

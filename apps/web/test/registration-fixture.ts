@@ -20,6 +20,7 @@ export function registrationOperation(): RegistrationOperation {
     archiveKey: 'archives/qemu/win98/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6101.zip',
     progress: { doneBytes: null, totalBytes: null },
     archive: {
+      format: 'zip',
       sizeBytes: 1000,
       sha256: 'a'.repeat(64),
       manifestVersion: 1,
@@ -41,5 +42,6 @@ export function registrationOperation(): RegistrationOperation {
     acknowledgedByDisplayName: null,
     parentSnapshotName: null,
     versionDeletion: null,
+    virtualboxUuid: null,
   };
 }

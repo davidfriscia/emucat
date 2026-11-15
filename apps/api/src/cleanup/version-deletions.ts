@@ -14,6 +14,7 @@ import {
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { ApiError } from '../errors.js';
+import { isFilesystemEmulatorType } from '@emucat/contracts';
 import type { CleanupLink } from './local-removals.js';
 
 /** "Record has changed since last read": a locking read found a row newer than the read view. */
@@ -451,10 +452,13 @@ export class VersionDeletionCoordinator {
        WHERE version_id = ? AND state = 'deleting'`,
       [attemptId, agentId, attempts, this.delay(attempts) * 1000, versionId],
     );
+    // A VirtualBox master is never deleted, and VB2 has no VirtualBox snapshots (decision 0045).
+    const emulatorType = row.emulator_type as string;
+    if (!isFilesystemEmulatorType(emulatorType)) return false;
     const payload: ArchiveDeletePayload = {
       operationId: attemptId,
       versionId,
-      emulatorType: row.emulator_type,
+      emulatorType,
       vmName: row.vm_name,
       repositoryId: row.repository_id,
       archiveKey: row.archive_key,

@@ -17,6 +17,7 @@ export * from './restore.js';
 export * from './snapshot-name.js';
 export * from './version.js';
 export * from './versions.js';
+export * from './virtualbox.js';
 export * from './vm-name.js';
 
 export * from './capture.js';

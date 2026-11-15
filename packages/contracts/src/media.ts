@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { VmVisibility } from './catalog.js';
-import { emulatorTypeSchema } from './emulator.js';
+import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { sameVmIdentity, vmNameSchema, type VmIdentity } from './vm-name.js';
 
@@ -83,7 +83,7 @@ export const MEDIA_ACK_QUERY_MAX = 256;
 export const MEDIA_STATUS_MAX_VMS = 100;
 
 export const agentMediaVmSchema = z.strictObject({
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
 });
 
@@ -117,7 +117,7 @@ const mediaCountSchema = z.number().int().nonnegative();
 
 /** One VM's synchronization as this agent sees it. */
 export const mediaSyncVmStatusSchema = z.strictObject({
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   pending: mediaCountSchema,
   uploading: mediaCountSchema,

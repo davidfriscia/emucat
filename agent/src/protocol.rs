@@ -152,6 +152,18 @@ pub enum Message {
     ServerArchiveDelete(ArchiveDelete),
     #[serde(rename = "agent.archive_delete_result")]
     AgentArchiveDeleteResult(ArchiveDeleteResult),
+    #[serde(rename = "server.virtualbox_registration_request")]
+    ServerVirtualBoxRegistrationRequest(VirtualBoxRegistrationRequest),
+    #[serde(rename = "agent.virtualbox_registration_result")]
+    AgentVirtualBoxRegistrationResult(VirtualBoxRegistrationResult),
+    #[serde(rename = "server.virtualbox_control")]
+    ServerVirtualBoxControl(VirtualBoxControl),
+    #[serde(rename = "agent.virtualbox_control_result")]
+    AgentVirtualBoxControlResult(VirtualBoxControlResult),
+    #[serde(rename = "server.virtualbox_watch")]
+    ServerVirtualBoxWatch(VirtualBoxWatch),
+    #[serde(rename = "agent.virtualbox_states")]
+    AgentVirtualBoxStates(VirtualBoxStates),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -353,6 +365,10 @@ pub struct RegistrationSync {
     /// This agent can create snapshots. An older server ignores it.
     #[serde(default)]
     pub snapshots: bool,
+    /// This agent can export, run and watch VirtualBox machines (decision 0045). An older server ignores
+    /// it, and only an agent with VirtualBox configured says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub virtualbox: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -873,6 +889,12 @@ fn is_known_type(message_type: &str) -> bool {
             | "agent.local_copy_remove_result"
             | "server.archive_delete"
             | "agent.archive_delete_result"
+            | "server.virtualbox_registration_request"
+            | "agent.virtualbox_registration_result"
+            | "server.virtualbox_control"
+            | "agent.virtualbox_control_result"
+            | "server.virtualbox_watch"
+            | "agent.virtualbox_states"
     )
 }
 
@@ -1069,4 +1091,97 @@ pub struct VmVerifyResult {
     pub manifest_source: Option<String>,
     pub code: Option<String>,
     pub message: Option<String>,
+}
+
+// VirtualBox (decision 0045). A machine is always named by its UUID, never by its display name, and nothing
+// here can name a path: the agent exports into its own staging directory, and VirtualBox keeps the machine.
+
+/// Most machines one watch or one state report names. Mirrors `VIRTUALBOX_WATCH_MAX` in the contracts.
+pub const VIRTUALBOX_WATCH_MAX: usize = 128;
+
+/// Registers a powered-off VirtualBox machine: `VBoxManage export <uuid>` into an OVA, which becomes the
+/// master as it is. Always a copy: the machine itself is not touched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualBoxRegistrationRequest {
+    pub operation_id: Uuid,
+    pub vm_name: VmName,
+    pub machine_uuid: Uuid,
+    pub repository_id: Uuid,
+    pub version_id: Uuid,
+    pub archive_key: String,
+}
+
+/// The OVA is published and verified. It has no EmuCat manifest: the OVA is the archive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxRegistrationResult {
+    pub operation_id: Uuid,
+    pub version_id: Uuid,
+    pub archive_key: String,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+}
+
+/// Every machine registered for this agent. Replaces the previous list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualBoxWatch {
+    pub machines: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualBoxControlAction {
+    /// `startvm <uuid> --type gui`
+    Start,
+    /// `controlvm <uuid> acpipowerbutton`, which the guest may ignore.
+    AcpiShutdown,
+    /// `controlvm <uuid> poweroff`. The server sends it only after an administrator confirmed it.
+    Poweroff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualBoxControl {
+    pub session_id: Uuid,
+    pub machine_uuid: Uuid,
+    pub action: VirtualBoxControlAction,
+}
+
+/// Whether VirtualBox accepted a command. It never says that the machine changed state: an observation does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxControlResult {
+    pub session_id: Uuid,
+    pub machine_uuid: Uuid,
+    pub action: VirtualBoxControlAction,
+    pub accepted: bool,
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+/// One watched machine, as last seen. `present: false` once `VBoxManage` no longer knows the UUID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxObservation {
+    pub machine_uuid: Uuid,
+    pub present: bool,
+    pub name: Option<String>,
+    pub state: crate::virtualbox::VirtualBoxVmState,
+    pub raw_state: Option<String>,
+    pub state_changed_at: Option<String>,
+    pub accessible: Option<bool>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub observed_at: OffsetDateTime,
+}
+
+/// `complete` answers a watch, with every watched machine that could be inspected; otherwise only the
+/// machines whose observation changed are listed. A machine that could not be inspected is left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualBoxStates {
+    pub complete: bool,
+    pub available: bool,
+    pub machines: Vec<VirtualBoxObservation>,
 }

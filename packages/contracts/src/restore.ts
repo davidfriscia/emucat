@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { LOCAL_REMOVAL_SYNC_PHASES, REMOVAL_INELIGIBLE_REASONS } from './cleanup.js';
-import { emulatorTypeSchema } from './emulator.js';
+import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
 
@@ -170,7 +170,7 @@ const localPathSchema = z.string().min(1).max(1024);
  */
 export const restoreRequestPayloadSchema = z.strictObject({
   operationId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   repositoryId: z.uuid(),
   versionId: z.uuid(),
@@ -234,7 +234,7 @@ export const restoreSyncPayloadSchema = z.object({
     .max(256),
   capabilities: z.object({
     emulators: z
-      .array(z.object({ emulatorType: emulatorTypeSchema, basePath: localPathSchema }))
+      .array(z.object({ emulatorType: filesystemEmulatorTypeSchema, basePath: localPathSchema }))
       .max(2),
     repositoryIds: z.array(z.uuid()).max(64),
     cacheMaxBytes: safeSizeSchema,
@@ -249,7 +249,7 @@ export const restoreSyncPayloadSchema = z.object({
   localCopies: z
     .array(
       z.object({
-        emulatorType: emulatorTypeSchema,
+        emulatorType: filesystemEmulatorTypeSchema,
         vmName: vmNameSchema,
         versionId: z.uuid(),
         status: z.enum(LOCAL_COPY_REPORTS),
@@ -330,7 +330,7 @@ export type RestoreReplace = z.infer<typeof restoreReplaceSchema>;
 /** It can name a VM, one of its versions and an agent. It can never say where anything goes. */
 export const createRestoreRequestSchema = z.strictObject({
   agentId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   versionId: z.uuid(),
   /** Required when the agent already holds a persistent copy, refused when it does not. */

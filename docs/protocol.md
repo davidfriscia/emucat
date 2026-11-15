@@ -233,6 +233,39 @@ Machines are identified by UUID, lowercase and hyphenated. Names are any text wi
 UTF-16 units, and are never compared with catalog names. The part shares the report's freshness and connection
 binding. See [decision 0044](decisions/0044-virtualbox-discovery.md).
 
+### VirtualBox registration and control
+
+An agent that can export and run VirtualBox machines adds `virtualbox: true` to `agent.registration_sync`. An
+older agent omits it and is never sent the messages below; a queued VirtualBox registration then fails as
+`virtualbox_unavailable`, having done nothing. See [decision 0045](decisions/0045-virtualbox-masters-and-local-execution.md).
+
+| Type                                     | From   | Payload                                                                                    |
+| ---------------------------------------- | ------ | ------------------------------------------------------------------------------------------ |
+| `server.virtualbox_registration_request` | Server | `operationId`, `vmName`, `machineUuid`, `repositoryId`, `versionId`, `archiveKey` (`.ova`) |
+| `agent.virtualbox_registration_result`   | Agent  | `operationId`, `versionId`, `archiveKey`, `archiveSizeBytes`, `archiveSha256`              |
+| `server.virtualbox_watch`                | Server | `machines`: the UUIDs registered to this agent, at most 128                                |
+| `server.virtualbox_control`              | Server | `sessionId`, `machineUuid`, `action`: `start`, `acpi_shutdown` or `poweroff`               |
+| `agent.virtualbox_control_result`        | Agent  | `sessionId`, `machineUuid`, `action`, `accepted`, `code`, `message`                        |
+| `agent.virtualbox_states`                | Agent  | `complete`, `available`, `machines`: observations of watched machines                      |
+
+- **Registration reuses the rest of the registration protocol.** Progress, errors, cancellation and
+  acknowledgement are `agent.registration_progress`, `agent.registration_error`, `server.registration_cancel` and
+  `server.registration_ack`, by operation id. After `committed` the agent reports `agent.registration_cleanup`
+  with `localCopy: "preserved"`: the machine stays in VirtualBox. A filesystem `agent.registration_result` (a ZIP
+  with a manifest) for a VirtualBox operation is rejected, and so is an OVA result for any other.
+- **Requests are strict.** Unknown fields, a path, a display name in place of a UUID, or an action outside the three
+  are refused by the agent. `server.vm_launch` and every other filesystem message refuse `emulatorType:
+"virtualbox"`.
+- **A watch replaces the previous one,** and is answered with `complete: true` states for every machine the agent
+  could inspect. Later reports carry changed observations only. An observation has `machineUuid`, `present`,
+  `name`, `state`, `rawState`, `stateChangedAt`, `accessible` and `observedAt`; `present: false` means
+  VBoxManage no longer lists the machine. `available: false` means the agent cannot run VBoxManage.
+- **Sessions follow observations, not commands.** An accepted `start` moves a session from `requested` to
+  `starting` only; it is `running` once a running state is observed, and ends once an ended state is: `stopped`
+  after a stop was asked, `exited` otherwise, `failed` (`vm_aborted`) for an abort nobody forced, and
+  `interrupted` (`source_unavailable`) when the machine disappears. A running machine with no session gets one,
+  with no user. A refused command records its `code`; a refused stop leaves the session running.
+
 ## Registration
 
 ```

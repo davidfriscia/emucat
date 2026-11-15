@@ -7,13 +7,13 @@ import {
   resolvePublicCardImage,
   selectMainMedia,
   vmMediaSchema,
-  type EmulatorType,
+  type FilesystemEmulatorType,
 } from '../src/index.js';
 import { fixture } from './helpers.js';
 
 const paths = fixture<{
   unsafe: string[];
-  cases: { emulator: EmulatorType; path: string; excluded: boolean; watched: boolean }[];
+  cases: { emulator: FilesystemEmulatorType; path: string; excluded: boolean; watched: boolean }[];
 }>('archive-paths');
 
 const identity = { emulatorType: 'qemu', vmName: 'Win98' } as const;

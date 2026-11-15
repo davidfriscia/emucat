@@ -1,4 +1,5 @@
 import {
+  isFilesystemEmulatorType,
   isWatchedMediaPath,
   MEDIA_CAPTURED_AT_HEADER,
   MEDIA_PROTOCOL_HEADER,
@@ -56,6 +57,7 @@ function parseSourcePath(request: FastifyRequest, vm: VmIdentity): string {
   if (
     Buffer.byteLength(path, 'utf8') > MAX_SOURCE_PATH_BYTES ||
     /\p{Cc}/u.test(path) ||
+    !isFilesystemEmulatorType(vm.emulatorType) ||
     !isWatchedMediaPath(vm.emulatorType, path)
   ) {
     throw invalid();

@@ -315,6 +315,7 @@ impl World {
             }),
             retry_delay: Duration::from_millis(1),
             execution: emucat_agent::execution::ExecutionSettings::default(),
+            virtualbox: None,
             media: self.media.clone(),
         })
         .unwrap()

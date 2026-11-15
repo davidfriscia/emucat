@@ -1,14 +1,23 @@
-import type {
-  VirtualBoxDiscovery,
-  VirtualBoxDiscoveryStatus,
-  VirtualBoxVm,
-  VirtualBoxVmError,
-  VirtualBoxVmState,
+import {
+  adminVmRoute,
+  validateVmName,
+  VM_NAME_MAX_LENGTH,
+  type RegistrationOperation,
+  type RepositorySummary,
+  type VirtualBoxDiscovery,
+  type VirtualBoxDiscoveryStatus,
+  type VirtualBoxVm,
+  type VirtualBoxVmError,
+  type VirtualBoxVmState,
+  type VmNameErrorCode,
 } from '@emucat/contracts';
-import { EmptyState } from './States';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { Link } from 'react-router';
+import { startRegistration } from '../api';
+import { EmptyState, FormError } from './States';
 import { formatTime } from './Agents';
 
-const STATE_TEXT: Record<VirtualBoxVmState, string> = {
+export const STATE_TEXT: Record<VirtualBoxVmState, string> = {
   powered_off: 'Powered off',
   running: 'Running',
   paused: 'Paused',
@@ -22,7 +31,7 @@ const STATE_TEXT: Record<VirtualBoxVmState, string> = {
   unknown: 'Unknown',
 };
 
-const STATE_BADGE: Record<VirtualBoxVmState, string> = {
+export const STATE_BADGE: Record<VirtualBoxVmState, string> = {
   powered_off: 'text-bg-secondary',
   running: 'text-bg-success',
   paused: 'text-bg-info',
@@ -71,20 +80,251 @@ function Accessibility({ vm }: { vm: VirtualBoxVm }) {
   );
 }
 
+const NAME_ERROR_TEXT: Record<VmNameErrorCode, string> = {
+  empty: 'Choose a name.',
+  invalid_characters: 'Use letters, digits, spaces, dots, hyphens and underscores only.',
+  too_long: `Use at most ${VM_NAME_MAX_LENGTH} characters.`,
+  invalid_boundary: 'Start and end with a letter or a digit.',
+  repeated_separator: 'Do not repeat dots or spaces.',
+  reserved_name: 'This name is reserved by Windows.',
+  snapshot_suffix: 'This ending is reserved for snapshot names.',
+};
+
+/** A catalog name from VirtualBox's name for a machine: only what VM names allow, and never empty. */
+export function catalogNameFor(name: string): string {
+  const slug = name
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9._ -]+/g, '-')
+    .replace(/[ ._-]*-[ ._-]*/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/\.{2,}/g, '.')
+    .slice(0, VM_NAME_MAX_LENGTH)
+    .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '');
+  return validateVmName(slug).ok ? slug : 'virtualbox-vm';
+}
+
+/** Where a discovered machine may be registered from, when it may. */
+export interface VirtualBoxRegistering {
+  agentId: string;
+  agentName: string;
+  discoveryOperationId: string;
+  repository: RepositorySummary;
+  onStarted: (operation: RegistrationOperation) => void;
+}
+
+/**
+ * Registers one machine: an OVA export becomes its master. The administrator chooses the catalog name; the
+ * machine is named to the agent by its UUID only.
+ */
+export function VirtualBoxRegistrationDialog({
+  vm,
+  registering,
+  onClose,
+}: {
+  vm: VirtualBoxVm;
+  registering: VirtualBoxRegistering;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(() => catalogNameFor(vm.name));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const nameId = useId();
+  const validation = validateVmName(name);
+
+  useEffect(() => {
+    cancel.current?.focus();
+  }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!validation.ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      registering.onStarted(
+        await startRegistration({
+          agentId: registering.agentId,
+          repositoryId: registering.repository.id,
+          emulatorType: 'virtualbox',
+          vmName: name,
+          mode: 'copy',
+          discoveryOperationId: registering.discoveryOperationId,
+          virtualboxUuid: vm.uuid,
+        }),
+      );
+    } catch (failure) {
+      setError(failure);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="modal-backdrop show" />
+      <div
+        className="modal d-block"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="virtualbox-registration-title"
+        tabIndex={-1}
+      >
+        <div className="modal-dialog modal-dialog-scrollable">
+          <form className="modal-content" onSubmit={(event) => void submit(event)}>
+            <div className="modal-header">
+              <h2 className="modal-title h5" id="virtualbox-registration-title">
+                Register a VirtualBox machine
+              </h2>
+            </div>
+            <div className="modal-body">
+              <dl className="settings-facts small">
+                <dt>Machine</dt>
+                <dd className="virtualbox-name">{vm.name || '(unnamed)'}</dd>
+                <dt>UUID</dt>
+                <dd>
+                  <code className="vm-identity small">{vm.uuid}</code>
+                </dd>
+                <dt>Agent</dt>
+                <dd>{registering.agentName}</dd>
+                <dt>Repository</dt>
+                <dd>
+                  {registering.repository.name} ({registering.repository.host}:
+                  {registering.repository.port})
+                </dd>
+              </dl>
+              <div className="mb-3">
+                <label htmlFor={nameId} className="form-label">
+                  Catalog name
+                </label>
+                <input
+                  id={nameId}
+                  className={`form-control${validation.ok ? '' : ' is-invalid'}`}
+                  value={name}
+                  maxLength={VM_NAME_MAX_LENGTH}
+                  aria-describedby={`${nameId}-help`}
+                  onChange={(event) => setName(event.target.value)}
+                />
+                <div
+                  id={`${nameId}-help`}
+                  className={validation.ok ? 'form-text' : 'invalid-feedback'}
+                >
+                  {validation.ok
+                    ? 'The VM’s name in the catalog. It need not match VirtualBox’s name, and renaming the machine in VirtualBox later changes nothing here.'
+                    : NAME_ERROR_TEXT[validation.code]}
+                </div>
+              </div>
+              <p>
+                The agent exports this machine with VirtualBox into an OVA, uploads it directly to
+                the repository, and verifies it there. That OVA is the master. The machine itself
+                stays in VirtualBox, unchanged, and runs from there.
+              </p>
+              <p className="small text-body-secondary">
+                The machine must stay powered off until the export finishes: if it is started
+                meanwhile, nothing is registered. The OVA holds the machine’s current state only,
+                not its VirtualBox snapshots or saved state. Remote modes and EmuCat snapshots are
+                not available for VirtualBox machines.
+              </p>
+              <FormError error={error} />
+            </div>
+            <div className="modal-footer">
+              <button
+                ref={cancel}
+                type="button"
+                className="btn btn-outline-secondary theme-button"
+                onClick={onClose}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={busy || !validation.ok}>
+                Export and register
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function CatalogCell({
+  vm,
+  registered,
+  registering,
+  stale,
+  onRegister,
+}: {
+  vm: VirtualBoxVm;
+  registered: string | undefined;
+  registering: VirtualBoxRegistering | null;
+  stale: boolean;
+  onRegister: () => void;
+}) {
+  if (registered) {
+    return (
+      <Link
+        className="vm-identity"
+        to={adminVmRoute({ emulatorType: 'virtualbox', vmName: registered })}
+      >
+        {registered}
+      </Link>
+    );
+  }
+  const reason = stale
+    ? 'Run discovery again first'
+    : !registering
+      ? null
+      : vm.accessible !== true
+        ? 'VirtualBox cannot read it'
+        : vm.state !== 'powered_off'
+          ? 'Power it off first'
+          : null;
+  if (!registering) return <span className="text-body-secondary">Not registered</span>;
+  return (
+    <>
+      <button
+        type="button"
+        className="btn btn-sm btn-outline-primary"
+        disabled={reason !== null}
+        aria-label={`Register ${vm.name || vm.uuid}`}
+        onClick={onRegister}
+      >
+        Register…
+      </button>
+      {reason ? <div className="small text-body-secondary">{reason}</div> : null}
+    </>
+  );
+}
+
 /**
  * What VirtualBox reported, apart from the directory scan: these machines were not found under a base
- * path, and none is a catalog entry. VB1 only observes them, so nothing here starts or registers one.
+ * path. A powered-off machine can be registered, which exports it into an OVA master (decision 0045);
+ * nothing here ever starts, stops or changes one.
  */
 export function VirtualBoxMachines({
   virtualbox,
   observedAt,
   stale,
+  registrations = [],
+  registering = null,
 }: {
   /** `null` when the agent does not report on VirtualBox at all. */
   virtualbox: VirtualBoxDiscovery | null;
   observedAt: string | null;
   stale: boolean;
+  /** The machines of this agent already in the catalog, and their catalog names. */
+  registrations?: readonly { machineUuid: string; vmName: string }[];
+  /** `null` when nothing can be registered from here now. */
+  registering?: VirtualBoxRegistering | null;
 }) {
+  const [chosen, setChosen] = useState<VirtualBoxVm | null>(null);
+  const registeredAs = new Map(registrations.map((item) => [item.machineUuid, item.vmName]));
   if (virtualbox === null) {
     return (
       <section className="mt-4" aria-labelledby="virtualbox-heading">
@@ -142,6 +382,7 @@ export function VirtualBoxMachines({
                     <th scope="col">Guest OS</th>
                     <th scope="col">State</th>
                     <th scope="col">Status</th>
+                    <th scope="col">Catalog</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -158,6 +399,15 @@ export function VirtualBoxMachines({
                       <td>
                         <Accessibility vm={vm} />
                       </td>
+                      <td>
+                        <CatalogCell
+                          vm={vm}
+                          registered={registeredAs.get(vm.uuid)}
+                          registering={registering}
+                          stale={stale}
+                          onRegister={() => setChosen(vm)}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -166,6 +416,19 @@ export function VirtualBoxMachines({
           )}
         </>
       )}
+      {chosen && registering ? (
+        <VirtualBoxRegistrationDialog
+          vm={chosen}
+          registering={{
+            ...registering,
+            onStarted: (operation) => {
+              setChosen(null);
+              registering.onStarted(operation);
+            },
+          }}
+          onClose={() => setChosen(null)}
+        />
+      ) : null}
     </section>
   );
 }

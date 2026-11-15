@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { emulatorTypeSchema } from './emulator.js';
+import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
+import { virtualBoxUuidSchema } from './discovery.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
 
@@ -96,6 +97,10 @@ export const REGISTRATION_ERROR_CODES = [
   'snapshot_lineage_unverified',
   'workspace_unavailable',
   'workspace_purpose_mismatch',
+  // From VirtualBox (decision 0045).
+  'virtualbox_unavailable',
+  'export_failed',
+  'export_timeout',
   // From local cleanup, after the master exists.
   'cleanup_identity_mismatch',
   'cleanup_content_changed',
@@ -161,6 +166,12 @@ const RECOVERY: Partial<Record<string, string>> = {
     'The temporary copy is not on the agent any more. Start a new remote session from the version you want.',
   workspace_purpose_mismatch:
     'This temporary copy belongs to a Remote Volatile session, whose changes are never published.',
+  virtualbox_unavailable:
+    'Check that VirtualBox is installed and that the agent’s platforms.virtualbox.vboxmanage points at VBoxManage.exe, and restart the agent.',
+  export_failed:
+    'VBoxManage could not export the machine. Nothing was registered and the machine is unchanged. Check the agent’s log, and try again.',
+  export_timeout:
+    'The export took longer than the agent allows. Nothing was registered and the machine is unchanged. Raise the export time limit, or try again.',
   cleanup_identity_mismatch:
     'The master is registered and safe. The directory is no longer the one that was archived, so it was kept. Decide what to do with it yourself.',
   cleanup_content_changed:
@@ -203,7 +214,7 @@ const errorMessageSchema = z.string().max(1024);
 export const registrationRequestPayloadSchema = z
   .strictObject({
     operationId: z.uuid(),
-    emulatorType: emulatorTypeSchema,
+    emulatorType: filesystemEmulatorTypeSchema,
     vmName: vmNameSchema,
     mode: registrationModeSchema,
     repositoryId: z.uuid(),
@@ -223,6 +234,23 @@ export const registrationRequestPayloadSchema = z
     path: ['workspaceId'],
   });
 export type RegistrationRequestPayload = z.infer<typeof registrationRequestPayloadSchema>;
+
+/**
+ * A master of a VirtualBox machine, named by its UUID: the agent exports it to an OVA and publishes that. It is
+ * always a copy, since the machine itself stays where it is. Answered with the usual progress, error and cleanup
+ * messages, and with `agent.virtualbox_registration_result`. See decision 0045.
+ */
+export const virtualBoxRegistrationRequestPayloadSchema = z.strictObject({
+  operationId: z.uuid(),
+  vmName: vmNameSchema,
+  machineUuid: virtualBoxUuidSchema,
+  repositoryId: z.uuid(),
+  versionId: z.uuid(),
+  archiveKey: z.string().min(1).max(512),
+});
+export type VirtualBoxRegistrationRequestPayload = z.infer<
+  typeof virtualBoxRegistrationRequestPayloadSchema
+>;
 
 export const registrationCancelPayloadSchema = z.strictObject({ operationId: z.uuid() });
 export type RegistrationCancelPayload = z.infer<typeof registrationCancelPayloadSchema>;
@@ -273,6 +301,11 @@ export const registrationSyncPayloadSchema = z.object({
     .max(256),
   /** Whether this agent can create snapshots. Older agents do not say, and are not asked to. */
   snapshots: z.boolean().optional(),
+  /**
+   * Whether this agent can export, start, stop and watch VirtualBox machines: it has VirtualBox configured and
+   * knows the messages of decision 0045. Older agents do not say, and are never sent them.
+   */
+  virtualbox: z.boolean().optional(),
 });
 export type RegistrationSyncPayload = z.infer<typeof registrationSyncPayloadSchema>;
 
@@ -305,6 +338,18 @@ export const registrationResultPayloadSchema = z.object({
   totalUncompressedBytes: safeSizeSchema,
 });
 export type RegistrationResultPayload = z.infer<typeof registrationResultPayloadSchema>;
+
+/** What the agent verified about a published OVA. There is no EmuCat manifest to report. */
+export const virtualBoxRegistrationResultPayloadSchema = z.object({
+  operationId: z.uuid(),
+  versionId: z.uuid(),
+  archiveKey: z.string().min(1).max(512),
+  archiveSizeBytes: safeSizeSchema.positive(),
+  archiveSha256: sha256HexSchema,
+});
+export type VirtualBoxRegistrationResultPayload = z.infer<
+  typeof virtualBoxRegistrationResultPayloadSchema
+>;
 
 export const registrationErrorPayloadSchema = z.object({
   operationId: z.uuid(),
@@ -427,10 +472,26 @@ export const createRegistrationRequestSchema = z
     mode: z.enum(MASTER_REGISTRATION_MODES),
     discoveryOperationId: z.uuid(),
     confirmDestructive: z.boolean().optional(),
+    /**
+     * The VirtualBox machine to export, for a `virtualbox` registration and only for one. `vmName` is then the
+     * catalog name chosen for it, which need not resemble its VirtualBox name.
+     */
+    virtualboxUuid: virtualBoxUuidSchema.optional(),
   })
   .refine((request) => request.mode !== 'transfer' || request.confirmDestructive === true, {
     message: 'A transfer deletes the local VM, and has to be confirmed',
     path: ['confirmDestructive'],
+  })
+  .refine(
+    (request) => (request.emulatorType === 'virtualbox') === (request.virtualboxUuid !== undefined),
+    {
+      message: 'A VirtualBox registration names its machine, and only it does',
+      path: ['virtualboxUuid'],
+    },
+  )
+  .refine((request) => request.emulatorType !== 'virtualbox' || request.mode === 'copy', {
+    message: 'A VirtualBox machine is always copied: the original stays in VirtualBox',
+    path: ['mode'],
   });
 export type CreateRegistrationRequest = z.infer<typeof createRegistrationRequestSchema>;
 
@@ -459,15 +520,19 @@ export const registrationOperationSchema = z.object({
   /** Filled in once the agent has reported what it verified. The server has not read the archive. */
   archive: z
     .object({
+      /** An EmuCat ZIP with its manifest, or a VirtualBox OVA, which has none. */
+      format: z.enum(['zip', 'ova']).default('zip'),
       sizeBytes: safeSizeSchema,
       sha256: sha256HexSchema,
-      manifestVersion: z.number().int(),
-      manifestSha256: sha256HexSchema,
-      fileCount: safeSizeSchema,
-      totalUncompressedBytes: safeSizeSchema,
+      manifestVersion: z.number().int().nullable(),
+      manifestSha256: sha256HexSchema.nullable(),
+      fileCount: safeSizeSchema.nullable(),
+      totalUncompressedBytes: safeSizeSchema.nullable(),
       verifiedBy: z.literal('agent'),
     })
     .nullable(),
+  /** The VirtualBox machine a `virtualbox` registration exports, by its UUID. */
+  virtualboxUuid: virtualBoxUuidSchema.nullable().default(null),
   localCopy: localCopyStatusSchema.nullable(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
   recovery: z.string().nullable(),

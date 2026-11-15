@@ -70,5 +70,7 @@ pub mod shutdown;
 pub mod state;
 pub mod verification;
 pub mod virtualbox;
+pub mod virtualbox_monitor;
+pub mod virtualbox_registration;
 pub mod workspaces;
 pub mod zip_directory;

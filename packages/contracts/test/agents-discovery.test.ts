@@ -14,7 +14,7 @@ import {
   normalizePairingCode,
   pairingPollResponseSchema,
   serverMessageSchema,
-  type EmulatorType,
+  type FilesystemEmulatorType,
   type Platform,
 } from '../src/index.js';
 import { fixture } from './helpers.js';
@@ -26,7 +26,7 @@ const codes = fixture<{
 
 const rules = fixture<{
   hostCompatibility: {
-    emulator: EmulatorType;
+    emulator: FilesystemEmulatorType;
     markers: string[];
     host: Platform;
     compatible: boolean | null;

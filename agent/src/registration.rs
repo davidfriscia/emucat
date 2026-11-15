@@ -90,6 +90,8 @@ pub struct OperationsConfig {
     pub restore: RestoreSettings,
     /// How emulators are started and stopped.
     pub execution: ExecutionSettings,
+    /// VirtualBox, when it is configured: registered machines are exported, run and watched (decision 0045).
+    pub virtualbox: Option<crate::virtualbox::VirtualBoxSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +160,8 @@ struct Inner {
 
 pub struct AgentOperations {
     inner: Arc<Inner>,
+    virtualbox: Arc<crate::virtualbox_registration::VirtualBoxRegistrations>,
+    monitor: Option<Arc<crate::virtualbox_monitor::VirtualBoxMonitor>>,
     restores: Arc<RestoreManager>,
     execution: Arc<ExecutionManager>,
     captures: Arc<crate::capture::CaptureManager>,
@@ -230,6 +234,36 @@ impl AgentOperations {
             config.media.clone(),
         )?;
         captures.set_outbound(outbound.clone());
+        let virtualbox = crate::virtualbox_registration::VirtualBoxRegistrations::load(
+            crate::virtualbox_registration::VirtualBoxRegistrationsConfig {
+                settings: config.virtualbox.clone(),
+                state_dir: config.state_dir.clone(),
+                staging_dir: config.staging_dir.clone(),
+                repositories: Arc::clone(&config.repositories),
+                retry_delay: config.retry_delay,
+            },
+            outbound.clone(),
+            Arc::clone(&running),
+            stopping.clone(),
+        )?;
+        let monitor = config.virtualbox.clone().map(|settings| {
+            let monitor = crate::virtualbox_monitor::VirtualBoxMonitor::new(
+                settings,
+                outbound.clone(),
+                stopping.clone(),
+            );
+            let exports = Arc::downgrade(&virtualbox);
+            monitor.set_busy_probe(Arc::new(move || {
+                exports
+                    .upgrade()
+                    .map(|exports| exports.exporting())
+                    .unwrap_or_default()
+            }));
+            if tokio::runtime::Handle::try_current().is_ok() {
+                monitor.spawn();
+            }
+            monitor
+        });
         let inner = Arc::new(Inner {
             config,
             outbound,
@@ -272,6 +306,8 @@ impl AgentOperations {
         crate::workspaces::recover(&inner.config.state_dir);
         Ok(Arc::new(Self {
             inner,
+            virtualbox,
+            monitor,
             restores,
             execution,
             captures,
@@ -286,7 +322,7 @@ impl AgentOperations {
     /// What a new connection must tell the server: which operations exist here, and every report the
     /// server may not have received.
     pub fn sync_messages(&self) -> Vec<Message> {
-        let operations = {
+        let mut operations: Vec<RegistrationSyncEntry> = {
             let journals = self.inner.journals.lock().expect("poisoned");
             journals
                 .iter()
@@ -296,9 +332,11 @@ impl AgentOperations {
                 })
                 .collect()
         };
+        operations.extend(self.virtualbox.sync_entries());
         let mut messages = vec![Message::AgentRegistrationSync(RegistrationSync {
             operations,
             snapshots: true,
+            virtualbox: self.monitor.is_some(),
         })];
         messages.push(self.restores.sync_message());
         // Leftovers of a removed copy are deleted again on each connection, off the connection's task.
@@ -318,6 +356,7 @@ impl AgentOperations {
     /// database commit on the server is recovered without any further coordination.
     pub fn pending_reports(&self) -> Vec<Message> {
         let mut reports = self.pending_registration_reports();
+        reports.extend(self.virtualbox.pending_reports());
         reports.extend(self.restores.pending_reports());
         reports.extend(self.execution.pending_reports());
         reports.extend(self.captures.reports());
@@ -366,8 +405,35 @@ impl AgentOperations {
                 tokio::task::spawn_blocking(move || captures.retry(retry));
             }
             Message::ServerRegistrationRequest(request) => self.inner.start(request),
+            // VirtualBox registrations share the answers of all others, routed by operation.
+            Message::ServerRegistrationCancel(cancel)
+                if self.virtualbox.owns(cancel.operation_id) =>
+            {
+                self.virtualbox.cancel(cancel.operation_id);
+            }
+            Message::ServerRegistrationAck(ack) if self.virtualbox.owns(ack.operation_id) => {
+                self.virtualbox.acknowledged(ack);
+            }
             Message::ServerRegistrationCancel(cancel) => self.inner.cancel(&cancel),
             Message::ServerRegistrationAck(ack) => self.inner.acknowledged(ack),
+            Message::ServerVirtualBoxRegistrationRequest(request) => self.virtualbox.start(request),
+            Message::ServerVirtualBoxWatch(watch) => match &self.monitor {
+                Some(monitor) => monitor.watch(watch),
+                None => tracing::debug!("Ignored a VirtualBox watch: VirtualBox is not configured"),
+            },
+            Message::ServerVirtualBoxControl(control) => match &self.monitor {
+                Some(monitor) => monitor.control(control),
+                None => self.inner.send(Message::AgentVirtualBoxControlResult(
+                    crate::protocol::VirtualBoxControlResult {
+                        session_id: control.session_id,
+                        machine_uuid: control.machine_uuid,
+                        action: control.action,
+                        accepted: false,
+                        code: Some("virtualbox_unavailable".to_owned()),
+                        message: Some("VirtualBox is not configured on this agent".to_owned()),
+                    },
+                )),
+            },
             Message::ServerRepositoryHealthRequest(request) => self.inner.health_check(request),
             Message::ServerRegistrationRetryCleanup(retry) => self.inner.retry_cleanup(&retry),
             message @ (Message::ServerRestoreRequest(_)
@@ -546,13 +612,16 @@ impl AgentOperations {
 
     /// Whether this agent has anything unresolved, for tests and diagnostics.
     pub fn open_operations(&self) -> Vec<Uuid> {
-        self.inner
+        let mut open: Vec<Uuid> = self
+            .inner
             .journals
             .lock()
             .expect("poisoned")
             .keys()
             .copied()
-            .collect()
+            .collect();
+        open.extend(self.virtualbox.open_operations());
+        open
     }
 }
 

@@ -181,8 +181,8 @@ vboxmanage = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
 
 - **Every machine VBoxManage shows is in scope.** There is no allowlist: the Windows account the agent runs as is the
   boundary. Run the agent as the account whose VirtualBox machines you collect.
-- **Read-only.** Nothing is started, stopped, registered, exported or changed. A machine is always named by its UUID,
-  never by its display name, which may hold any characters, and which two machines may share.
+- **Read-only during discovery.** Discovery starts, stops, exports and changes nothing. A machine is always named by
+  its UUID, never by its display name, which may hold any characters, and which two machines may share.
 - **No paths leave the agent.** The settings files, disk images, logs and shared folders that `showvminfo` prints are
   read past and never reported.
 - **Bounded.** Each command has 10 seconds and 1 MiB of output, VirtualBox has 20 seconds in all, alongside the
@@ -191,8 +191,8 @@ vboxmanage = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
 - **Isolated.** A machine that cannot be inspected is reported with an `error`, and the others still are. If
   VBoxManage is missing or fails, its own `status` says so, and the 86Box and QEMU results are unaffected.
   `check-config` warns about a missing VBoxManage, and does not refuse to start.
-- **Observed, not registered.** These machines are never matched to catalog entries by name, and nothing can be
-  registered or launched from them yet. EmuCat will run VirtualBox machines locally only.
+- **Never matched by name.** A machine is in the catalog only once an administrator registers it, and is then
+  linked to its catalog entry by UUID (see below).
 
 | `state`        | VirtualBox `VMState`                                          |
 | -------------- | ------------------------------------------------------------- |
@@ -210,6 +210,32 @@ vboxmanage = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
 
 VBoxManage writes UTF-8 where it can, and the ANSI code page otherwise. A name with characters outside that code page
 may reach EmuCat with them replaced. The UUID is unaffected.
+
+#### Registering and running a VirtualBox machine
+
+Registration and execution follow [decision 0045](decisions/0045-virtualbox-masters-and-local-execution.md). The
+agent only ever acts on a machine by UUID, and only on what the server asks for:
+
+- **Registration exports a powered-off machine.** The agent checks with `showvminfo` that the machine is
+  `poweroff`, runs `VBoxManage export <uuid> --output=<staging>/<operation>.ova --manifest` into its own staging
+  directory, checks that the machine did not change meanwhile (same state, same state-change time), hashes the OVA,
+  uploads it directly to the repository, verifies its size and SHA-256 there, and publishes it under
+  `archives/virtualbox/<vm>/<version>.ova`. The OVA is the archive: there is no ZIP and no manifest of EmuCat's.
+  A running, saved, paused or inaccessible machine is refused before anything is exported. The machine itself stays
+  registered in VirtualBox, untouched; there is no local copy to remove. Exports have 12 hours.
+- **Execution is local only, in place.** The agent runs `VBoxManage startvm <uuid> --type gui`, `controlvm <uuid>
+acpipowerbutton` (Shut down, which the guest may ignore) or `controlvm <uuid> poweroff` (Power off, which the web
+  app confirms by name). It never imports, unregisters, deletes, snapshots or modifies a machine. Remote Volatile and
+  Remote Snapshot are refused for VirtualBox machines, and so are restore and verification.
+- **Only watched machines.** The server tells the agent which machines are registered to it; a command for any
+  other UUID is refused by the agent itself.
+- **One poller.** A single task runs `VBoxManage list runningvms` every 15 seconds while a watched machine runs, and
+  every 60 seconds otherwise, and `showvminfo` for a machine whose membership changed, for every machine on each
+  slow round, and every 2 seconds for two minutes after a command. Absence from `runningvms` is never taken as
+  powered off by itself: only `showvminfo` decides the state. Starts and stops from VirtualBox Manager, a script or
+  the guest are detected the same way, and the server records them as sessions.
+- **No paths leave the agent.** A VBoxManage failure is reported as its `VBOX_E_*`, `E_*` or `NS_ERROR_*` code
+  only.
 
 ## Registering VMs
 

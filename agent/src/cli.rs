@@ -24,7 +24,11 @@ use crate::protocol::PROTOCOL_VERSION;
         directory. It keeps verified ZIPs in a local cache. It launches a VM in 86Box or QEMU when an \
         administrator asks, from a command line it builds and checks itself, without a shell, tracks \
         the process by PID and creation time, and stops it gracefully, or forcibly only when \
-        explicitly confirmed. It verifies a local VM against its master's manifest, read-only. It has \
+        explicitly confirmed. It verifies a local VM against its master's manifest, read-only. With \
+        VirtualBox configured, it also lists VirtualBox machines, exports a powered-off machine an \
+        administrator registers into an OVA master, and starts, shuts down (ACPI) or powers off a \
+        registered machine in place, by UUID, watching its state; it never imports, deletes or \
+        modifies one. It has \
         no listener. It removes a local VM only for an explicitly confirmed transfer, after the server \
         has committed a verified master, and never while it runs. Pair it once with `pair`, then keep \
         it running with `run`."

@@ -14,7 +14,11 @@ import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { useAsync } from '../../useAsync';
 
 const PAGE_SIZE = 25;
-const EMULATOR_NAMES: Record<EmulatorType, string> = { '86box': '86Box', qemu: 'QEMU' };
+const EMULATOR_NAMES: Record<EmulatorType, string> = {
+  '86box': '86Box',
+  qemu: 'QEMU',
+  virtualbox: 'VirtualBox',
+};
 
 const RUNNING_STATES: readonly RegistrationState[] = [
   'queued',

@@ -11,6 +11,7 @@ import { VersionDeletionCoordinator } from './cleanup/version-deletions.js';
 import { ExecutionCoordinator } from './execution/coordinator.js';
 import { RegistrationCoordinator } from './registration/coordinator.js';
 import { RestoreCoordinator } from './restore/coordinator.js';
+import { VirtualBoxCoordinator } from './virtualbox/coordinator.js';
 import { WorkspaceCoordinator } from './workspaces/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
@@ -63,6 +64,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             isOnline: (agentId) => hub.isOnline(agentId),
             isRegistrationCapable: (agentId) => hub.isRegistrationCapable(agentId),
             isSnapshotCapable: (agentId) => hub.isSnapshotCapable(agentId),
+            isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
             activeConnectionId: (agentId) => hub.activeConnectionId(agentId),
             latestDiscovery: (agentId) => hub.discovery.get(agentId),
             send: (agentId, message) => hub.sendToAgent(agentId, message),
@@ -71,6 +73,22 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           browser.registrationPolicy,
         );
         hub.setOperations(registrations);
+        const virtualbox = new VirtualBoxCoordinator(
+          browser.pool,
+          {
+            isOnline: (agentId) => hub.isOnline(agentId),
+            isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
+            send: (agentId, message) => hub.sendToAgent(agentId, message),
+          },
+          app.log,
+        );
+        hub.setVirtualBox(virtualbox);
+        // A new master is a machine to watch: the agent's list is replaced at once.
+        registrations.onVirtualBoxRegistered = (agentId) => {
+          virtualbox.watch(agentId).catch((error: unknown) => {
+            app.log.error({ agentId, err: error }, 'Cannot send the VirtualBox watch list');
+          });
+        };
         const restores = new RestoreCoordinator(
           browser.pool,
           {
@@ -88,9 +106,12 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             executionCapabilities: (agentId) => hub.executionCapabilities(agentId),
             workspacesSupported: (agentId) => hub.workspacesSupported(agentId),
             restoreCapabilities: (agentId) => hub.restoreCapabilities(agentId),
+            isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
             send: (agentId, message) => hub.sendToAgent(agentId, message),
           },
           app.log,
+          {},
+          virtualbox,
         );
         hub.setExecution(execution);
         const captures = new CaptureCoordinator(browser.pool, hub);

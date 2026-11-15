@@ -98,6 +98,7 @@ function operation(overrides: Partial<DiscoveryOperation> = {}): DiscoveryOperat
     expiresAt: null,
     fromCurrentConnection: true,
     virtualbox: null,
+    virtualboxRegistrations: [],
     ...overrides,
   };
 }
@@ -720,13 +721,13 @@ describe('VirtualBox discovery', () => {
     expect(screen.queryAllByText('Xenix 386')).toHaveLength(1);
   });
 
-  it('offers nothing to do with a machine: no registration, no launch', async () => {
+  it('offers no registration while the agent may use no repository, and never a launch', async () => {
     showing({ status: 'ok', version: '7.1.10r169112', truncated: false, vms: [machine()] });
     const box = await section();
     expect(within(box).queryAllByRole('button')).toEqual([]);
     expect(within(box).queryAllByRole('link')).toEqual([]);
-    // Nothing claims a catalog status for it, whatever the catalog holds.
-    expect(within(box).queryByText(/already registered|not registered|Register|Launch/)).toBeNull();
+    expect(within(box).getByText('Not registered')).toBeTruthy();
+    expect(within(box).queryByText(/Register…|Launch|Start/)).toBeNull();
   });
 
   it('shows an inaccessible machine, and one that could not be inspected', async () => {

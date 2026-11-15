@@ -110,6 +110,7 @@ function discovery(): DiscoveryOperation {
     expiresAt: null,
     fromCurrentConnection: true,
     virtualbox: null,
+    virtualboxRegistrations: [],
   };
 }
 
@@ -145,11 +146,13 @@ function operation(overrides: Partial<RegistrationOperation> = {}): Registration
     acknowledgedByDisplayName: null,
     parentSnapshotName: null,
     versionDeletion: null,
+    virtualboxUuid: null,
     ...overrides,
   };
 }
 
 const ARCHIVE = {
+  format: 'zip' as const,
   sizeBytes: 2048,
   sha256: SHA,
   manifestVersion: 1,

@@ -1228,6 +1228,7 @@ impl Harness {
             }),
             retry_delay: Duration::from_millis(1),
             execution: emucat_agent::execution::ExecutionSettings::default(),
+            virtualbox: None,
             media: None,
             restore: RestoreSettings {
                 cache_dir: self.cache.clone(),

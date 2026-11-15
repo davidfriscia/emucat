@@ -1,5 +1,6 @@
 import {
   EMULATOR_LABELS,
+  isFilesystemEmulatorType,
   isLocalRemovalTerminal,
   isRestoreCancellable,
   isRestoreTerminal,
@@ -529,13 +530,15 @@ export function RestoreDialog({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!chosen || !ready) return;
+    // A VirtualBox machine is never restored: nothing offers this for one.
+    const emulatorType = vm.emulatorType;
+    if (!chosen || !ready || !isFilesystemEmulatorType(emulatorType)) return;
     setError(null);
     setBusy(true);
     try {
       await startRestore({
         agentId: chosen.agentId,
-        emulatorType: vm.emulatorType,
+        emulatorType,
         vmName: vm.vmName,
         versionId: version.versionId,
         ...(replacing

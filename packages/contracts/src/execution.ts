@@ -1,6 +1,7 @@
 import { z } from 'zod';
-import { emulatorTypeSchema } from './emulator.js';
+import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
+import { virtualBoxSourceSchema } from './virtualbox.js';
 import { vmNameSchema } from './vm-name.js';
 
 /**
@@ -44,7 +45,7 @@ const errorMessageSchema = z.string().max(1024);
 /** A launch names a VM and a mode. The agent finds the emulator, the directory and the arguments. */
 export const vmLaunchPayloadSchema = z.strictObject({
   sessionId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   mode: executionModeSchema,
   /** The version the local copy is believed to come from, for the record only. */
@@ -57,7 +58,7 @@ export type VmLaunchPayload = z.infer<typeof vmLaunchPayloadSchema>;
 /** `force` ends the process at once. The server only sends it after an explicit confirmation. */
 export const vmStopPayloadSchema = z.strictObject({
   sessionId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   force: z.boolean(),
 });
@@ -81,7 +82,7 @@ export type AgentExecutionState = z.infer<typeof agentExecutionStateSchema>;
 
 export const vmExecutionStatusPayloadSchema = z.object({
   sessionId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   state: agentExecutionStateSchema,
   pid: z.number().int().nonnegative().max(0xffff_ffff).nullable(),
@@ -108,7 +109,7 @@ export const executionSyncPayloadSchema = z.object({
     emulators: z
       .array(
         z.object({
-          emulatorType: emulatorTypeSchema,
+          emulatorType: filesystemEmulatorTypeSchema,
           launchable: z.boolean(),
           problem: errorMessageSchema.nullable(),
         }),
@@ -125,7 +126,7 @@ export type ExecutionSyncPayload = z.infer<typeof executionSyncPayloadSchema>;
 /** Names a master and a local VM. The agent checks the manifest's SHA-256, whichever copy it reads. */
 export const vmVerifyPayloadSchema = z.strictObject({
   operationId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   versionId: z.uuid(),
   repositoryId: z.uuid(),
@@ -232,6 +233,11 @@ export const EXECUTION_ERROR_CODES = [
   'workspace_unavailable',
   'workspace_purpose_mismatch',
   'state_unwritable',
+  // VirtualBox (decision 0045).
+  'virtualbox_unavailable',
+  'source_unavailable',
+  'control_refused',
+  'vm_aborted',
   // Stopping.
   'graceful_stop_unavailable',
   'stop_timeout',
@@ -290,6 +296,14 @@ const EXECUTION_RECOVERY: Partial<Record<string, string>> = {
   launch_not_acknowledged:
     'The agent did not answer the launch. Nothing was started. Check that the agent is up to date and connected.',
   agent_revoked: 'Pair the agent again to use it.',
+  virtualbox_unavailable:
+    'The agent cannot run VBoxManage. Check its platforms.virtualbox.vboxmanage setting, and restart it.',
+  source_unavailable:
+    'VirtualBox on that agent no longer lists this machine, or cannot read it. The catalog entry and its master are kept.',
+  control_refused:
+    'VirtualBox refused the command. Check the machine in VirtualBox Manager on that computer.',
+  vm_aborted:
+    'VirtualBox reports that the machine stopped abnormally. Its disks may need checking inside the guest.',
 };
 
 export function executionRecovery(code: string): string | null {
@@ -438,6 +452,8 @@ export const LAUNCH_INELIGIBLE_REASONS = [
   'vm_not_on_agent',
   'session_active',
   'operation_in_progress',
+  /** A VirtualBox VM whose machine VBoxManage does not list, or cannot read, now. */
+  'source_unavailable',
 ] as const;
 export type LaunchIneligibleReason = (typeof LAUNCH_INELIGIBLE_REASONS)[number];
 
@@ -474,6 +490,8 @@ export const VERIFY_INELIGIBLE_REASONS = [
   'vm_not_on_agent',
   'session_active',
   'operation_in_progress',
+  /** A VirtualBox master is an OVA, which there is no manifest to verify against. */
+  'not_supported',
 ] as const;
 export type VerifyIneligibleReason = (typeof VERIFY_INELIGIBLE_REASONS)[number];
 
@@ -519,5 +537,7 @@ export const executionOptionsResponseSchema = z.object({
     }),
   ),
   agents: z.array(executionAgentOptionSchema),
+  /** For a VirtualBox VM: the machine it runs, and what it was last seen doing. `null` for any other VM. */
+  virtualbox: virtualBoxSourceSchema.nullable().default(null),
 });
 export type ExecutionOptionsResponse = z.infer<typeof executionOptionsResponseSchema>;

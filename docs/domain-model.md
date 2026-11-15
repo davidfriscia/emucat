@@ -8,9 +8,13 @@ The rules here are implemented in [`packages/contracts`](../packages/contracts) 
 
 A VM is identified by `(emulator_type, vm_name)`.
 
-- `emulator_type` is `86box` or `qemu`.
-- `vm_name` equals the local directory name. The directory is `BASE_PATH/VM_NAME`, with one base path
-  per emulator on each agent.
+- `emulator_type` is `86box`, `qemu` or `virtualbox`.
+- For `86box` and `qemu`, `vm_name` equals the local directory name. The directory is `BASE_PATH/VM_NAME`,
+  with one base path per emulator on each agent.
+- For `virtualbox`, `vm_name` is a catalog slug chosen at registration, and the machine is VirtualBox's,
+  named by its UUID. `virtualbox_sources` links the VM to exactly one `(agent, machine UUID)`, which can never
+  have a second master. Its master is an OVA export; the machine runs in place, locally only, and has no
+  snapshots, restore or remote modes yet. See [decision 0045](decisions/0045-virtualbox-masters-and-local-execution.md).
 - The same name under different emulators is two different VMs.
 - Identity never changes. Renaming a directory makes it a different VM.
 - `display_name` is the catalog title, and can be changed freely. Without one, the title is `vm_name`.

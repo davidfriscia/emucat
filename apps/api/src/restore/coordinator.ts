@@ -23,6 +23,7 @@ import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { removalIneligible } from '../cleanup/local-removals.js';
 import { lockUsableVersion, NOT_DELETED } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
+import { filesystemOnly } from '../virtualbox/policy.js';
 
 /** What the coordinator needs from the hub, which owns the sockets. */
 export interface RestoreLink {
@@ -170,7 +171,7 @@ function isDuplicateEntry(error: unknown): boolean {
 function requestFor(row: OperationRow): RestoreRequestPayload {
   return {
     operationId: row.id,
-    emulatorType: row.emulator_type,
+    emulatorType: filesystemOnly(row.emulator_type, 'Restoring'),
     vmName: row.vm_name,
     repositoryId: row.repository_id,
     versionId: row.version_id,

@@ -4,11 +4,13 @@
 //! every VM `VBoxManage list vms` shows the account running the agent is reported, and that is all the
 //! access control there is. See decision 0044.
 //!
-//! This is strictly read-only. Only `--version`, `list vms` and `showvminfo <uuid> --machinereadable`
-//! are ever run. The executable is started directly with an argument vector, never through a shell,
-//! and a VM is always named by the UUID VirtualBox gave it, never by its display name. Each command has
-//! a time limit and a limit on how much of its output is read, and machines are inspected one at a
-//! time, so a slow or wedged VirtualBox cannot pile up processes or stall the agent.
+//! Discovery is strictly read-only: only `--version`, `list vms` and `showvminfo <uuid> --machinereadable`
+//! are run for it. Registered machines (decision 0045) are also watched with `list runningvms`, exported
+//! with `export <uuid>`, and started and stopped with `startvm` and `controlvm`; those commands are
+//! built here too, so that nothing else ever composes a VBoxManage command line. The executable is started
+//! directly with an argument vector, never through a shell, and a VM is always named by the UUID
+//! VirtualBox gave it, never by its display name. Each command has a time limit and a limit on how much of
+//! its output is read, so a slow or wedged VirtualBox cannot pile up processes or stall the agent.
 //!
 //! What is reported is deliberately small: identity, guest OS type, state and a few numbers. No path
 //! VirtualBox prints, such as the settings file, disk images or shared folders, ever leaves this module.
@@ -41,6 +43,47 @@ const INACCESSIBLE_NAME: &str = "<inaccessible>";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualBoxConfig {
     pub vboxmanage: PathBuf,
+}
+
+/// How registered machines are exported and watched (decision 0045). Mirrors the intervals in
+/// `@emucat/contracts`; tests shorten them.
+#[derive(Debug, Clone)]
+pub struct VirtualBoxSettings {
+    pub config: VirtualBoxConfig,
+    /// For every command but an export.
+    pub command_timeout: Duration,
+    /// An export copies every disk of the machine, so it may take hours. It is cancelled, never cut short.
+    pub export_timeout: Duration,
+    pub max_output_bytes: usize,
+    /// How often `list runningvms` runs, and how often an active machine is inspected.
+    pub active_poll: Duration,
+    /// How often a machine that is not active is inspected.
+    pub inactive_poll: Duration,
+    /// After a command, how often the machine it named is inspected, and for how long.
+    pub reconcile_poll: Duration,
+    pub reconcile_window: Duration,
+}
+
+impl VirtualBoxSettings {
+    pub fn new(config: VirtualBoxConfig) -> Self {
+        Self {
+            config,
+            command_timeout: Duration::from_secs(30),
+            export_timeout: Duration::from_secs(12 * 60 * 60),
+            max_output_bytes: 1024 * 1024,
+            active_poll: Duration::from_secs(15),
+            inactive_poll: Duration::from_secs(60),
+            reconcile_poll: Duration::from_secs(2),
+            reconcile_window: Duration::from_secs(120),
+        }
+    }
+
+    pub fn runner(&self) -> ProcessRunner {
+        ProcessRunner {
+            program: self.config.vboxmanage.clone(),
+            max_output_bytes: self.max_output_bytes,
+        }
+    }
 }
 
 /// Bounds on the work of one discovery, whatever VirtualBox does.
@@ -202,11 +245,23 @@ pub enum RunError {
     NotFound,
     Spawn(io::Error),
     Timeout,
+    /// Asked to stop. The process was killed.
+    Cancelled,
 }
 
 /// Runs `VBoxManage` with the given arguments. Tests replace it with fixtures.
 pub trait CommandRunner {
     fn run(&self, args: &[&OsStr], timeout: Duration) -> Result<CommandOutput, RunError>;
+
+    /// As [`Self::run`], and ends the process as soon as `cancelled` says so.
+    fn run_cancellable(
+        &self,
+        args: &[&OsStr],
+        timeout: Duration,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<CommandOutput, RunError> {
+        self.run(args, timeout)
+    }
 }
 
 /// Starts a program directly, with an argument vector, a time limit and bounded output.
@@ -286,6 +341,15 @@ fn decode_ansi(bytes: Vec<u8>) -> String {
 
 impl CommandRunner for ProcessRunner {
     fn run(&self, args: &[&OsStr], timeout: Duration) -> Result<CommandOutput, RunError> {
+        self.run_cancellable(args, timeout, &|| false)
+    }
+
+    fn run_cancellable(
+        &self,
+        args: &[&OsStr],
+        timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<CommandOutput, RunError> {
         if !self.program.is_file() {
             return Err(RunError::NotFound);
         }
@@ -323,6 +387,11 @@ impl CommandRunner for ProcessRunner {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(RunError::Timeout);
+                }
+                Ok(None) if cancelled() => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(RunError::Cancelled);
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(error) => {
@@ -591,7 +660,7 @@ fn is_not_found(stderr: &str) -> bool {
 fn status_for(error: &RunError) -> VirtualBoxStatus {
     match error {
         RunError::NotFound => VirtualBoxStatus::ExecutableMissing,
-        RunError::Spawn(_) => VirtualBoxStatus::CommandFailed,
+        RunError::Spawn(_) | RunError::Cancelled => VirtualBoxStatus::CommandFailed,
         RunError::Timeout => VirtualBoxStatus::Timeout,
     }
 }
@@ -665,7 +734,7 @@ pub fn discover_with(runner: &dyn CommandRunner, limits: &VirtualBoxLimits) -> V
             Ok(output) if is_not_found(&output.stderr) => {
                 undescribed(listed, VirtualBoxVmError::Vanished)
             }
-            Ok(_) | Err(RunError::NotFound | RunError::Spawn(_)) => {
+            Ok(_) | Err(RunError::NotFound | RunError::Spawn(_) | RunError::Cancelled) => {
                 undescribed(listed, VirtualBoxVmError::InspectionFailed)
             }
             Err(RunError::Timeout) => undescribed(listed, VirtualBoxVmError::Timeout),
@@ -694,9 +763,148 @@ pub fn executable_problem(path: &Path) -> Option<String> {
     }
 }
 
+// Registered machines (decision 0045).
+
+/// What `showvminfo <uuid>` said about one machine.
+#[derive(Debug)]
+pub enum Inspection {
+    Found(VirtualBoxVm),
+    /// VirtualBox does not know this UUID, or no longer does.
+    Missing,
+    /// Nothing can be concluded: the command failed, timed out, or could not be started.
+    Failed(RunError),
+}
+
+fn args<'a>(values: &'a [&'a str]) -> Vec<&'a OsStr> {
+    values.iter().map(OsStr::new).collect()
+}
+
+/// Inspects one machine, by UUID.
+pub fn inspect(runner: &dyn CommandRunner, uuid: Uuid, timeout: Duration) -> Inspection {
+    let text = uuid.hyphenated().to_string();
+    let listed = ListedVm {
+        uuid,
+        name: String::new(),
+    };
+    match runner.run(&args(&["showvminfo", &text, "--machinereadable"]), timeout) {
+        Ok(output) if output.success => Inspection::Found(describe(&listed, &output.stdout)),
+        Ok(output) if is_not_found(&output.stderr) => Inspection::Missing,
+        Ok(_) => Inspection::Failed(RunError::Spawn(io::Error::other("showvminfo failed"))),
+        Err(error) => Inspection::Failed(error),
+    }
+}
+
+/// The machines `list runningvms` shows: those with a VM process. Absence says nothing about what a machine
+/// is doing, since a machine that is starting, saving or aborting may be missing from it; only
+/// `showvminfo` says that.
+pub fn running_vms(
+    runner: &dyn CommandRunner,
+    timeout: Duration,
+) -> Result<HashSet<Uuid>, RunError> {
+    let output = runner.run(&args(&["list", "runningvms"]), timeout)?;
+    if !output.success {
+        return Err(RunError::Spawn(io::Error::other("list runningvms failed")));
+    }
+    Ok(parse_vm_list(&output.stdout)
+        .vms
+        .into_iter()
+        .map(|vm| vm.uuid)
+        .collect())
+}
+
+/// `export <uuid> --output=<file> --manifest`: an OVA of the machine's current state, with a manifest of
+/// its own files inside. VirtualBox only reads the machine for this.
+pub fn export(
+    runner: &dyn CommandRunner,
+    uuid: Uuid,
+    output: &Path,
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CommandOutput, RunError> {
+    let uuid = uuid.hyphenated().to_string();
+    let mut destination = std::ffi::OsString::from("--output=");
+    destination.push(output.as_os_str());
+    let arguments: Vec<&OsStr> = vec![
+        OsStr::new("export"),
+        OsStr::new(&uuid),
+        destination.as_os_str(),
+        OsStr::new("--manifest"),
+    ];
+    runner.run_cancellable(&arguments, timeout, cancelled)
+}
+
+/// What a control command runs: `startvm <uuid> --type gui`, `controlvm <uuid> acpipowerbutton` or
+/// `controlvm <uuid> poweroff`.
+pub fn control_arguments(
+    uuid: Uuid,
+    action: crate::protocol::VirtualBoxControlAction,
+) -> Vec<String> {
+    use crate::protocol::VirtualBoxControlAction as Action;
+    let uuid = uuid.hyphenated().to_string();
+    match action {
+        Action::Start => vec!["startvm".into(), uuid, "--type".into(), "gui".into()],
+        Action::AcpiShutdown => vec!["controlvm".into(), uuid, "acpipowerbutton".into()],
+        Action::Poweroff => vec!["controlvm".into(), uuid, "poweroff".into()],
+    }
+}
+
+/// The error VirtualBox named, such as `VBOX_E_INVALID_VM_STATE`, for a message. Only this token is kept:
+/// the rest of what VBoxManage prints can hold paths, which never leave this module.
+pub fn error_token(stderr: &str) -> Option<String> {
+    stderr
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .find(|word| {
+            (word.starts_with("VBOX_E_") || word.starts_with("E_") || word.starts_with("NS_ERROR_"))
+                && word.len() <= 48
+        })
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_token_is_found_and_nothing_else_is_kept() {
+        let stderr = "VBoxManage: error: Could not open C:\\Users\\x\\vm.vbox\nVBoxManage: error: \
+                      Details: code VBOX_E_INVALID_OBJECT_STATE (0x80bb0007), component SessionMachine";
+        assert_eq!(
+            error_token(stderr).as_deref(),
+            Some("VBOX_E_INVALID_OBJECT_STATE")
+        );
+        assert_eq!(error_token("nothing useful"), None);
+    }
+
+    #[test]
+    fn control_commands_name_the_machine_by_uuid() {
+        use crate::protocol::VirtualBoxControlAction as Action;
+        let uuid = Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").unwrap();
+        assert_eq!(
+            control_arguments(uuid, Action::Start),
+            [
+                "startvm",
+                "01234567-89ab-cdef-0123-456789abcdef",
+                "--type",
+                "gui"
+            ]
+        );
+        assert_eq!(
+            control_arguments(uuid, Action::AcpiShutdown),
+            [
+                "controlvm",
+                "01234567-89ab-cdef-0123-456789abcdef",
+                "acpipowerbutton"
+            ]
+        );
+        assert_eq!(
+            control_arguments(uuid, Action::Poweroff),
+            [
+                "controlvm",
+                "01234567-89ab-cdef-0123-456789abcdef",
+                "poweroff"
+            ]
+        );
+    }
 
     #[test]
     fn an_escaped_value_is_read_back() {

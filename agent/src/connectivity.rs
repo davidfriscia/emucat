@@ -490,7 +490,8 @@ async fn run_session<F: Future<Output = ()>>(
                     Decoded::InvalidPayload { message_type, operation_id } => {
                         tracing::warn!(%message_type, "Refused an invalid message from the server");
                         if let (true, Some(operation_id), Some(operations)) = (
-                            message_type == "server.registration_request",
+                            message_type == "server.registration_request"
+                                || message_type == "server.virtualbox_registration_request",
                             operation_id,
                             &settings.operations,
                         ) {
@@ -618,7 +619,10 @@ async fn run_session<F: Future<Output = ()>>(
                         | Message::ServerWorkspaceDiscard(_)
                         | Message::ServerLocalCopyRemove(_)
                         | Message::ServerLocalCopyRemoveAck(_)
-                        | Message::ServerArchiveDelete(_)) => {
+                        | Message::ServerArchiveDelete(_)
+                        | Message::ServerVirtualBoxRegistrationRequest(_)
+                        | Message::ServerVirtualBoxControl(_)
+                        | Message::ServerVirtualBoxWatch(_)) => {
                             match &settings.operations {
                                 Some(operations) if welcomed => operations.handle(message),
                                 _ => tracing::warn!("Ignored a repository command"),

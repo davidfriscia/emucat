@@ -96,6 +96,8 @@ function VersionItem({
   const headingId = `version-${node.id}`;
   const canRestore = node.available && (restoreOptions?.agents.some((a) => a.online) ?? false);
   const localHolders = node.holders.filter((holder) => holder.kind === 'local');
+  // An OVA master is kept, and nothing else: restoring, remote modes and snapshots come later (VB3).
+  const virtualbox = vm.emulatorType === 'virtualbox';
   return (
     <li
       role="treeitem"
@@ -191,7 +193,13 @@ function VersionItem({
               ))}
             </ul>
           ) : null}
-          <div className="d-flex flex-wrap gap-2 mt-1">
+          {virtualbox ? (
+            <p className="small text-body-secondary mb-0">
+              An OVA exported by VirtualBox. The machine runs in place in VirtualBox; restoring it,
+              remote modes and snapshots are not available for VirtualBox machines yet.
+            </p>
+          ) : null}
+          <div className={`d-flex flex-wrap gap-2 mt-1${virtualbox ? ' d-none' : ''}`}>
             <button
               type="button"
               className="btn btn-sm btn-outline-primary"

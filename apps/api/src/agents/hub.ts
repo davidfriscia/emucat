@@ -34,6 +34,9 @@ import type {
   WorkspaceDiscardResultPayload,
   LocalCopyRemoveResultPayload,
   ArchiveDeleteResultPayload,
+  VirtualBoxControlResultPayload,
+  VirtualBoxRegistrationResultPayload,
+  VirtualBoxStatesPayload,
 } from '@emucat/contracts';
 import { DiscoveryCoordinator, type DiscoveryRecord } from './discovery.js';
 
@@ -62,8 +65,17 @@ export interface AgentOperationsHandler {
   failed(agentId: string, payload: RegistrationErrorPayload): Promise<void>;
   cleanedUp(agentId: string, payload: RegistrationCleanupPayload): Promise<void>;
   healthResult(agentId: string, payload: RepositoryHealthResultPayload): Promise<void>;
+  virtualBoxResult(agentId: string, payload: VirtualBoxRegistrationResultPayload): Promise<void>;
   agentRevoked(agentId: string): Promise<void>;
   close(): void;
+}
+
+/** What is done with VirtualBox observations and control answers (decision 0045). For the active connection. */
+export interface AgentVirtualBoxHandler {
+  /** After `agent.registration_sync` said the agent can drive VirtualBox. */
+  watch(agentId: string): Promise<void>;
+  states(agentId: string, payload: VirtualBoxStatesPayload): Promise<void>;
+  controlResult(agentId: string, payload: VirtualBoxControlResultPayload): Promise<void>;
 }
 
 /** What is done with restore messages. Every call is for the agent's active connection. */
@@ -157,6 +169,8 @@ interface Connection {
   snapshotCapable: boolean;
   /** Whether `agent.restore_sync` listed working copies, which only agents that keep them do. */
   workspacesSupported: boolean;
+  /** Whether `agent.registration_sync` said this agent can export and run VirtualBox machines. */
+  virtualboxCapable: boolean;
 }
 
 /** What `ws` calls a frame over its `maxPayload`. */
@@ -196,6 +210,7 @@ export class AgentHub {
   }
   private workspaces: AgentWorkspacesHandler | null = null;
   private cleanup: AgentCleanupHandler | null = null;
+  private virtualbox: AgentVirtualBoxHandler | null = null;
   /** What each agent last said about its screenshots. Stale once it is offline, and says when it spoke. */
   private readonly mediaStatuses = new Map<
     string,
@@ -232,6 +247,14 @@ export class AgentHub {
 
   setCleanup(cleanup: AgentCleanupHandler): void {
     this.cleanup = cleanup;
+  }
+
+  setVirtualBox(virtualbox: AgentVirtualBoxHandler): void {
+    this.virtualbox = virtualbox;
+  }
+
+  isVirtualBoxCapable(agentId: string): boolean {
+    return this.active.get(agentId)?.virtualboxCapable ?? false;
   }
 
   isSnapshotCapable(agentId: string): boolean {
@@ -302,6 +325,7 @@ export class AgentHub {
       executionCapabilities: null,
       snapshotCapable: false,
       workspacesSupported: false,
+      virtualboxCapable: false,
     };
     this.connections.add(connection);
     log.info({ agentId, connectionId: connection.id }, 'Agent connected');
@@ -524,7 +548,25 @@ export class AgentHub {
       case 'agent.registration_error':
       case 'agent.registration_cleanup':
       case 'agent.repository_health_result':
+      case 'agent.virtualbox_registration_result':
         await this.handleOperationMessage(connection, message);
+        break;
+      case 'agent.virtualbox_states':
+      case 'agent.virtualbox_control_result':
+        if (this.active.get(agentId) !== connection || !this.virtualbox) {
+          connection.log.warn({ agentId }, 'Ignored a message from an inactive connection');
+          break;
+        }
+        try {
+          if (message.type === 'agent.virtualbox_states') {
+            await this.virtualbox.states(agentId, message.payload);
+          } else {
+            await this.virtualbox.controlResult(agentId, message.payload);
+          }
+        } catch (error) {
+          // No answer: the agent reports again on its next poll.
+          connection.log.error({ agentId, err: error }, 'Cannot handle an agent report');
+        }
         break;
       case 'agent.restore_sync':
       case 'agent.restore_progress':
@@ -595,7 +637,8 @@ export class AgentHub {
           | 'agent.registration_result'
           | 'agent.registration_error'
           | 'agent.registration_cleanup'
-          | 'agent.repository_health_result';
+          | 'agent.repository_health_result'
+          | 'agent.virtualbox_registration_result';
       }
     >,
   ): Promise<void> {
@@ -610,7 +653,12 @@ export class AgentHub {
         case 'agent.registration_sync':
           connection.registrationCapable = true;
           connection.snapshotCapable = message.payload.snapshots === true;
+          connection.virtualboxCapable = message.payload.virtualbox === true;
           await operations.synced(agentId, message.payload);
+          if (connection.virtualboxCapable) await this.virtualbox?.watch(agentId);
+          break;
+        case 'agent.virtualbox_registration_result':
+          await operations.virtualBoxResult(agentId, message.payload);
           break;
         case 'agent.registration_progress':
           await operations.progress(agentId, message.payload);

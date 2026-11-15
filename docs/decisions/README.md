@@ -49,3 +49,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0042](0042-qemu-monitor-capture.md)                    | Typed QMP stdio commands and durable on-demand screenshots                    |
 | [0043](0043-registration-history-and-discovery-page.md) | The agent page is for discovery; registrations are a paginated history        |
 | [0044](0044-virtualbox-discovery.md)                    | VirtualBox machines are discovered through VBoxManage, by UUID                |
+| [0045](0045-virtualbox-masters-and-local-execution.md)  | A VirtualBox master is an OVA export, and the original machine runs in place  |

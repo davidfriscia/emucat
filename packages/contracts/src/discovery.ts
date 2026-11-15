@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { emulatorTypeSchema, VM_ROOT_MARKERS, type EmulatorType } from './emulator.js';
+import {
+  filesystemEmulatorTypeSchema,
+  VM_ROOT_MARKERS,
+  type FilesystemEmulatorType,
+} from './emulator.js';
 import { platformSchema, type Platform } from './platform.js';
 import { timestampSchema } from './version.js';
 import { VM_NAME_ERROR_CODES, vmNameKey, vmNameSchema } from './vm-name.js';
@@ -24,7 +28,7 @@ export const QEMU_HOST_LAUNCH_SCRIPTS: Readonly<Record<Platform, readonly string
  * The agent implements the same rule, and both are tested against `fixtures/discovery-rules.json`.
  */
 export function hostCompatibility(
-  emulatorType: EmulatorType,
+  emulatorType: FilesystemEmulatorType,
   markers: readonly string[],
   host: Platform,
 ): boolean | null {
@@ -58,7 +62,7 @@ export type DiscoverySkipReason = z.infer<typeof discoverySkipReasonSchema>;
 
 export const discoveredVmSchema = z
   .object({
-    emulatorType: emulatorTypeSchema,
+    emulatorType: filesystemEmulatorTypeSchema,
     vmName: vmNameSchema,
     /** The markers present, as regular files, in the VM's root. */
     markers: z.array(z.string().max(32)).min(1).max(6),
@@ -76,7 +80,7 @@ export const discoveredVmSchema = z
 export type DiscoveredVm = z.infer<typeof discoveredVmSchema>;
 
 export const discoverySkippedSchema = z.object({
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   /** The directory's name, for display only. Reduced to printable ASCII and bounded in length. */
   name: z
     .string()
@@ -88,7 +92,7 @@ export const discoverySkippedSchema = z.object({
 export type DiscoverySkipped = z.infer<typeof discoverySkippedSchema>;
 
 export const discoveryEmulatorReportSchema = z.object({
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   status: discoveryEmulatorStatusSchema,
   /** Some entries were not examined or not reported, because a limit was reached. */
   truncated: z.boolean(),
@@ -269,7 +273,7 @@ export const discoveryFailureCodeSchema = z.enum(DISCOVERY_FAILURE_CODES);
 export type DiscoveryFailureCode = z.infer<typeof discoveryFailureCodeSchema>;
 
 export const discoveryListedVmSchema = z.object({
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: z.string(),
   markers: z.array(z.string()),
   hostCompatible: z.boolean().nullable(),
@@ -304,6 +308,13 @@ export const discoveryOperationSchema = z.object({
    * agent older than VirtualBox support does. These machines are observations: none is registered.
    */
   virtualbox: virtualBoxDiscoverySchema.nullable().default(null),
+  /**
+   * Which of these machines this agent has already registered, and as which catalog VM. Worked out when read,
+   * by UUID, never by name (decision 0045).
+   */
+  virtualboxRegistrations: z
+    .array(z.object({ machineUuid: virtualBoxUuidSchema, vmName: z.string() }))
+    .default([]),
 });
 export type DiscoveryOperation = z.infer<typeof discoveryOperationSchema>;
 

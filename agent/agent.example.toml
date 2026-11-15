@@ -41,7 +41,9 @@ base_path = 'C:\path\to\qemu-vms'
 executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
 
 # VirtualBox keeps its own list of machines, so it has no base path: discovery asks VBoxManage for
-# every VM registered under the Windows account the agent runs as, read-only. Optional. Without this
+# every VM registered under the Windows account the agent runs as, read-only. With this section the
+# agent can also export a powered-off machine an administrator registers into an OVA master, and
+# start, shut down or power off a registered machine in place, by UUID. Optional. Without this
 # section VBoxManage is never run. See docs/agent.md#virtualbox.
 # [platforms.virtualbox]
 # vboxmanage = 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe'

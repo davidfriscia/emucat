@@ -115,9 +115,20 @@ export function validateVersionLineage(
 }
 
 /**
+ * What a version's archive is. A VirtualBox version is the OVA VBoxManage exported, as it is; every other
+ * version is an EmuCat ZIP with its manifest (decisions 0014 and 0045). The type alone decides it.
+ */
+export type ArchiveFormat = 'zip' | 'ova';
+
+export function archiveFormatFor(emulatorType: VmIdentity['emulatorType']): ArchiveFormat {
+  return emulatorType === 'virtualbox' ? 'ova' : 'zip';
+}
+
+/**
  * Object key of a version archive in a remote repository. It is based on the version ID, so two
  * snapshots with the same human-readable name can never overwrite each other.
  */
 export function archiveObjectKey(identity: VmIdentity, versionId: VmVersionId): string {
-  return `archives/${identity.emulatorType}/${vmNameKey(identity.vmName)}/${versionId}.zip`;
+  const extension = archiveFormatFor(identity.emulatorType);
+  return `archives/${identity.emulatorType}/${vmNameKey(identity.vmName)}/${versionId}.${extension}`;
 }

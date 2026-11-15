@@ -535,3 +535,63 @@ fn a_snapshot_command_must_name_its_parent_and_nothing_else_can() {
         );
     }
 }
+
+#[test]
+fn virtualbox_messages_match_the_contracts_in_both_directions() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in ["virtualboxServerMessages", "virtualboxAgentMessages"] {
+        let examples = wire[key].as_array().unwrap();
+        assert!(!examples.is_empty());
+        for example in examples {
+            let envelope: Envelope = serde_json::from_value(example.clone())
+                .unwrap_or_else(|error| panic!("{example}: {error}"));
+            let round_trip = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(round_trip["type"], example["type"]);
+            assert_eq!(round_trip["payload"], example["payload"], "{example}");
+        }
+    }
+}
+
+#[test]
+fn the_registration_sync_of_an_agent_without_virtualbox_says_so() {
+    let sync: emucat_agent::protocol::RegistrationSync =
+        serde_json::from_value(serde_json::json!({ "operations": [], "snapshots": true })).unwrap();
+    assert!(!sync.virtualbox);
+}
+
+#[test]
+fn a_virtualbox_command_with_a_path_a_name_or_an_unknown_action_is_refused() {
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    let examples = wire["virtualboxRefusedByTheAgent"].as_array().unwrap();
+    assert!(!examples.is_empty());
+    for example in examples {
+        assert!(
+            serde_json::from_value::<Envelope>(example.clone()).is_err(),
+            "{example}"
+        );
+        match decode(&example.to_string()) {
+            Decoded::InvalidPayload {
+                message_type,
+                operation_id,
+            } => {
+                assert_eq!(Some(message_type.as_str()), example["type"].as_str());
+                assert!(operation_id.is_some(), "{example}");
+            }
+            other => panic!("{example}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_virtualbox_archive_key_matches_the_contracts() {
+    let version = Uuid::parse_str("018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601").unwrap();
+    let wire: serde_json::Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    let request = &wire["virtualboxServerMessages"][0]["payload"];
+    assert_eq!(
+        emucat_agent::virtualbox_registration::archive_key(
+            &VmName::new("Xenix-386").unwrap(),
+            version
+        ),
+        request["archiveKey"].as_str().unwrap()
+    );
+}

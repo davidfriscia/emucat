@@ -25,12 +25,15 @@ import {
   type VmVerification,
   type VmVerifyPayload,
   type VmVerifyResultPayload,
+  type VirtualBoxSource,
 } from '@emucat/contracts';
 import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { lockUsableVersion, NOT_DELETED } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
+import type { VirtualBoxCoordinator } from '../virtualbox/coordinator.js';
+import { filesystemOnly } from '../virtualbox/policy.js';
 
 /** What the coordinator needs from the hub, which owns the sockets. */
 export interface ExecutionLink {
@@ -41,8 +44,14 @@ export interface ExecutionLink {
   workspacesSupported(agentId: string): boolean;
   /** What `agent.restore_sync` said on this connection: a remote session begins with a restore. */
   restoreCapabilities(agentId: string): RestoreSyncPayload['capabilities'] | null;
+  /** Whether `agent.registration_sync` said the agent can drive VirtualBox (decision 0045). */
+  isVirtualBoxCapable(agentId: string): boolean;
   send(agentId: string, message: Pick<ServerMessage, 'type' | 'payload'>): boolean;
 }
+
+/** Why VirtualBox has only Local execution: its machine runs in place, and is never restored anywhere. */
+export const VIRTUALBOX_LOCAL_ONLY =
+  'VirtualBox machines run only locally, in place, on the agent that registered them.';
 
 export interface ExecutionOptions {
   /** How long a launch or verification may go unanswered before it is given up. */
@@ -210,6 +219,8 @@ const LAUNCH_TEXT: Record<LaunchIneligibleReason, string> = {
   session_active: 'This VM is already running on this agent.',
   operation_in_progress:
     'A registration, restore or verification of this VM is in progress on this agent.',
+  source_unavailable:
+    'VirtualBox no longer lists this machine, or cannot read it, on this agent. Check VirtualBox there.',
 };
 
 const VERIFY_TEXT: Record<VerifyIneligibleReason, string> = {
@@ -220,6 +231,8 @@ const VERIFY_TEXT: Record<VerifyIneligibleReason, string> = {
   vm_not_on_agent: 'This agent holds no copy of this VM.',
   session_active: 'The VM is running on this agent. Stop it, then verify.',
   operation_in_progress: 'This agent is busy with another operation.',
+  not_supported:
+    'VirtualBox machines cannot be verified: an OVA export is not comparable file by file.',
 };
 
 const AGENT_STATES: readonly AgentExecutionState[] = [
@@ -279,8 +292,13 @@ export class ExecutionCoordinator {
     private readonly link: ExecutionLink,
     private readonly log: FastifyBaseLogger,
     options: Partial<ExecutionOptions> = {},
+    private readonly virtualbox: VirtualBoxCoordinator | null = null,
   ) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
+  }
+
+  private async virtualBoxSource(vm: VmIdentity): Promise<VirtualBoxSource | null> {
+    return vm.emulatorType === 'virtualbox' && this.virtualbox ? this.virtualbox.source(vm) : null;
   }
 
   /**
@@ -302,6 +320,9 @@ export class ExecutionCoordinator {
     facts: AgentFacts,
     remote: RemoteFacts,
   ): { reason: RemoteIneligibleReason; problem: string | null } | null {
+    if (emulatorType === 'virtualbox') {
+      return { reason: 'mode_not_supported', problem: VIRTUALBOX_LOCAL_ONLY };
+    }
     if (facts.revoked) return { reason: 'agent_revoked', problem: null };
     if (!this.link.isOnline(agentId)) return { reason: 'agent_offline', problem: null };
     const capabilities = this.link.executionCapabilities(agentId);
@@ -353,7 +374,7 @@ export class ExecutionCoordinator {
         refused.reason === 'mode_not_supported' ? 'execution_mode_unavailable' : refused.reason;
       const text =
         refused.reason === 'mode_not_supported'
-          ? EXECUTION_MODE_UNAVAILABLE_REASONS[mode]
+          ? (refused.problem ?? EXECUTION_MODE_UNAVAILABLE_REASONS[mode])
           : (refused.problem ?? REMOTE_TEXT[refused.reason]);
       throw new ApiError(409, code, `${text} Nothing was prepared.`);
     }
@@ -402,9 +423,32 @@ export class ExecutionCoordinator {
     agentId: string,
     emulatorType: VmIdentity['emulatorType'],
     facts: AgentFacts,
+    source: VirtualBoxSource | null = null,
   ): { reason: LaunchIneligibleReason; problem: string | null } | null {
     if (facts.revoked) return { reason: 'agent_revoked', problem: null };
     if (!this.link.isOnline(agentId)) return { reason: 'agent_offline', problem: null };
+    if (emulatorType === 'virtualbox') {
+      // The machine runs where it is: on the agent that registered it, and nowhere else.
+      if (!this.link.isVirtualBoxCapable(agentId)) {
+        return {
+          reason: 'emulator_not_launchable',
+          problem:
+            'This agent cannot run VirtualBox machines. Update it, or check its platforms.virtualbox setting.',
+        };
+      }
+      if (!source || source.agentId !== agentId) {
+        return {
+          reason: 'vm_not_on_agent',
+          problem: 'This VirtualBox machine is registered on another agent, and runs only there.',
+        };
+      }
+      if (source.present === false || source.accessible === false) {
+        return { reason: 'source_unavailable', problem: null };
+      }
+      if (facts.activeSession) return { reason: 'session_active', problem: null };
+      if (facts.busyWithVm) return { reason: 'operation_in_progress', problem: null };
+      return null;
+    }
     const capabilities = this.link.executionCapabilities(agentId);
     if (!capabilities) return { reason: 'agent_cannot_launch', problem: null };
     const emulator = capabilities.emulators.find((item) => item.emulatorType === emulatorType);
@@ -419,9 +463,11 @@ export class ExecutionCoordinator {
 
   private verifyIneligible(
     agentId: string,
+    emulatorType: VmIdentity['emulatorType'],
     hasMaster: boolean,
     facts: AgentFacts,
   ): VerifyIneligibleReason | null {
+    if (emulatorType === 'virtualbox') return 'not_supported';
     if (facts.revoked) return 'agent_revoked';
     if (!this.link.isOnline(agentId)) return 'agent_offline';
     if (!this.link.executionCapabilities(agentId)) return 'agent_cannot_verify';
@@ -487,6 +533,7 @@ export class ExecutionCoordinator {
       [vm.emulatorType, vm.vmName],
     );
     const hasMaster = masters.length > 0;
+    const source = await this.virtualBoxSource(vm);
     const [agents] = await this.pool.execute<RowDataPacket[]>(
       `SELECT a.id, a.name, s.local_source_version_id, s.execution_state, s.content_status,
               s.last_verified_at
@@ -500,8 +547,8 @@ export class ExecutionCoordinator {
     for (const agent of agents) {
       const agentId = agent.id as string;
       const facts: AgentFacts = { revoked: false, ...(await this.facts(this.pool, agentId, vm)) };
-      const launch = this.launchIneligible(agentId, vm.emulatorType, facts);
-      const verify = this.verifyIneligible(agentId, hasMaster, facts);
+      const launch = this.launchIneligible(agentId, vm.emulatorType, facts, source);
+      const verify = this.verifyIneligible(agentId, vm.emulatorType, hasMaster, facts);
       const state = (agent.execution_state as string | null) ?? null;
       const [active] = await this.pool.execute<SessionRow[]>(
         `${SESSION_QUERY} WHERE s.agent_id = ? AND s.emulator_type = ? AND s.vm_name = ?
@@ -557,16 +604,22 @@ export class ExecutionCoordinator {
         lastVerification: verifications[0] ? toVerification(verifications[0]) : null,
       });
     }
+    const virtualbox = vm.emulatorType === 'virtualbox';
     return {
       modes: EXECUTION_MODES.map((mode) => ({
         mode,
-        available: IMPLEMENTED_EXECUTION_MODES.includes(mode),
+        available: virtualbox ? mode === 'local' : IMPLEMENTED_EXECUTION_MODES.includes(mode),
         reason:
-          IMPLEMENTED_EXECUTION_MODES.includes(mode) || mode === 'local'
+          mode === 'local'
             ? null
-            : EXECUTION_MODE_UNAVAILABLE_REASONS[mode],
+            : virtualbox
+              ? VIRTUALBOX_LOCAL_ONLY
+              : IMPLEMENTED_EXECUTION_MODES.includes(mode)
+                ? null
+                : EXECUTION_MODE_UNAVAILABLE_REASONS[mode],
       })),
       agents: options,
+      virtualbox: source,
     };
   }
 
@@ -591,6 +644,14 @@ export class ExecutionCoordinator {
     }
 
     const workspaceId = input.workspaceId ?? null;
+    if (emulatorType === 'virtualbox' && (mode !== 'local' || workspaceId)) {
+      throw new ApiError(
+        409,
+        'execution_mode_unavailable',
+        `${VIRTUALBOX_LOCAL_ONLY} Nothing was launched.`,
+      );
+    }
+    const source = await this.virtualBoxSource({ emulatorType, vmName });
     if (mode !== 'local' && !this.canRunRemote(agentId, mode)) {
       throw new ApiError(
         409,
@@ -648,11 +709,16 @@ export class ExecutionCoordinator {
           );
         }
       }
-      const refused = this.launchIneligible(agentId, emulatorType, {
-        revoked: agent.revoked_at !== null,
-        ...facts,
-        localPresent: workspace ? true : facts.localPresent,
-      });
+      const refused = this.launchIneligible(
+        agentId,
+        emulatorType,
+        {
+          revoked: agent.revoked_at !== null,
+          ...facts,
+          localPresent: workspace ? true : facts.localPresent,
+        },
+        source,
+      );
       if (refused) {
         throw new ApiError(409, refused.reason, refused.problem ?? LAUNCH_TEXT[refused.reason]);
       }
@@ -721,11 +787,16 @@ export class ExecutionCoordinator {
       connection.release();
     }
 
+    if (source) {
+      // startvm. The session moves on only when the machine is seen running.
+      this.virtualbox?.control(agentId, sessionId, source.machineUuid, 'start');
+      return this.requireSession(sessionId);
+    }
     this.link.send(agentId, {
       type: 'server.vm_launch',
       payload: {
         sessionId,
-        emulatorType,
+        emulatorType: filesystemOnly(emulatorType, 'Launching'),
         vmName: canonicalName,
         mode,
         versionId,
@@ -798,11 +869,25 @@ export class ExecutionCoordinator {
        WHERE id = ? AND active_marker = 1`,
       [sessionId],
     );
+    if (session.emulatorType === 'virtualbox') {
+      // An ACPI power button press, which the guest may ignore; or a power-off, confirmed above.
+      const source = await this.virtualBoxSource(session);
+      if (!source || source.agentId !== session.agentId) {
+        throw new ApiError(409, 'source_unavailable', LAUNCH_TEXT.source_unavailable);
+      }
+      this.virtualbox?.control(
+        session.agentId,
+        sessionId,
+        source.machineUuid,
+        request.force ? 'poweroff' : 'acpi_shutdown',
+      );
+      return this.requireSession(sessionId);
+    }
     this.link.send(session.agentId, {
       type: 'server.vm_stop',
       payload: {
         sessionId,
-        emulatorType: session.emulatorType,
+        emulatorType: filesystemOnly(session.emulatorType),
         vmName: session.vmName,
         force: request.force,
       },
@@ -835,7 +920,9 @@ export class ExecutionCoordinator {
        WHERE id = ? AND execution_state IN ('unknown', 'requested')`,
       [sessionId],
     );
-    this.link.send(session.agentId, { type: 'server.vm_execution_ack', payload: { sessionId } });
+    if (session.emulatorType !== 'virtualbox') {
+      this.link.send(session.agentId, { type: 'server.vm_execution_ack', payload: { sessionId } });
+    }
     // Typing the name here is the confirmation a held remote session would otherwise ask for.
     this.notifyWorkspace(session.workspaceId, true);
     return this.requireSession(sessionId);
@@ -917,7 +1004,7 @@ export class ExecutionCoordinator {
       if (version) await lockUsableVersion(connection, version.id as string);
       const canonicalName = (version?.vm_name as string | undefined) ?? vmName;
       const facts = await this.facts(connection, agentId, { emulatorType, vmName: canonicalName });
-      const reason = this.verifyIneligible(agentId, version !== undefined, {
+      const reason = this.verifyIneligible(agentId, emulatorType, version !== undefined, {
         revoked: agent.revoked_at !== null,
         ...facts,
       });
@@ -925,7 +1012,7 @@ export class ExecutionCoordinator {
       const master = version as RowDataPacket;
       payload = {
         operationId: verificationId,
-        emulatorType,
+        emulatorType: filesystemOnly(emulatorType, 'Verifying'),
         vmName: canonicalName,
         versionId: master.id as string,
         repositoryId: master.repository_id as string,
@@ -991,7 +1078,8 @@ export class ExecutionCoordinator {
     const [active] = await this.pool.execute<RowDataPacket[]>(
       `SELECT id, emulator_type, vm_name, source_version_id, workspace_id, mode, execution_state,
               created_at
-       FROM vm_sessions WHERE agent_id = ? AND active_marker = 1`,
+       FROM vm_sessions
+       WHERE agent_id = ? AND active_marker = 1 AND emulator_type <> 'virtualbox'`,
       [agentId],
     );
     const stale = Date.now() - this.options.answerTimeoutMs;
@@ -1004,7 +1092,7 @@ export class ExecutionCoordinator {
           type: 'server.vm_launch',
           payload: {
             sessionId,
-            emulatorType: row.emulator_type as VmIdentity['emulatorType'],
+            emulatorType: filesystemOnly(row.emulator_type as string),
             vmName: row.vm_name as string,
             mode: row.mode as LaunchRequest['mode'],
             versionId: (row.source_version_id as string | null) ?? null,
@@ -1026,7 +1114,7 @@ export class ExecutionCoordinator {
        FROM vm_verifications AS v
        JOIN vm_versions AS version ON version.id = v.version_id
        LEFT JOIN registration_operations AS reg ON reg.version_id = v.version_id
-       WHERE v.agent_id = ? AND v.active_marker = 1`,
+       WHERE v.agent_id = ? AND v.active_marker = 1 AND v.emulator_type <> 'virtualbox'`,
       [agentId],
     );
     for (const row of pending) {
@@ -1037,7 +1125,7 @@ export class ExecutionCoordinator {
           type: 'server.vm_verify',
           payload: {
             operationId,
-            emulatorType: row.emulator_type as VmIdentity['emulatorType'],
+            emulatorType: filesystemOnly(row.emulator_type as string),
             vmName: row.vm_name as string,
             versionId: row.version_id as string,
             repositoryId: row.repository_id as string,

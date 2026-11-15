@@ -11,6 +11,7 @@ export type VmVisibility = z.infer<typeof vmVisibilitySchema>;
 export const EMULATOR_LABELS: Readonly<Record<EmulatorType, string>> = {
   '86box': '86Box',
   qemu: 'QEMU',
+  virtualbox: 'VirtualBox',
 };
 
 export const VM_DISPLAY_NAME_MAX_LENGTH = 255;

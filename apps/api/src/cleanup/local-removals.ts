@@ -14,6 +14,7 @@ import {
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { ApiError } from '../errors.js';
+import { filesystemOnly } from '../virtualbox/policy.js';
 
 /** What the coordinator needs from the hub, which owns the sockets. */
 export interface CleanupLink {
@@ -83,7 +84,7 @@ function toRemoval(row: RemovalRow, online: boolean): LocalCopyRemoval {
 function commandFor(row: RemovalRow): LocalCopyRemovePayload {
   return {
     operationId: row.id,
-    emulatorType: row.emulator_type,
+    emulatorType: filesystemOnly(row.emulator_type, 'Removing a local copy'),
     vmName: row.vm_name,
     expectedVersionId: row.expected_version_id,
     discardLocalChanges: row.discard_local_changes !== 0,

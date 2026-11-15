@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { emulatorTypeSchema } from './emulator.js';
+import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
 
@@ -93,7 +93,7 @@ export function localRemovalRecovery(code: string): string | null {
  */
 export const localCopyRemovePayloadSchema = z.strictObject({
   operationId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   /** The version the page showed as installed. A copy recorded as another is never removed. */
   expectedVersionId: z.uuid().nullable(),
@@ -153,7 +153,7 @@ export const REMOVAL_INELIGIBLE_TEXT: Record<RemovalIneligibleReason, string> = 
  */
 export const createLocalCopyRemovalRequestSchema = z.strictObject({
   agentId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   expectedVersionId: z.uuid().nullable(),
   discardLocalChanges: z.boolean(),
@@ -236,7 +236,7 @@ export const archiveDeletePayloadSchema = z.strictObject({
   /** This attempt. A new one is issued for each attempt. */
   operationId: z.uuid(),
   versionId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
   repositoryId: z.uuid(),
   archiveKey: z.string().min(1).max(512),

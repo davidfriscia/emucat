@@ -3,7 +3,7 @@ import { createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import type { MediaUploadResponse, VmIdentity } from '@emucat/contracts';
+import type { FilesystemEmulatorType, MediaUploadResponse, VmIdentity } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { withTransaction } from '../db/pool.js';
@@ -81,15 +81,19 @@ export async function requireAgentVm(pool: Pool, agentId: string, vm: VmIdentity
 }
 
 /** The VMs an agent should watch. One whose local copy it has removed is not among them. */
-export async function agentMediaVms(pool: Pool, agentId: string): Promise<VmIdentity[]> {
+export async function agentMediaVms(
+  pool: Pool,
+  agentId: string,
+): Promise<{ emulatorType: FilesystemEmulatorType; vmName: string }[]> {
+  // A VirtualBox machine has no screenshots directory for the agent to watch (decision 0045).
   const [rows] = await pool.execute<RowDataPacket[]>(
     `SELECT emulator_type, vm_name FROM agent_vm_state
-     WHERE agent_id = ? AND execution_state <> 'absent'
+     WHERE agent_id = ? AND execution_state <> 'absent' AND emulator_type <> 'virtualbox'
      ORDER BY emulator_type, vm_name`,
     [agentId],
   );
   return rows.map((row) => ({
-    emulatorType: row.emulator_type as VmIdentity['emulatorType'],
+    emulatorType: row.emulator_type as FilesystemEmulatorType,
     vmName: row.vm_name as string,
   }));
 }

@@ -52,7 +52,11 @@ const DISCOVERY_IDLE_REFRESH_MS = 15_000;
 const ATTENTION_LIMIT = 5;
 const RECENT_LIMIT = 8;
 
-const EMULATOR_NAMES: Record<EmulatorType, string> = { '86box': '86Box', qemu: 'QEMU' };
+const EMULATOR_NAMES: Record<EmulatorType, string> = {
+  '86box': '86Box',
+  qemu: 'QEMU',
+  virtualbox: 'VirtualBox',
+};
 
 const EMULATOR_STATUS_TEXT: Record<DiscoveryEmulatorStatus, string> = {
   ok: 'Scanned',
@@ -587,6 +591,22 @@ function RegistrationWorkspace({ agent }: { agent: AgentSummary }) {
               virtualbox={operation.virtualbox}
               observedAt={operation.finishedAt}
               stale={stale}
+              registrations={operation.virtualboxRegistrations}
+              registering={
+                blocked === null && repository && operation.status === 'completed'
+                  ? {
+                      agentId: agent.id,
+                      agentName: agent.name,
+                      discoveryOperationId: operation.id,
+                      repository,
+                      onStarted: () => {
+                        setActive(true);
+                        attention.refresh();
+                        document.getElementById('registrations')?.scrollIntoView?.();
+                      },
+                    }
+                  : null
+              }
             />
           </>
         ) : null}

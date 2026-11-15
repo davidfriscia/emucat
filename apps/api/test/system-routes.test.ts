@@ -64,7 +64,8 @@ describe('GET /api/v1/info', () => {
     expect(Object.keys(response.json()).sort()).toEqual(
       ['apiVersion', 'emulatorTypes', 'name', 'protocolVersion', 'version'].sort(),
     );
-    expect(body.emulatorTypes).toEqual(['86box', 'qemu']);
+    // The catalog's types. VirtualBox VMs are catalog VMs too (decision 0045), though not directories.
+    expect(body.emulatorTypes).toEqual(['86box', 'qemu', 'virtualbox']);
     expect(response.body).not.toMatch(/password|secret|[A-Za-z]:\\|\/home\/|\/var\//i);
   });
 });

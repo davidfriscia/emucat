@@ -1,4 +1,4 @@
-import type { EmulatorType } from './emulator.js';
+import type { FilesystemEmulatorType } from './emulator.js';
 
 /**
  * Splits a VM-relative path into segments, or returns `null` if the path could escape the VM
@@ -28,7 +28,7 @@ const isInScreenshotsDirectory = (segments: readonly string[]): boolean =>
  * media file can never leak into an archive because of how a host spelled the name. Unsafe paths
  * throw rather than returning a verdict: finding one indicates a bug or a hostile archive.
  */
-export function isExcludedFromArchive(emulatorType: EmulatorType, path: string): boolean {
+export function isExcludedFromArchive(emulatorType: FilesystemEmulatorType, path: string): boolean {
   const segments = parseVmRelativePath(path);
   if (!segments) throw new Error('Unsafe VM-relative path');
   return emulatorType === '86box' ? isInScreenshotsDirectory(segments) : isRootPpm(segments);
@@ -47,7 +47,7 @@ const hasScreenshotExtension = (name: string): boolean => {
  * 86Box `screenshots` tree, or a `.ppm` file in a QEMU VM's root. Everything else in the `screenshots`
  * tree is still excluded from archives, which is why a transfer treats it as unpreserved.
  */
-export function isWatchedMediaPath(emulatorType: EmulatorType, path: string): boolean {
+export function isWatchedMediaPath(emulatorType: FilesystemEmulatorType, path: string): boolean {
   const segments = parseVmRelativePath(path);
   if (!segments) return false;
   return emulatorType === '86box'

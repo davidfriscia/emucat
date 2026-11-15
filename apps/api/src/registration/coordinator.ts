@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   SNAPSHOT_INELIGIBLE_TEXT,
+  archiveFormatFor,
   archiveObjectKey,
   encodeRegistrationCursor,
   formatSnapshotName,
@@ -23,6 +24,8 @@ import {
   type RepositoryHealthResultPayload,
   type ServerMessage,
   type SnapshotIneligibleReason,
+  type VirtualBoxRegistrationRequestPayload,
+  type VirtualBoxRegistrationResultPayload,
   type VmIdentity,
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
@@ -30,6 +33,7 @@ import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql
 import type { DiscoveryRecord } from '../agents/discovery.js';
 import { lockUsableVersion } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
+import { filesystemOnly } from '../virtualbox/policy.js';
 import { recordHealthResult } from './repositories.js';
 
 /** What the coordinator needs from the hub, which owns the sockets. */
@@ -38,6 +42,8 @@ export interface AgentLink {
   isRegistrationCapable(agentId: string): boolean;
   /** Whether this connection's agent said it can create snapshots. */
   isSnapshotCapable(agentId: string): boolean;
+  /** Whether this connection's agent said it can export and run VirtualBox machines (decision 0045). */
+  isVirtualBoxCapable(agentId: string): boolean;
   activeConnectionId(agentId: string): string | null;
   latestDiscovery(agentId: string): DiscoveryRecord | null;
   send(agentId: string, message: Pick<ServerMessage, 'type' | 'payload'>): boolean;
@@ -65,6 +71,7 @@ interface OperationRow extends RowDataPacket {
   requested_by_display_name: string | null;
   emulator_type: RegistrationOperation['emulatorType'];
   vm_name: string;
+  virtualbox_uuid: string | null;
   mode: RegistrationOperation['mode'];
   state: RegistrationState;
   version_id: string;
@@ -99,7 +106,8 @@ const OPERATION_QUERY = `
   SELECT op.id, op.agent_id, a.name AS agent_name, a.revoked_at AS agent_revoked_at,
          op.repository_id, r.name AS repository_name,
          op.requested_by_user_id, u.display_name AS requested_by_display_name,
-         op.emulator_type, op.vm_name, op.mode, op.state, op.version_id, op.archive_key,
+         op.emulator_type, op.vm_name, op.virtualbox_uuid, op.mode, op.state, op.version_id,
+         op.archive_key,
          op.parent_version_id, op.snapshot_name, op.workspace_id, op.request_id,
          op.progress_done_bytes, op.progress_total_bytes,
          op.archive_size_bytes, op.archive_sha256, op.manifest_version, op.manifest_sha256,
@@ -143,7 +151,11 @@ const toNumber = (value: number | string | null): number | null =>
   value === null ? null : Number(value);
 
 function toOperation(row: OperationRow, online: boolean): RegistrationOperation {
-  const hasArchive = row.archive_sha256 !== null && row.manifest_sha256 !== null;
+  const format = archiveFormatFor(row.emulator_type);
+  // An OVA has no EmuCat manifest, so its size and hash are all there is (decision 0045).
+  const hasArchive =
+    row.archive_sha256 !== null && (format === 'ova' || row.manifest_sha256 !== null);
+  const optional = (value: number | string | null) => (value === null ? null : Number(value));
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -166,15 +178,17 @@ function toOperation(row: OperationRow, online: boolean): RegistrationOperation 
     },
     archive: hasArchive
       ? {
+          format,
           sizeBytes: Number(row.archive_size_bytes),
           sha256: row.archive_sha256 as string,
-          manifestVersion: Number(row.manifest_version),
-          manifestSha256: row.manifest_sha256 as string,
-          fileCount: Number(row.file_count),
-          totalUncompressedBytes: Number(row.total_uncompressed_bytes),
+          manifestVersion: optional(row.manifest_version),
+          manifestSha256: row.manifest_sha256,
+          fileCount: optional(row.file_count),
+          totalUncompressedBytes: optional(row.total_uncompressed_bytes),
           verifiedBy: 'agent',
         }
       : null,
+    virtualboxUuid: row.virtualbox_uuid,
     localCopy: row.local_copy,
     error: row.error_code ? { code: row.error_code, message: row.error_message ?? '' } : null,
     recovery: row.error_code ? registrationRecovery(row.error_code) : null,
@@ -195,19 +209,74 @@ function isDuplicateEntry(error: unknown): boolean {
   return (error as { code?: string }).code === 'ER_DUP_ENTRY';
 }
 
-/** What goes to the agent for an operation, from its row. Snapshot fields only when there are any. */
-function requestFor(row: OperationRow): RegistrationRequestPayload {
+type RequestMessage =
+  | { type: 'server.registration_request'; payload: RegistrationRequestPayload }
+  | {
+      type: 'server.virtualbox_registration_request';
+      payload: VirtualBoxRegistrationRequestPayload;
+    };
+
+/**
+ * What goes to the agent for an operation, from its row. Snapshot fields only when there are any. A VirtualBox
+ * operation is its own command, naming the machine by UUID, since it reads no directory (decision 0045).
+ */
+function requestFor(
+  row: Pick<
+    OperationRow,
+    | 'id'
+    | 'emulator_type'
+    | 'vm_name'
+    | 'virtualbox_uuid'
+    | 'mode'
+    | 'repository_id'
+    | 'version_id'
+    | 'archive_key'
+    | 'parent_version_id'
+    | 'workspace_id'
+  >,
+): RequestMessage {
+  if (row.emulator_type === 'virtualbox') {
+    return {
+      type: 'server.virtualbox_registration_request',
+      payload: {
+        operationId: row.id,
+        vmName: row.vm_name,
+        machineUuid: row.virtualbox_uuid ?? '',
+        repositoryId: row.repository_id,
+        versionId: row.version_id,
+        archiveKey: row.archive_key,
+      },
+    };
+  }
   return {
-    operationId: row.id,
-    emulatorType: row.emulator_type,
-    vmName: row.vm_name,
-    mode: row.mode,
-    repositoryId: row.repository_id,
-    versionId: row.version_id,
-    archiveKey: row.archive_key,
-    ...(row.parent_version_id ? { parentVersionId: row.parent_version_id } : {}),
-    ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+    type: 'server.registration_request',
+    payload: {
+      operationId: row.id,
+      emulatorType: filesystemOnly(row.emulator_type),
+      vmName: row.vm_name,
+      mode: row.mode,
+      repositoryId: row.repository_id,
+      versionId: row.version_id,
+      archiveKey: row.archive_key,
+      ...(row.parent_version_id ? { parentVersionId: row.parent_version_id } : {}),
+      ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+    },
   };
+}
+
+/** What the agent verified about the archive, whichever kind it is. */
+interface VerifiedArchive {
+  operationId: string;
+  versionId: string;
+  archiveKey: string;
+  archiveSizeBytes: number;
+  archiveSha256: string;
+  manifest: {
+    manifestVersion: number;
+    manifestSha256: string;
+    fileCount: number;
+    totalUncompressedBytes: number;
+  } | null;
 }
 
 const refuseSnapshot = (reason: SnapshotIneligibleReason, status = 409) =>
@@ -222,6 +291,7 @@ export interface SnapshotInput {
 }
 
 const FAILURE_TEXT: Record<string, string> = {
+  virtualbox_unavailable: 'The agent no longer says that it can export VirtualBox machines.',
   agent_revoked: 'The agent was revoked before this finished.',
   agent_lost_operation: 'The agent no longer knows about this operation.',
   invalid_result: 'The agent reported a result that does not belong to this operation.',
@@ -264,6 +334,22 @@ export class RegistrationCoordinator {
     if (workspaceId) this.onWorkspaceSnapshot(workspaceId);
   }
 
+  /**
+   * Called once a VirtualBox master is committed, so that the agent starts watching its machine at once. A missed
+   * call is harmless: the next welcome sends the whole list again.
+   */
+  onVirtualBoxRegistered: ((agentId: string) => void) | null = null;
+
+  private async notifyVirtualBox(operationId: string): Promise<void> {
+    if (!this.onVirtualBoxRegistered) return;
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT agent_id FROM registration_operations WHERE id = ? AND emulator_type = 'virtualbox'`,
+      [operationId],
+    );
+    const agentId = rows[0]?.agent_id as string | undefined;
+    if (agentId) this.onVirtualBoxRegistered(agentId);
+  }
+
   close(): void {
     for (const timer of this.healthTimers.values()) clearTimeout(timer);
     this.healthTimers.clear();
@@ -273,6 +359,7 @@ export class RegistrationCoordinator {
 
   async create(input: CreateRegistrationRequest, userId: string): Promise<RegistrationOperation> {
     const { agentId, repositoryId, emulatorType, vmName, mode } = input;
+    const machineUuid = input.virtualboxUuid ?? null;
     this.requireFreshDiscovery(input);
 
     const operationId = randomUUID();
@@ -333,12 +420,26 @@ export class RegistrationCoordinator {
       if (existing[0]) {
         throw new ApiError(409, 'vm_already_registered', 'This VM is already registered.');
       }
+      if (machineUuid) {
+        // One master per machine: the unique key on virtualbox_sources makes the commit fail too.
+        const [sources] = await connection.execute<RowDataPacket[]>(
+          'SELECT vm_name FROM virtualbox_sources WHERE agent_id = ? AND machine_uuid = ?',
+          [agentId, machineUuid],
+        );
+        if (sources[0]) {
+          throw new ApiError(
+            409,
+            'virtualbox_already_registered',
+            `This VirtualBox machine is already registered, as ${sources[0].vm_name as string}.`,
+          );
+        }
+      }
       try {
         await connection.execute(
           `INSERT INTO registration_operations
-             (id, agent_id, repository_id, requested_by_user_id, emulator_type, vm_name, mode,
-              version_id, archive_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, agent_id, repository_id, requested_by_user_id, emulator_type, vm_name,
+              virtualbox_uuid, mode, version_id, archive_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             operationId,
             agentId,
@@ -346,6 +447,7 @@ export class RegistrationCoordinator {
             userId,
             emulatorType,
             vmName,
+            machineUuid,
             mode,
             versionId,
             archiveKey,
@@ -371,15 +473,18 @@ export class RegistrationCoordinator {
 
     // If this cannot be delivered, the operation stays queued and goes out when the agent reconnects.
     this.dispatch(
-      {
-        operationId,
-        emulatorType,
-        vmName,
+      requestFor({
+        id: operationId,
+        emulator_type: emulatorType,
+        vm_name: vmName,
+        virtualbox_uuid: machineUuid,
         mode,
-        repositoryId,
-        versionId,
-        archiveKey,
-      },
+        repository_id: repositoryId,
+        version_id: versionId,
+        archive_key: archiveKey,
+        parent_version_id: null,
+        workspace_id: null,
+      }),
       agentId,
     );
     return this.require(operationId);
@@ -400,6 +505,8 @@ export class RegistrationCoordinator {
     const repeated = await this.byRequest(requestId);
     if (repeated) return this.sameSnapshotRequest(repeated, vm, input);
 
+    // A VirtualBox snapshot is a fresh OVA export, which VB3 adds (decision 0045).
+    if (vm.emulatorType === 'virtualbox') throw refuseSnapshot('not_supported');
     if (!this.link.isOnline(agentId)) throw refuseSnapshot('agent_offline');
     if (!this.link.isRegistrationCapable(agentId) || !this.link.isSnapshotCapable(agentId)) {
       throw refuseSnapshot('agent_cannot_snapshot');
@@ -605,6 +712,26 @@ export class RegistrationCoordinator {
       discovery.connectionId !== this.link.activeConnectionId(agentId)
     ) {
       throw stale();
+    }
+    if (emulatorType === 'virtualbox') {
+      if (!this.link.isVirtualBoxCapable(agentId)) {
+        throw new ApiError(
+          409,
+          'agent_cannot_register',
+          'This agent cannot export VirtualBox machines: update it, and configure VirtualBox on it.',
+        );
+      }
+      // By UUID only. The agent checks the state again right before it exports anything.
+      const machine = discovery.virtualbox?.vms.find((vm) => vm.uuid === input.virtualboxUuid);
+      if (!machine) throw stale();
+      if (machine.state !== 'powered_off' || machine.accessible !== true) {
+        throw new ApiError(
+          409,
+          'virtualbox_not_powered_off',
+          'Only a powered-off VirtualBox machine can be registered. Shut it down in the guest or in VirtualBox (a saved state does not count), run discovery again, and choose it from the new report.',
+        );
+      }
+      return;
     }
     // Exactly as discovered: a different capitalization would be a different directory on some hosts.
     const found = discovery.vms.some(
@@ -914,8 +1041,8 @@ export class RegistrationCoordinator {
 
   // What an agent reports. The agent's identity comes from its connection, and nowhere else.
 
-  private dispatch(request: RegistrationRequestPayload, agentId: string): boolean {
-    return this.link.send(agentId, { type: 'server.registration_request', payload: request });
+  private dispatch(request: RequestMessage, agentId: string): boolean {
+    return this.link.send(agentId, request);
   }
 
   private ack(agentId: string, payload: RegistrationAckPayload): void {
@@ -944,7 +1071,10 @@ export class RegistrationCoordinator {
     );
     for (const row of active) {
       if (listed.has(row.id)) continue;
-      if (row.state === 'queued') {
+      if (row.state === 'queued' && row.emulator_type === 'virtualbox' && !payload.virtualbox) {
+        // The agent was replaced by one that cannot export VirtualBox machines. Nothing was done.
+        await this.markFailed(row.id, 'virtualbox_unavailable');
+      } else if (row.state === 'queued') {
         this.dispatch(requestFor(row), agentId);
       } else if (row.state === 'cleaning_local') {
         await this.markPartial(row.id, 'agent_lost_operation', 'unknown');
@@ -986,6 +1116,30 @@ export class RegistrationCoordinator {
   }
 
   async result(agentId: string, payload: RegistrationResultPayload): Promise<void> {
+    await this.verified(agentId, {
+      operationId: payload.operationId,
+      versionId: payload.versionId,
+      archiveKey: payload.archiveKey,
+      archiveSizeBytes: payload.archiveSizeBytes,
+      archiveSha256: payload.archiveSha256,
+      manifest: {
+        manifestVersion: payload.manifestVersion,
+        manifestSha256: payload.manifestSha256,
+        fileCount: payload.fileCount,
+        totalUncompressedBytes: payload.totalUncompressedBytes,
+      },
+    });
+  }
+
+  /** A published OVA (decision 0045). The same checks and the same commit, with no manifest. */
+  async virtualBoxResult(
+    agentId: string,
+    payload: VirtualBoxRegistrationResultPayload,
+  ): Promise<void> {
+    await this.verified(agentId, { ...payload, manifest: null });
+  }
+
+  private async verified(agentId: string, payload: VerifiedArchive): Promise<void> {
     const { operationId } = payload;
     const row = await this.rowFor(agentId, operationId);
     if (!row) {
@@ -1014,8 +1168,14 @@ export class RegistrationCoordinator {
       return;
     }
 
-    // Only the identities this server issued count.
-    if (payload.versionId !== row.version_id || payload.archiveKey !== row.archive_key) {
+    // Only the identities this server issued count, and only the kind of archive this VM has: a ZIP with
+    // its manifest, or an OVA without one. Neither can stand in for the other.
+    const expectsOva = archiveFormatFor(row.emulator_type) === 'ova';
+    if (
+      payload.versionId !== row.version_id ||
+      payload.archiveKey !== row.archive_key ||
+      expectsOva !== (payload.manifest === null)
+    ) {
       this.log.error({ agentId, operationId }, 'A registration result with the wrong identities');
       await this.markFailed(operationId, 'invalid_result');
       this.ack(agentId, { operationId, outcome: 'rejected' });
@@ -1031,10 +1191,10 @@ export class RegistrationCoordinator {
       [
         payload.archiveSizeBytes,
         payload.archiveSha256,
-        payload.manifestVersion,
-        payload.manifestSha256,
-        payload.fileCount,
-        payload.totalUncompressedBytes,
+        payload.manifest?.manifestVersion ?? null,
+        payload.manifest?.manifestSha256 ?? null,
+        payload.manifest?.fileCount ?? null,
+        payload.manifest?.totalUncompressedBytes ?? null,
         operationId,
         agentId,
       ],
@@ -1055,6 +1215,7 @@ export class RegistrationCoordinator {
       const outcome = await this.commitIn(connection, operationId);
       await connection.commit();
       if (outcome.outcome === 'rejected') await this.notifyWorkspace(operationId);
+      if (outcome.outcome === 'committed') await this.notifyVirtualBox(operationId);
       return outcome;
     } catch (error) {
       await connection.rollback();
@@ -1153,13 +1314,17 @@ export class RegistrationCoordinator {
         row.requested_by_user_id,
       ],
     );
-    await connection.execute(
-      `INSERT INTO agent_vm_state
-         (agent_id, emulator_type, vm_name, local_source_version_id, execution_state,
-          content_status, last_verified_at, last_verified_sha256)
-       VALUES (?, ?, ?, ?, 'idle', 'verified', UTC_TIMESTAMP(3), ?)`,
-      [row.agent_id, row.emulator_type, row.vm_name, row.version_id, row.manifest_sha256],
-    );
+    if (row.emulator_type === 'virtualbox') {
+      await this.commitVirtualBoxSourceIn(connection, row);
+    } else {
+      await connection.execute(
+        `INSERT INTO agent_vm_state
+           (agent_id, emulator_type, vm_name, local_source_version_id, execution_state,
+            content_status, last_verified_at, last_verified_sha256)
+         VALUES (?, ?, ?, ?, 'idle', 'verified', UTC_TIMESTAMP(3), ?)`,
+        [row.agent_id, row.emulator_type, row.vm_name, row.version_id, row.manifest_sha256],
+      );
+    }
     await connection.execute(
       `UPDATE registration_operations
        SET state = 'cleaning_local', committed_at = UTC_TIMESTAMP(3),
@@ -1168,6 +1333,47 @@ export class RegistrationCoordinator {
       [operationId],
     );
     return committed;
+  }
+
+  /**
+   * Where the new VM's machine is: this agent, this UUID. The machine stays the operational VM, and the master
+   * is what it was when it was exported, which is what `local_source_version_id` says. Nothing verifies a
+   * VirtualBox machine against an OVA, so its content is never recorded as verified (decision 0045).
+   */
+  private async commitVirtualBoxSourceIn(
+    connection: PoolConnection,
+    row: RowDataPacket,
+  ): Promise<void> {
+    const machineUuid = row.virtualbox_uuid as string;
+    const seen = this.link
+      .latestDiscovery(row.agent_id as string)
+      ?.virtualbox?.vms.find((vm) => vm.uuid === machineUuid);
+    await connection.execute(
+      `INSERT INTO virtualbox_sources
+         (emulator_type, vm_name, agent_id, machine_uuid, display_name, state, raw_state,
+          state_changed_at, present, is_accessible, observed_at)
+       VALUES ('virtualbox', ?, ?, ?, ?, 'powered_off', 'poweroff', ?, TRUE, TRUE, UTC_TIMESTAMP(3))`,
+      [
+        row.vm_name,
+        row.agent_id,
+        machineUuid,
+        seen?.name ?? row.vm_name,
+        seen?.stateChangedAt ? new Date(seen.stateChangedAt) : null,
+      ],
+    );
+    if (seen?.name) {
+      await connection.execute(
+        `UPDATE virtual_machines SET display_name = ?
+         WHERE emulator_type = 'virtualbox' AND vm_name = ? AND display_name IS NULL`,
+        [seen.name.slice(0, 255), row.vm_name],
+      );
+    }
+    await connection.execute(
+      `INSERT INTO agent_vm_state
+         (agent_id, emulator_type, vm_name, local_source_version_id, execution_state, content_status)
+       VALUES (?, 'virtualbox', ?, ?, 'idle', 'unverified')`,
+      [row.agent_id, row.vm_name, row.version_id],
+    );
   }
 
   /**

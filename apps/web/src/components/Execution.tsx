@@ -42,6 +42,10 @@ import { useModalDialog } from './Gallery';
 import { restoreStateText, versionNamer, type VersionNamer } from './Restore';
 import { shortId, SNAPSHOT_STATE_TEXT, versionLabel } from './Snapshots';
 import { FormError } from './States';
+import {
+  STATE_BADGE as VIRTUALBOX_STATE_BADGE,
+  STATE_TEXT as VIRTUALBOX_STATE_TEXT,
+} from './VirtualBox';
 
 const ACTIVE_POLL_MS = 1_500;
 const IDLE_POLL_MS = 10_000;
@@ -94,6 +98,7 @@ const LAUNCH_TEXT: Record<LaunchIneligibleReason, string> = {
   vm_not_on_agent: 'it holds no copy of this VM',
   session_active: 'the VM is already running there',
   operation_in_progress: 'busy with this VM',
+  source_unavailable: 'VirtualBox no longer lists or cannot read the machine there',
 };
 
 const REMOTE_TEXT: Record<RemoteIneligibleReason, string> = {
@@ -120,6 +125,7 @@ const VERIFY_TEXT: Record<VerifyIneligibleReason, string> = {
   vm_not_on_agent: 'it holds no copy of this VM',
   session_active: 'the VM is running there',
   operation_in_progress: 'busy with another operation',
+  not_supported: 'VirtualBox machines cannot be verified',
 };
 
 const VERIFY_STATUS_TEXT: Record<NonNullable<VmVerification['status']>, string> = {
@@ -202,6 +208,7 @@ export function SessionCard({ session, onChange }: { session: VmSession; onChang
   const [error, setError] = useState<unknown>(null);
   const [confirming, setConfirming] = useState<'force' | 'dismiss' | null>(null);
   const active = isSessionActive(session.state);
+  const virtualbox = session.emulatorType === 'virtualbox';
   const canStop =
     active &&
     session.agentOnline &&
@@ -295,13 +302,15 @@ export function SessionCard({ session, onChange }: { session: VmSession; onChang
                 className="btn btn-sm btn-outline-primary"
                 disabled={busy || !session.gracefulStopAvailable}
                 title={
-                  session.gracefulStopAvailable
-                    ? 'Asks the emulator to close'
-                    : 'The emulator cannot be asked to close now'
+                  virtualbox
+                    ? 'Presses the machine’s ACPI power button. The guest decides whether to shut down'
+                    : session.gracefulStopAvailable
+                      ? 'Asks the emulator to close'
+                      : 'The emulator cannot be asked to close now'
                 }
                 onClick={() => void stop()}
               >
-                Stop
+                {virtualbox ? 'Shut down (ACPI)' : 'Stop'}
               </button>
             ) : null}
             {canStop ? (
@@ -311,7 +320,7 @@ export function SessionCard({ session, onChange }: { session: VmSession; onChang
                 disabled={busy}
                 onClick={() => setConfirming('force')}
               >
-                Force stop…
+                {virtualbox ? 'Power off…' : 'Force stop…'}
               </button>
             ) : null}
             {session.state === 'unknown' || session.state === 'requested' ? (
@@ -329,10 +338,14 @@ export function SessionCard({ session, onChange }: { session: VmSession; onChang
       </div>
       {confirming === 'force' ? (
         <ConfirmByName
-          title={`Force ${session.vmName} to stop`}
+          title={virtualbox ? `Power off ${session.vmName}` : `Force ${session.vmName} to stop`}
           vmName={session.vmName}
-          explanation="This ends the emulator at once, like pulling the plug. Anything the guest has not written to disk is lost, and its file systems may need checking. The VM's files are never deleted."
-          action="Force stop"
+          explanation={
+            virtualbox
+              ? 'VirtualBox powers the machine off at once, like pulling the plug. Anything the guest has not written to disk is lost, and its file systems may need checking. The machine and its disks are never deleted.'
+              : "This ends the emulator at once, like pulling the plug. Anything the guest has not written to disk is lost, and its file systems may need checking. The VM's files are never deleted."
+          }
+          action={virtualbox ? 'Power off' : 'Force stop'}
           cancelLabel="Keep it running"
           onClose={() => setConfirming(null)}
           onConfirm={async (typed) => {
@@ -1242,8 +1255,173 @@ export function VmLaunchDialog({
             Close
           </button>
         </div>
-        <VmExecutionSection vm={vm} preselect={preselect} />
+        {vm.emulatorType === 'virtualbox' ? (
+          <VirtualBoxExecutionSection vm={vm} />
+        ) : (
+          <VmExecutionSection vm={vm} preselect={preselect} />
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Running a VirtualBox VM (decision 0045): the machine runs in place, on the agent that registered it, and
+ * only locally. Its state is what that agent last saw VirtualBox report; a session moves on only when the
+ * agent sees the machine change, whoever started or stopped it.
+ */
+export function VirtualBoxExecutionSection({ vm }: { vm: VmIdentity }) {
+  const { emulatorType, vmName } = vm;
+  const loadOptions = useCallback(
+    (signal: AbortSignal) => fetchExecutionOptions({ emulatorType, vmName }, signal),
+    [emulatorType, vmName],
+  );
+  const loadSessions = useCallback(
+    (signal: AbortSignal) => fetchVmSessions({ emulatorType, vmName, limit: 10 }, signal),
+    [emulatorType, vmName],
+  );
+  const [fastPoll, setFastPoll] = useState(false);
+  const interval = fastPoll ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+  const options = usePolledData(loadOptions, interval);
+  const sessions = usePolledData(loadSessions, interval);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const request = useRef<string | null>(null);
+
+  const source = options.data?.virtualbox ?? null;
+  const agent = options.data?.agents.find((item) => item.agentId === source?.agentId) ?? null;
+  const history = sessions.data?.sessions ?? [];
+  const active = agent?.activeSession ?? null;
+  const transitional =
+    history.some((session) => ['requested', 'starting', 'stopping'].includes(session.state)) ||
+    (source?.state !== null &&
+      source?.state !== undefined &&
+      ['starting', 'stopping'].includes(source.state));
+  if (transitional !== fastPoll) setFastPoll(transitional);
+
+  const refresh = () => {
+    options.refresh();
+    sessions.refresh();
+  };
+
+  const start = async () => {
+    if (!agent) return;
+    setBusy(true);
+    setError(null);
+    request.current ??= crypto.randomUUID();
+    try {
+      await launchVm({
+        agentId: agent.agentId,
+        emulatorType,
+        vmName,
+        mode: 'local',
+        requestId: request.current,
+      });
+      request.current = null;
+      refresh();
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const stateText = source?.state
+    ? source.state === 'unknown' && source.rawState
+      ? `Unknown (${source.rawState})`
+      : VIRTUALBOX_STATE_TEXT[source.state]
+    : 'Not observed yet';
+
+  return (
+    <section className="card execution-panel" aria-labelledby="vm-execution-heading">
+      <div className="card-body">
+        <h2 id="vm-execution-heading" className="h6 card-title">
+          Run in VirtualBox
+        </h2>
+        {options.error && !options.data ? (
+          <p className="small text-body-secondary">Running is not available right now.</p>
+        ) : null}
+        {options.data && !source ? (
+          <p className="small mb-0">
+            This VM has no VirtualBox machine recorded. It cannot be run from here.
+          </p>
+        ) : null}
+        {source ? (
+          <>
+            <dl className="small settings-facts mb-2">
+              <dt>Agent</dt>
+              <dd>
+                {source.agentName}{' '}
+                {source.agentOnline ? null : <span className="badge text-bg-warning">Offline</span>}
+              </dd>
+              <dt>In VirtualBox</dt>
+              <dd className="virtualbox-name">{source.displayName}</dd>
+              <dt>UUID</dt>
+              <dd>
+                <code className="vm-identity small">{source.machineUuid}</code>
+              </dd>
+              <dt>State</dt>
+              <dd>
+                <span
+                  className={`badge ${source.state ? VIRTUALBOX_STATE_BADGE[source.state] : 'text-bg-dark border'}`}
+                >
+                  {stateText}
+                </span>
+                {source.observedAt ? (
+                  <span className="text-body-secondary">
+                    {' '}
+                    as seen {formatTime(source.observedAt)}
+                  </span>
+                ) : null}
+              </dd>
+            </dl>
+            {source.present === false ? (
+              <div className="alert alert-warning small" role="status">
+                VirtualBox on {source.agentName} no longer lists this machine. The catalog entry and
+                its master are kept. Register the machine again in VirtualBox, with the same UUID,
+                to run it from here.
+              </div>
+            ) : null}
+            <p className="small text-body-secondary">
+              Only Local: the machine runs in place, on the agent that registered it. Remote
+              Volatile and Remote Snapshot are not available for VirtualBox machines.
+            </p>
+            {active ? (
+              <SessionCard session={active} onChange={refresh} />
+            ) : (
+              <div className="d-flex flex-wrap align-items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={busy || !agent?.launch.eligible}
+                  onClick={() => void start()}
+                >
+                  Start
+                </button>
+                {agent && !agent.launch.eligible && agent.launch.reason ? (
+                  <span className="small text-body-secondary">
+                    Cannot start now: {agent.launch.problem ?? LAUNCH_TEXT[agent.launch.reason]}
+                  </span>
+                ) : null}
+              </div>
+            )}
+            <FormError error={error} />
+            {history.filter((session) => !isSessionActive(session.state)).length > 0 ? (
+              <details className="mt-3">
+                <summary className="small">Earlier sessions</summary>
+                <div className="mt-2">
+                  {history
+                    .filter((session) => !isSessionActive(session.state))
+                    .slice(0, 5)
+                    .map((session) => (
+                      <SessionCard key={session.id} session={session} onChange={refresh} />
+                    ))}
+                </div>
+              </details>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+    </section>
   );
 }

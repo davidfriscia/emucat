@@ -43,7 +43,15 @@ import {
   registrationSyncPayloadSchema,
   repositoryHealthRequestPayloadSchema,
   repositoryHealthResultPayloadSchema,
+  virtualBoxRegistrationRequestPayloadSchema,
+  virtualBoxRegistrationResultPayloadSchema,
 } from './registration.js';
+import {
+  virtualBoxControlPayloadSchema,
+  virtualBoxControlResultPayloadSchema,
+  virtualBoxStatesPayloadSchema,
+  virtualBoxWatchPayloadSchema,
+} from './virtualbox.js';
 import {
   restoreAckPayloadSchema,
   restoreCancelPayloadSchema,
@@ -197,6 +205,18 @@ export const agentMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('agent.archive_delete_result'),
     payload: archiveDeleteResultPayloadSchema,
   }),
+  envelopeSchema.extend({
+    type: z.literal('agent.virtualbox_registration_result'),
+    payload: virtualBoxRegistrationResultPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.virtualbox_control_result'),
+    payload: virtualBoxControlResultPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('agent.virtualbox_states'),
+    payload: virtualBoxStatesPayloadSchema,
+  }),
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -276,6 +296,18 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.archive_delete'),
     payload: archiveDeletePayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.virtualbox_registration_request'),
+    payload: virtualBoxRegistrationRequestPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.virtualbox_control'),
+    payload: virtualBoxControlPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.virtualbox_watch'),
+    payload: virtualBoxWatchPayloadSchema,
   }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

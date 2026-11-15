@@ -24,7 +24,7 @@ import { formatBytes, formatTime } from './Agents';
 import { InfoDialog } from './Dialogs';
 import { FormError } from './States';
 
-const EMULATOR_NAMES = { '86box': '86Box', qemu: 'QEMU' } as const;
+const EMULATOR_NAMES = { '86box': '86Box', qemu: 'QEMU', virtualbox: 'VirtualBox' } as const;
 
 const STATE_TEXT: Record<RegistrationState, string> = {
   queued: 'Waiting for the agent',
@@ -181,10 +181,14 @@ function Completion({ operation }: { operation: RegistrationOperation }) {
       {archive ? (
         <>
           <dt>Archive size</dt>
-          <dd>
-            {formatBytes(archive.sizeBytes)}, from {archive.fileCount} files and{' '}
-            {formatBytes(archive.totalUncompressedBytes)}
-          </dd>
+          {archive.format === 'ova' ? (
+            <dd>{formatBytes(archive.sizeBytes)}, an OVA exported by VirtualBox</dd>
+          ) : (
+            <dd>
+              {formatBytes(archive.sizeBytes)}, from {archive.fileCount ?? 0} files and{' '}
+              {formatBytes(archive.totalUncompressedBytes ?? 0)}
+            </dd>
+          )}
           <dt>Integrity</dt>
           <dd>
             SHA-256 verified by the agent, by reading the stored bytes back.

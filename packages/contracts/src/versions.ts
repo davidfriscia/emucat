@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { versionDeletabilitySchema } from './cleanup.js';
-import { emulatorTypeSchema } from './emulator.js';
+import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
 
@@ -204,6 +204,8 @@ export const SNAPSHOT_INELIGIBLE_REASONS = [
   'repository_disabled',
   'vm_running',
   'operation_in_progress',
+  /** A VirtualBox VM: snapshots of it are not implemented yet (decision 0045). */
+  'not_supported',
 ] as const;
 export type SnapshotIneligibleReason = (typeof SNAPSHOT_INELIGIBLE_REASONS)[number];
 
@@ -225,6 +227,8 @@ export const SNAPSHOT_INELIGIBLE_TEXT: Record<SnapshotIneligibleReason, string> 
   vm_running:
     'This VM is running on this agent, or may be. Stop it, or dismiss the session, before creating a snapshot.',
   operation_in_progress: 'This agent, or this VM, is busy with another operation.',
+  not_supported:
+    'Snapshots of VirtualBox machines are not available yet. The master is the only version.',
 };
 
 // Working copies, and the remote sessions that run them (decisions 0038 and 0040).
@@ -361,7 +365,7 @@ export const workspacePathParamsSchema = z.strictObject({ workspaceId: z.uuid() 
 
 export const workspaceDiscardPayloadSchema = z.strictObject({
   workspaceId: z.uuid(),
-  emulatorType: emulatorTypeSchema,
+  emulatorType: filesystemEmulatorTypeSchema,
   vmName: vmNameSchema,
 });
 export type WorkspaceDiscardPayload = z.infer<typeof workspaceDiscardPayloadSchema>;

@@ -226,6 +226,10 @@ fn operations(
         retry_delay: Duration::from_secs(5),
         media: Some(media),
         execution: config.execution,
+        virtualbox: config
+            .virtualbox
+            .clone()
+            .map(emucat_agent::virtualbox::VirtualBoxSettings::new),
     })
 }
 

@@ -6,7 +6,7 @@ import {
   type DiscoveryOperationStatus,
   type DiscoveryResultPayload,
   type DiscoverySkipped,
-  type EmulatorType,
+  type FilesystemEmulatorType,
   type Platform,
   type VirtualBoxDiscovery,
 } from '@emucat/contracts';
@@ -24,7 +24,7 @@ export interface DiscoveryRecord {
   hostPlatform: Platform | null;
   emulators: DiscoveryEmulatorReport[];
   vms: {
-    emulatorType: EmulatorType;
+    emulatorType: FilesystemEmulatorType;
     vmName: string;
     markers: string[];
     hostCompatible: boolean | null;

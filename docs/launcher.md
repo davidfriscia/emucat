@@ -5,6 +5,12 @@ that the agent's local copy is still identical to its master. This guide covers 
 refused, and why. The decisions behind it are [0028](decisions/0028-launcher-architecture.md) to
 [0033](decisions/0033-remote-execution-modes.md).
 
+A VirtualBox VM is different: VirtualBox runs it in place, on the agent that registered it, and only in Local mode.
+The agent starts, shuts down (ACPI) or powers it off with VBoxManage by UUID, and a session follows what the agent
+observes, including starts and stops made outside EmuCat. Verification, restore and the remote modes are refused for
+it. See [the agent guide](agent.md#registering-and-running-a-virtualbox-machine) and
+[decision 0045](decisions/0045-virtualbox-masters-and-local-execution.md).
+
 ## Who does what
 
 | Part    | What it may do                                                                                         |

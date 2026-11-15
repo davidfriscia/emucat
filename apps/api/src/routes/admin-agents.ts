@@ -13,7 +13,7 @@ import {
   type PairingRequestReview,
 } from '@emucat/contracts';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { Pool } from 'mysql2/promise';
+import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { z } from 'zod';
 import type { DiscoveryRecord } from '../agents/discovery.js';
 import type { AgentHub } from '../agents/hub.js';
@@ -43,6 +43,21 @@ import { ApiError } from '../errors.js';
 import { DEFAULT_REGISTRATION_POLICY } from '../registration/coordinator.js';
 import { enforceRateLimit } from './agent-pairing.js';
 import type { BrowserDependencies } from './browser.js';
+
+/** Which machines this agent has registered, by UUID. A name never decides it (decision 0045). */
+async function registeredVirtualBoxMachines(
+  pool: Pool,
+  agentId: string,
+): Promise<DiscoveryOperation['virtualboxRegistrations']> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    'SELECT machine_uuid, vm_name FROM virtualbox_sources WHERE agent_id = ? ORDER BY vm_name',
+    [agentId],
+  );
+  return rows.map((row) => ({
+    machineUuid: row.machine_uuid as string,
+    vmName: row.vm_name as string,
+  }));
+}
 
 const agentNotFound = () => new ApiError(404, 'agent_not_found', 'Agent not found');
 const invalidCode = () =>
@@ -75,6 +90,7 @@ async function toOperation(
     vms: record.vms.map((vm) => ({ ...vm, registered: registered.has(vmIdentityKey(vm)) })),
     skipped: record.skipped,
     virtualbox: record.virtualbox,
+    virtualboxRegistrations: await registeredVirtualBoxMachines(pool, record.agentId),
     expiresAt:
       record.status === 'completed' && record.finishedAt
         ? new Date(record.finishedAt.getTime() + freshness.maxAgeMs).toISOString()

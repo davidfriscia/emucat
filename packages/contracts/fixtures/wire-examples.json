@@ -1513,5 +1513,241 @@
       ],
       "workspaces": ["018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6404"]
     }
-  }
+  },
+  "virtualboxServerMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6610",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_registration_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6600",
+        "vmName": "xenix-386",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6602",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6611",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_watch",
+      "payload": {
+        "machines": ["2acda0fc-cea6-406b-8a55-746fac380687"]
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6612",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_watch",
+      "payload": {
+        "machines": []
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6613",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_control",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "action": "start"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6614",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_control",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "action": "acpi_shutdown"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6615",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_control",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "action": "poweroff"
+      }
+    }
+  ],
+  "virtualboxAgentMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6616",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_sync",
+      "payload": {
+        "operations": [
+          {
+            "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6600",
+            "phase": "running"
+          }
+        ],
+        "snapshots": true,
+        "virtualbox": true
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6617",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.virtualbox_registration_result",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6600",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova",
+        "archiveSizeBytes": 1073741824,
+        "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6618",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.virtualbox_control_result",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "action": "start",
+        "accepted": true,
+        "code": null,
+        "message": null
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6619",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.virtualbox_control_result",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "action": "acpi_shutdown",
+        "accepted": false,
+        "code": "control_refused",
+        "message": "VirtualBox refused the command (VBOX_E_INVALID_VM_STATE)"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e661a",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.virtualbox_states",
+      "payload": {
+        "complete": true,
+        "available": true,
+        "machines": [
+          {
+            "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+            "present": true,
+            "name": "Xenix 386",
+            "state": "running",
+            "rawState": "running",
+            "stateChangedAt": "2025-07-18T05:33:15Z",
+            "accessible": true,
+            "observedAt": "2026-01-31T15:30:00Z"
+          },
+          {
+            "machineUuid": "0f0f0f0f-0000-4000-8000-000000000001",
+            "present": false,
+            "name": null,
+            "state": "unknown",
+            "rawState": null,
+            "stateChangedAt": null,
+            "accessible": null,
+            "observedAt": "2026-01-31T15:30:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e661b",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.virtualbox_states",
+      "payload": {
+        "complete": false,
+        "available": false,
+        "machines": []
+      }
+    }
+  ],
+  "virtualboxRefusedByTheAgent": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e661c",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_registration_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6600",
+        "vmName": "xenix-386",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6602",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova",
+        "output": "C:\\Windows\\evil.ova"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e661d",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_registration_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6600",
+        "vmName": "xenix-386",
+        "machineUuid": "Xenix 386",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6602",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601",
+        "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601.ova"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e661e",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_control",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "action": "unregistervm"
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e661f",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.virtualbox_control",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "machineUuid": "2acda0fc-cea6-406b-8a55-746fac380687",
+        "action": "start",
+        "arguments": ["--type", "headless"]
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6620",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.vm_launch",
+      "payload": {
+        "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6603",
+        "emulatorType": "virtualbox",
+        "vmName": "xenix-386",
+        "mode": "local",
+        "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6601"
+      }
+    }
+  ]
 }

@@ -1,5 +1,6 @@
 import {
   EMULATOR_LABELS,
+  isFilesystemEmulatorType,
   isLocalRemovalTerminal,
   REMOVAL_INELIGIBLE_TEXT,
   SNAPSHOT_DELETE_REFUSAL_TEXT,
@@ -73,13 +74,15 @@ export function RemoveLocalCopyDialog({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!ready) return;
+    // A VirtualBox machine has no local copy of EmuCat's to remove: nothing offers this for one.
+    const emulatorType = vm.emulatorType;
+    if (!ready || !isFilesystemEmulatorType(emulatorType)) return;
     setBusy(true);
     setError(null);
     try {
       const removal = await removeLocalCopy({
         agentId: agent.agentId,
-        emulatorType: vm.emulatorType,
+        emulatorType,
         vmName: vm.vmName,
         expectedVersionId: agent.local.sourceVersionId,
         discardLocalChanges: discard,

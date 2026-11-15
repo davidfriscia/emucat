@@ -20,6 +20,7 @@ import {
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { ApiError } from '../errors.js';
+import { filesystemOnly } from '../virtualbox/policy.js';
 import type { ExecutionCoordinator } from '../execution/coordinator.js';
 import type { RegistrationCoordinator } from '../registration/coordinator.js';
 import type { RestoreCoordinator } from '../restore/coordinator.js';
@@ -299,7 +300,7 @@ export class WorkspaceCoordinator {
       await this.restores.create(
         {
           agentId: input.agentId,
-          emulatorType: vm.emulatorType,
+          emulatorType: filesystemOnly(vm.emulatorType, 'A remote session'),
           vmName: vm.vmName,
           versionId: input.versionId,
         },
@@ -572,7 +573,7 @@ export class WorkspaceCoordinator {
       type: 'server.workspace_discard',
       payload: {
         workspaceId: row.id as string,
-        emulatorType: row.emulator_type as VmIdentity['emulatorType'],
+        emulatorType: filesystemOnly(row.emulator_type as string),
         vmName: row.vm_name as string,
       },
     });
