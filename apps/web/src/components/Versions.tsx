@@ -12,6 +12,7 @@ import {
 import { useCallback, useRef, useState } from 'react';
 import {
   discardWorkspace,
+  fetchRemasters,
   fetchRestoreOptions,
   fetchVersionTree,
   fetchWorkspaces,
@@ -24,6 +25,13 @@ import { formatBytes, formatTime } from './Agents';
 import { DeleteSnapshotDialog, deletionReasonText } from './Cleanup';
 import { ConfirmDialog } from './Dialogs';
 import { VmLaunchDialog, WORKSPACE_STATE_TEXT, type RunPreselection } from './Execution';
+import {
+  EditVersionDetailsDialog,
+  LocalRemasterDialog,
+  PromoteSnapshotDialog,
+  RemasterProgress,
+  type RemasterSourceChoice,
+} from './Remaster';
 import { RestoreDialog } from './Restore';
 import {
   CreateSnapshotDialog,
@@ -86,8 +94,12 @@ function VersionItem({
   onRetryDelete,
   virtualbox,
   onImport,
+  onEditDetails,
+  onPromote,
 }: {
   entry: VersionTreeEntry;
+  onEditDetails: (node: VersionNode) => void;
+  onPromote: (node: VersionNode) => void;
   vm: VmIdentity;
   /** For a VirtualBox VM, its machine and agents; `null` while unknown or for another emulator. */
   virtualbox: VirtualBoxManagementResponse | null;
@@ -140,14 +152,20 @@ function VersionItem({
                 <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
               </button>
             ) : null}
-            <h4 id={headingId} className="h6 mb-0">
-              {versionLabel(node)}
+            <h4 id={headingId} className="h6 mb-0 version-title">
+              {node.title ?? versionLabel(node)}
             </h4>
+            {node.title ? (
+              <span className="small text-body-secondary">{versionLabel(node)}</span>
+            ) : null}
             <span
               className={`badge ${node.kind === 'master' ? 'text-bg-primary' : 'text-bg-secondary'}`}
             >
-              {node.kind === 'master' ? 'Root' : 'Snapshot'}
+              {node.kind === 'master' ? 'Master' : 'Snapshot'}
             </span>
+            {node.promotedAt ? (
+              <span className="badge text-bg-light border">Promoted from a snapshot</span>
+            ) : null}
             {node.deletion ? <span className="badge text-bg-danger">Being deleted</span> : null}
             <span className="small text-body-secondary vm-identity" title={node.id}>
               {shortId(node.id)}
@@ -177,7 +195,22 @@ function VersionItem({
                 <dd>{node.createdByAgentName}</dd>
               </div>
             ) : null}
+            {node.promotedAt ? (
+              <div>
+                <dt>Promoted</dt>
+                <dd>{formatTime(node.promotedAt)}</dd>
+              </div>
+            ) : null}
           </dl>
+          {node.description ? (
+            <details className="small mb-1 version-description">
+              <summary>Description</summary>
+              {/* Plain text, never markup: React escapes it, and CSS keeps its line breaks. */}
+              <p className="mb-0 mt-1" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+                {node.description}
+              </p>
+            </details>
+          ) : null}
           <p className="small text-body-secondary mb-1">{verificationText(node)}</p>
           {node.deletion ? (
             <div className="small mb-1" role="status">
@@ -335,6 +368,30 @@ function VersionItem({
               Cannot be deleted now: {deleteReason}
             </p>
           ) : null}
+          {!node.deletion ? (
+            <div className="d-flex flex-wrap gap-2 mt-1">
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary theme-button"
+                aria-label={`Edit details of ${nameOf(node)}`}
+                aria-haspopup="dialog"
+                onClick={() => onEditDetails(node)}
+              >
+                Edit details…
+              </button>
+              {node.kind === 'snapshot' ? (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-outline-danger"
+                  aria-label={`Promote ${nameOf(node)} to master`}
+                  aria-haspopup="dialog"
+                  onClick={() => onPromote(node)}
+                >
+                  Promote to master…
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
       {children.length > 0 && expanded ? (
@@ -353,6 +410,8 @@ function VersionItem({
               onRetryDelete={onRetryDelete}
               virtualbox={virtualbox}
               onImport={onImport}
+              onEditDetails={onEditDetails}
+              onPromote={onPromote}
             />
           ))}
         </ul>
@@ -557,6 +616,12 @@ function VersionHistory({
   );
   const workspaces = usePolledData(loadWorkspaces, isVirtualBox ? null : interval);
   const options = usePolledData(loadOptions, isVirtualBox ? null : interval);
+  const loadRemasters = useCallback(
+    (signal: AbortSignal) => fetchRemasters({ emulatorType, vmName }, signal),
+    [emulatorType, vmName],
+  );
+  // Read once, and again after a change made here: a remaster in progress is followed on its own.
+  const remasters = usePolledData(loadRemasters, null);
   const [restoring, setRestoring] = useState<string | null>(null);
   const [running, setRunning] = useState<RunPreselection | null>(null);
   const [snapshotting, setSnapshotting] = useState<SnapshotRequest | null>(null);
@@ -564,6 +629,10 @@ function VersionHistory({
   const [deleting, setDeleting] = useState<VersionNode | null>(null);
   const [importing, setImporting] = useState<VersionNode | null>(null);
   const [retryError, setRetryError] = useState<unknown>(null);
+  const [editing, setEditing] = useState<VersionNode | null>(null);
+  const [promoting, setPromoting] = useState<VersionNode | null>(null);
+  const [remastering, setRemastering] = useState(false);
+  const [startedRemaster, setStartedRemaster] = useState<string | null>(null);
   const runToken = useRef(0);
 
   // Only Milestone 7's manual working copies are managed here. Remote sessions belong to the run panel.
@@ -578,6 +647,7 @@ function VersionHistory({
     tree.refresh();
     workspaces.refresh();
     options.refresh();
+    remasters.refresh();
   };
 
   if (tree.error && !tree.data) {
@@ -620,6 +690,34 @@ function VersionHistory({
       setRetryError(failure);
     }
   };
+  // A remaster in progress, or the one started from this page, is followed until it ends.
+  const remasterList = remasters.data?.remasters ?? [];
+  const followed = remasterList
+    .filter(
+      (item) =>
+        item.state === 'exporting' || item.state === 'cleaning' || item.id === startedRemaster,
+    )
+    .map((item) => item.id);
+  if (startedRemaster && !followed.includes(startedRemaster)) followed.unshift(startedRemaster);
+  const remasterActive = remasterList.some((item) => item.state === 'exporting');
+  // Copies that could become the new master: the agents' persistent copies, or the linked VirtualBox machine.
+  const remasterChoices: RemasterSourceChoice[] = [];
+  if (isVirtualBox) {
+    if (virtualbox?.source) {
+      remasterChoices.push({
+        agentId: virtualbox.source.agentId,
+        agentName: virtualbox.source.agentName,
+      });
+    }
+  } else {
+    for (const version of tree.data.versions) {
+      for (const holder of version.holders) {
+        if (holder.kind === 'local' && !remasterChoices.some((c) => c.agentId === holder.agentId)) {
+          remasterChoices.push({ agentId: holder.agentId, agentName: holder.agentName });
+        }
+      }
+    }
+  }
   const parentOf = (node: VersionNode) => {
     const parent = tree.data?.versions.find((version) => version.id === node.parentVersionId);
     return parent ? versionLabel(parent) : null;
@@ -634,6 +732,9 @@ function VersionHistory({
           onFinished={refresh}
         />
       ) : null}
+      {followed.map((remasterId) => (
+        <RemasterProgress key={remasterId} remasterId={remasterId} onChanged={refresh} />
+      ))}
       <FormError error={retryError} />
       {!built.ok ? (
         <div className="alert alert-danger small" role="alert">
@@ -649,6 +750,19 @@ function VersionHistory({
             full, immutable archive; a snapshot records the version it was made from, so history can
             branch. Running a version in a remote mode never changes it, nor any local copy.
           </p>
+          {remasterChoices.length > 0 ? (
+            <div className="mb-2">
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-danger"
+                disabled={remasterActive}
+                aria-haspopup="dialog"
+                onClick={() => setRemastering(true)}
+              >
+                Remaster from local copy…
+              </button>
+            </div>
+          ) : null}
           <ul role="tree" aria-label={`Versions of ${vmName}`} className="version-tree">
             <VersionItem
               entry={built.root}
@@ -670,6 +784,8 @@ function VersionHistory({
               onRetryDelete={(node) => void retryDelete(node)}
               virtualbox={virtualbox}
               onImport={setImporting}
+              onEditDetails={setEditing}
+              onPromote={setPromoting}
             />
           </ul>
         </>
@@ -743,6 +859,42 @@ function VersionHistory({
           onStarted={() => {
             setImporting(null);
             notifyVirtualBoxChanged(identity);
+          }}
+        />
+      ) : null}
+      {editing ? (
+        <EditVersionDetailsDialog
+          vm={identity}
+          node={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            tree.refresh();
+          }}
+        />
+      ) : null}
+      {promoting ? (
+        <PromoteSnapshotDialog
+          vm={identity}
+          node={promoting}
+          onClose={() => setPromoting(null)}
+          onStarted={(operation) => {
+            setPromoting(null);
+            setStartedRemaster(operation.id);
+            refresh();
+          }}
+        />
+      ) : null}
+      {remastering ? (
+        <LocalRemasterDialog
+          vm={identity}
+          choices={remasterChoices}
+          onClose={() => setRemastering(false)}
+          onStarted={(operation) => {
+            setRemastering(false);
+            setStartedRemaster(operation.id);
+            refresh();
+            if (isVirtualBox) notifyVirtualBoxChanged(identity);
           }}
         />
       ) : null}

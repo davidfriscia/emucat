@@ -1,6 +1,9 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type {
   RegistrationOperation,
+  RemasterOperation,
+  RemasterPreview,
+  RemasterVersion,
   RestoreOptionsResponse,
   VersionNode,
   RemoteSession,
@@ -33,6 +36,9 @@ function node(
     childVersionIds: [],
     snapshotName: parent === null ? null : `Win98_2026010100${String(minute).padStart(2, '0')}`,
     createdAt: `2026-01-01T00:${String(minute).padStart(2, '0')}:00.000Z`,
+    title: null,
+    description: null,
+    promotedAt: null,
     archiveSizeBytes: 2048,
     archiveSha256: SHA,
     manifest: { sha256: SHA, fileCount: 3, totalUncompressedBytes: 4096, verifiedBy: 'agent' },
@@ -751,6 +757,365 @@ describe('deleting a snapshot', () => {
     );
     await waitFor(() =>
       expect(api.callsTo('POST', `${VM_PATH}/versions/${SNAP_C}/deletion/retry`)).toHaveLength(1),
+    );
+  });
+});
+
+const REMASTER_ID = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8040';
+const REVISION = 'b'.repeat(64);
+
+function brief(id: string, parent: string | null, minute: number): RemasterVersion {
+  const full = node(id, parent, minute);
+  return {
+    id,
+    kind: full.kind,
+    parentVersionId: parent,
+    snapshotName: full.snapshotName,
+    title: null,
+    createdAt: full.createdAt,
+    archiveSizeBytes: full.archiveSizeBytes,
+  };
+}
+
+function promotionPreview(overrides: Partial<RemasterPreview> = {}): RemasterPreview {
+  return {
+    kind: 'snapshot',
+    emulatorType: 'qemu',
+    vmName: 'Win98',
+    revision: REVISION,
+    currentMaster: brief(MASTER, null, 0),
+    promoted: brief(SNAP_A, MASTER, 1),
+    retained: [brief(SNAP_A, MASTER, 1), brief(SNAP_C, SNAP_A, 3)],
+    removed: [brief(MASTER, null, 0), brief(SNAP_B, MASTER, 2)],
+    removedBytes: 4096,
+    source: null,
+    lineageConflicts: [],
+    cleanupAvailable: true,
+    refusal: null,
+    ...overrides,
+  };
+}
+
+function remasterOperation(overrides: Partial<RemasterOperation> = {}): RemasterOperation {
+  return {
+    id: REMASTER_ID,
+    kind: 'snapshot',
+    emulatorType: 'qemu',
+    vmName: 'Win98',
+    state: 'cleaning',
+    phase: 'cleaning',
+    previousMasterVersionId: MASTER,
+    newMasterVersionId: SNAP_A,
+    agentId: null,
+    agentName: null,
+    registrationOperationId: null,
+    progress: { doneBytes: null, totalBytes: null },
+    retainedCount: 2,
+    removedCount: 2,
+    removedBytes: 4096,
+    cleanup: { total: 2, deleted: 0, complete: false, items: [] },
+    error: null,
+    requestedByDisplayName: 'Ada Admin',
+    createdAt: '2026-01-01T01:00:00.000Z',
+    committedAt: '2026-01-01T01:00:00.000Z',
+    finishedAt: null,
+    ...overrides,
+  };
+}
+
+describe('titles and descriptions', () => {
+  it('shows a title prominently and a description as plain text, never markup', async () => {
+    const tree = branchingTree();
+    tree.versions[1] = {
+      ...(tree.versions[1] as VersionNode),
+      title: 'Clean install',
+      description: 'Line one\n<b>not bold</b>',
+    };
+    base({ [`GET ${VM_PATH}/versions`]: tree });
+    const drawn = await history();
+    const a = within(drawn).getAllByRole('treeitem')[1] as HTMLElement;
+    expect(within(a).getByRole('heading', { name: 'Clean install' })).toBeTruthy();
+    expect(within(a).getByText('Win98_202601010001')).toBeTruthy();
+    const description = within(a).getByText(/Line one/);
+    expect(description.textContent).toBe('Line one\n<b>not bold</b>');
+    expect(description.querySelector('b')).toBeNull();
+  });
+
+  it('edits only the title and description', async () => {
+    const api = base({
+      [`PATCH ${VM_PATH}/versions/${SNAP_B}`]: {
+        versionId: SNAP_B,
+        title: 'Patched',
+        description: 'With the fixes',
+      },
+    });
+    const tree = await history();
+    fireEvent.click(
+      within(tree).getByRole('button', { name: 'Edit details of Win98_202601010002' }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: /Edit details/ });
+    fireEvent.change(within(dialog).getByLabelText(/Title/), { target: { value: '  Patched ' } });
+    fireEvent.change(within(dialog).getByLabelText(/Description/), {
+      target: { value: 'With the fixes' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(api.callsTo('PATCH', `${VM_PATH}/versions/${SNAP_B}`)).toHaveLength(1),
+    );
+    expect(api.callsTo('PATCH', `${VM_PATH}/versions/${SNAP_B}`)[0]?.body).toEqual({
+      title: '  Patched ',
+      description: 'With the fixes',
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('will not save a title over its limit', async () => {
+    base();
+    const tree = await history();
+    fireEvent.click(within(tree).getByRole('button', { name: 'Edit details of Master' }));
+    const dialog = await screen.findByRole('dialog', { name: /Edit details/ });
+    fireEvent.change(within(dialog).getByLabelText(/Title/), {
+      target: { value: 't'.repeat(121) },
+    });
+    expect(within(dialog).getByText('121 / 120 characters')).toBeTruthy();
+    expect(
+      (within(dialog).getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it('sends a new snapshot’s title and description when they are given', async () => {
+    const api = base({
+      [`POST ${VM_PATH}/snapshots`]: snapshotOperation(),
+      [`GET /admin/registrations/${registrationOperation().id}`]: snapshotOperation(),
+    });
+    const tree = await history();
+    fireEvent.click(within(tree).getByRole('button', { name: 'Create snapshot from Study PC…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create a snapshot from Study PC' });
+    fireEvent.change(within(dialog).getByLabelText(/Title/), { target: { value: 'Before SP1' } });
+    fireEvent.change(within(dialog).getByLabelText(/Description/), {
+      target: { value: 'Two\nlines' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create snapshot' }));
+    await waitFor(() => expect(api.callsTo('POST', `${VM_PATH}/snapshots`)).toHaveLength(1));
+    const body = api.callsTo('POST', `${VM_PATH}/snapshots`)[0]?.body as Record<string, string>;
+    expect(body.title).toBe('Before SP1');
+    expect(body.description).toBe('Two\nlines');
+  });
+});
+
+describe('promoting a snapshot to master', () => {
+  it('offers no promotion for the master', async () => {
+    base();
+    const tree = await history();
+    expect(within(tree).queryByRole('button', { name: 'Promote Master to master' })).toBeNull();
+    expect(
+      within(tree).getByRole('button', { name: 'Promote Win98_202601010001 to master' }),
+    ).toBeTruthy();
+  });
+
+  it('previews what is kept and deleted, then promotes against that history', async () => {
+    const api = base({
+      [`GET ${VM_PATH}/versions/${SNAP_A}/promotion`]: promotionPreview(),
+      [`POST ${VM_PATH}/versions/${SNAP_A}/promotion`]: remasterOperation(),
+      [`GET /admin/remasters/${REMASTER_ID}`]: remasterOperation(),
+      [`GET ${VM_PATH}/remasters`]: { remasters: [] },
+    });
+    const tree = await history();
+    fireEvent.click(
+      within(tree).getByRole('button', { name: 'Promote Win98_202601010001 to master' }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: /to master/ });
+    expect(await within(dialog).findByText('Kept (2)')).toBeTruthy();
+    expect(within(dialog).getByText(/Permanently deleted \(2/)).toBeTruthy();
+    expect(within(dialog).getByText(/cannot be undone/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Promote to master' }));
+    await waitFor(() =>
+      expect(api.callsTo('POST', `${VM_PATH}/versions/${SNAP_A}/promotion`)).toHaveLength(1),
+    );
+    const body = api.callsTo('POST', `${VM_PATH}/versions/${SNAP_A}/promotion`)[0]?.body as Record<
+      string,
+      unknown
+    >;
+    expect(body.expectedRevision).toBe(REVISION);
+    expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body).not.toHaveProperty('acknowledgeLineageConflicts');
+    expect(await screen.findByText(/Cleaning obsolete archives/, { selector: 'div' })).toBeTruthy();
+  });
+
+  it('needs lineage conflicts acknowledged first', async () => {
+    const api = base({
+      [`GET ${VM_PATH}/versions/${SNAP_A}/promotion`]: promotionPreview({
+        lineageConflicts: [
+          { agentId: AGENT_ID, agentName: 'Study PC', versionId: SNAP_B, versionLabel: 'B' },
+        ],
+      }),
+      [`POST ${VM_PATH}/versions/${SNAP_A}/promotion`]: remasterOperation(),
+      [`GET /admin/remasters/${REMASTER_ID}`]: remasterOperation(),
+    });
+    const tree = await history();
+    fireEvent.click(
+      within(tree).getByRole('button', { name: 'Promote Win98_202601010001 to master' }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: /to master/ });
+    const confirm = (await within(dialog).findByRole('button', {
+      name: 'Promote to master',
+    })) as HTMLButtonElement;
+    await within(dialog).findByText(/need a restore \(|need a restore before/, { selector: 'p' });
+    expect(confirm.disabled).toBe(true);
+    fireEvent.click(within(dialog).getByRole('checkbox'));
+    expect(confirm.disabled).toBe(false);
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(api.callsTo('POST', `${VM_PATH}/versions/${SNAP_A}/promotion`)).toHaveLength(1),
+    );
+    expect(
+      (
+        api.callsTo('POST', `${VM_PATH}/versions/${SNAP_A}/promotion`)[0]?.body as Record<
+          string,
+          unknown
+        >
+      ).acknowledgeLineageConflicts,
+    ).toBe(true);
+  });
+
+  it('cannot be confirmed when the preview is refused, and shows a stale history', async () => {
+    base({
+      [`GET ${VM_PATH}/versions/${SNAP_A}/promotion`]: promotionPreview({
+        refusal: { code: 'version_in_use', message: 'A copy of a removed version is in use.' },
+      }),
+    });
+    const tree = await history();
+    fireEvent.click(
+      within(tree).getByRole('button', { name: 'Promote Win98_202601010001 to master' }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: /to master/ });
+    expect(await within(dialog).findByText(/A copy of a removed version is in use/)).toBeTruthy();
+    expect(
+      (within(dialog).getByRole('button', { name: 'Promote to master' }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it('keeps the dialog open with the reason when the history changed meanwhile', async () => {
+    base({
+      [`GET ${VM_PATH}/versions/${SNAP_A}/promotion`]: promotionPreview(),
+      [`POST ${VM_PATH}/versions/${SNAP_A}/promotion`]: apiError(
+        409,
+        'version_history_stale',
+        'The version history changed since it was shown.',
+      ),
+    });
+    const tree = await history();
+    fireEvent.click(
+      within(tree).getByRole('button', { name: 'Promote Win98_202601010001 to master' }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: /to master/ });
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Promote to master' }));
+    expect(await within(dialog).findByText(/changed since it was shown/)).toBeTruthy();
+  });
+});
+
+describe('remastering from a local copy', () => {
+  function localPreview(): RemasterPreview {
+    return promotionPreview({
+      kind: 'local_copy',
+      promoted: null,
+      retained: [],
+      removed: [
+        brief(MASTER, null, 0),
+        brief(SNAP_A, MASTER, 1),
+        brief(SNAP_B, MASTER, 2),
+        brief(SNAP_C, SNAP_A, 3),
+      ],
+      source: {
+        agentId: AGENT_ID,
+        agentName: 'Study PC',
+        online: true,
+        sourceName: 'Win98',
+        machineUuid: null,
+        localSourceVersionId: SNAP_B,
+        contentStatus: 'modified',
+      },
+    });
+  }
+
+  it('needs the exact VM name typed, then follows each phase', async () => {
+    const api = base({
+      [`GET ${VM_PATH}/remaster/local`]: localPreview(),
+      [`POST ${VM_PATH}/remaster/local`]: remasterOperation({
+        kind: 'local_copy',
+        state: 'exporting',
+        phase: 'uploading',
+        newMasterVersionId: null,
+        agentId: AGENT_ID,
+        agentName: 'Study PC',
+        progress: { doneBytes: 25, totalBytes: 100 },
+      }),
+      [`GET /admin/remasters/${REMASTER_ID}`]: remasterOperation({
+        kind: 'local_copy',
+        state: 'exporting',
+        phase: 'uploading',
+        newMasterVersionId: null,
+        agentId: AGENT_ID,
+        agentName: 'Study PC',
+        progress: { doneBytes: 25, totalBytes: 100 },
+      }),
+    });
+    await history();
+    fireEvent.click(screen.getByRole('button', { name: 'Remaster from local copy…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Remaster from a local copy' });
+    expect(await within(dialog).findByText(/Permanently deleted \(4/)).toBeTruthy();
+    expect(api.callsTo('GET', `${VM_PATH}/remaster/local`)[0]?.query.get('agentId')).toBe(AGENT_ID);
+    const confirm = within(dialog).getByRole('button', {
+      name: 'Replace the history',
+    }) as HTMLButtonElement;
+    const name = within(dialog).getByLabelText(/to confirm/);
+    fireEvent.change(name, { target: { value: 'win98' } });
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(name, { target: { value: 'Win98' } });
+    expect(confirm.disabled).toBe(false);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(api.callsTo('POST', `${VM_PATH}/remaster/local`)).toHaveLength(1));
+    expect(api.callsTo('POST', `${VM_PATH}/remaster/local`)[0]?.body).toMatchObject({
+      agentId: AGENT_ID,
+      expectedRevision: REVISION,
+      confirmVmName: 'Win98',
+    });
+    const progress = await screen.findByText(/Remaster from a local copy/, { selector: 'strong' });
+    const status = progress.closest('[role="status"]') as HTMLElement;
+    expect(within(status).getByText(/Uploading \(25%\)/)).toBeTruthy();
+    expect(within(status).getByText('Committing new master')).toBeTruthy();
+  });
+
+  it('shows a failed cleanup with its reason and retries it', async () => {
+    const failing = remasterOperation({
+      cleanup: {
+        total: 2,
+        deleted: 1,
+        complete: false,
+        items: [
+          {
+            versionId: SNAP_B,
+            label: 'Win98_202601010002',
+            state: 'deleting',
+            archiveOutcome: null,
+            attempts: 2,
+            error: { code: 'repository_unavailable', message: 'The NAS did not answer.' },
+          },
+        ],
+      },
+    });
+    const api = base({
+      [`GET ${VM_PATH}/remasters`]: { remasters: [failing] },
+      [`GET /admin/remasters/${REMASTER_ID}`]: failing,
+      [`POST /admin/remasters/${REMASTER_ID}/cleanup/retry`]: failing,
+    });
+    await history();
+    expect(await screen.findByText(/The NAS did not answer/)).toBeTruthy();
+    expect(screen.getByText(/1 of 2 obsolete archives deleted/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry cleanup now' }));
+    await waitFor(() =>
+      expect(api.callsTo('POST', `/admin/remasters/${REMASTER_ID}/cleanup/retry`)).toHaveLength(1),
     );
   });
 });

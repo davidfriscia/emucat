@@ -112,6 +112,17 @@ import {
   type LocalCopyRemovalListResponse,
   type VersionDeletion,
   type VersionDeletionListResponse,
+  remasterListResponseSchema,
+  remasterOperationSchema,
+  remasterPreviewSchema,
+  versionDetailsSchema,
+  type LocalRemasterRequest,
+  type PromoteSnapshotRequest,
+  type RemasterListResponse,
+  type RemasterOperation,
+  type RemasterPreview,
+  type UpdateVersionDetailsRequest,
+  type VersionDetails,
 } from '@emucat/contracts';
 
 /**
@@ -854,6 +865,92 @@ export function fetchVersionDeletions(
     versionDeletionListResponseSchema,
     { signal },
   );
+}
+
+/** Edits a version's title and description. Nothing else about the version changes (decision 0048). */
+export function updateVersionDetails(
+  vm: VmIdentity,
+  versionId: string,
+  request: UpdateVersionDetailsRequest,
+): Promise<VersionDetails> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${versionId}`,
+    versionDetailsSchema,
+    {
+      method: 'PATCH',
+      body: request,
+    },
+  );
+}
+
+/** What promoting a snapshot to master would keep and remove, and the history it was worked out from. */
+export function fetchPromotionPreview(
+  vm: VmIdentity,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<RemasterPreview> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${versionId}/promotion`,
+    remasterPreviewSchema,
+    { signal },
+  );
+}
+
+export function promoteSnapshot(
+  vm: VmIdentity,
+  versionId: string,
+  request: PromoteSnapshotRequest,
+): Promise<RemasterOperation> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${versionId}/promotion`,
+    remasterOperationSchema,
+    { method: 'POST', body: request },
+  );
+}
+
+/** What replacing the whole history with one agent's local copy would remove. */
+export function fetchLocalRemasterPreview(
+  vm: VmIdentity,
+  agentId: string,
+  signal?: AbortSignal,
+): Promise<RemasterPreview> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/remaster/local${queryString({ agentId })}`,
+    remasterPreviewSchema,
+    { signal },
+  );
+}
+
+export function remasterFromLocalCopy(
+  vm: VmIdentity,
+  request: LocalRemasterRequest,
+): Promise<RemasterOperation> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/remaster/local`, remasterOperationSchema, {
+    method: 'POST',
+    body: request,
+  });
+}
+
+export function fetchRemasters(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<RemasterListResponse> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/remasters`, remasterListResponseSchema, {
+    signal,
+  });
+}
+
+export function fetchRemaster(
+  remasterId: string,
+  signal?: AbortSignal,
+): Promise<RemasterOperation> {
+  return requestJson(`/admin/remasters/${remasterId}`, remasterOperationSchema, { signal });
+}
+
+export function retryRemasterCleanup(remasterId: string): Promise<RemasterOperation> {
+  return requestJson(`/admin/remasters/${remasterId}/cleanup/retry`, remasterOperationSchema, {
+    method: 'POST',
+  });
 }
 
 /** Lets a held remote session go on, once its emulator is known not to run. */

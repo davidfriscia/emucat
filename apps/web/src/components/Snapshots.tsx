@@ -8,6 +8,7 @@ import { useCallback, useState } from 'react';
 import { createSnapshot, fetchRegistration } from '../api';
 import { usePolledData } from '../usePolledData';
 import { ConfirmDialog } from './Dialogs';
+import { VersionDetailsFields } from './Remaster';
 
 const ACTIVE_POLL_MS = 1_500;
 
@@ -109,6 +110,8 @@ export function CreateSnapshotDialog({
   onStarted: (operation: RegistrationOperation) => void;
 }) {
   const [requestId] = useState(() => crypto.randomUUID());
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
   return (
     <ConfirmDialog
       title={`Create a snapshot from ${request.agentName}`}
@@ -119,6 +122,9 @@ export function CreateSnapshotDialog({
           agentId: request.agentId,
           parentVersionId: request.parentVersionId,
           requestId,
+          // Only what was given: both are optional, and neither is ever made up.
+          ...(title.trim() ? { title } : {}),
+          ...(description.trim() ? { description } : {}),
         });
         onStarted(operation);
       }}
@@ -145,6 +151,14 @@ export function CreateSnapshotDialog({
           <p className="mb-0">The VM must not be running on that agent.</p>
         </>
       )}
+      <div className="mt-3">
+        <VersionDetailsFields
+          title={title}
+          description={description}
+          onTitle={setTitle}
+          onDescription={setDescription}
+        />
+      </div>
     </ConfirmDialog>
   );
 }

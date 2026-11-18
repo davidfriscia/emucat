@@ -254,7 +254,8 @@ function requestFor(
       operationId: row.id,
       emulatorType: filesystemOnly(row.emulator_type),
       vmName: row.vm_name,
-      mode: row.mode,
+      // A remaster is a copy to the agent: it exports and keeps its copy. Only the commit differs (decision 0048).
+      mode: row.mode === 'remaster' ? 'copy' : row.mode,
       repositoryId: row.repository_id,
       versionId: row.version_id,
       archiveKey: row.archive_key,
@@ -288,6 +289,9 @@ export interface SnapshotInput {
   requestId: string;
   /** Preserve this Remote Snapshot working copy, rather than the persistent local VM. */
   workspaceId?: string | undefined;
+  /** The new snapshot's title and description, already normalized (decision 0048). */
+  title?: string | null | undefined;
+  description?: string | null | undefined;
 }
 
 const FAILURE_TEXT: Record<string, string> = {
@@ -350,9 +354,18 @@ export class RegistrationCoordinator {
     if (agentId) this.onVirtualBoxRegistered(agentId);
   }
 
+  /** Commits remasters (decision 0048). Without it, a remaster's registration is refused at its commit. */
+  remasters: import('../versions/remaster.js').RemasterCommitter | null = null;
+
   close(): void {
     for (const timer of this.healthTimers.values()) clearTimeout(timer);
     this.healthTimers.clear();
+  }
+
+  /** Sends a queued operation's request, once its row exists. Undelivered, it goes out at the next welcome. */
+  async dispatchOperation(agentId: string, operationId: string): Promise<void> {
+    const row = await this.rowFor(agentId, operationId);
+    if (row?.state === 'queued') this.dispatch(requestFor(row), agentId);
   }
 
   // What an administrator does.
@@ -643,9 +656,9 @@ export class RegistrationCoordinator {
         await connection.execute(
           `INSERT INTO registration_operations
              (id, agent_id, repository_id, requested_by_user_id, request_id, emulator_type, vm_name,
-              virtualbox_uuid, mode, version_id, parent_version_id, snapshot_name, workspace_id,
-              archive_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot', ?, ?, ?, ?, ?)`,
+              virtualbox_uuid, mode, version_id, parent_version_id, snapshot_name, snapshot_title,
+              snapshot_description, workspace_id, archive_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'snapshot', ?, ?, ?, ?, ?, ?, ?)`,
           [
             operationId,
             agentId,
@@ -658,6 +671,8 @@ export class RegistrationCoordinator {
             versionId,
             parentVersionId,
             formatSnapshotName(canonicalName, new Date()),
+            input.title ?? null,
+            input.description ?? null,
             workspaceId,
             archiveObjectKey({ emulatorType: vm.emulatorType, vmName: canonicalName }, versionId),
           ],
@@ -1273,7 +1288,10 @@ export class RegistrationCoordinator {
       const outcome = await this.commitIn(connection, operationId);
       await connection.commit();
       if (outcome.outcome === 'rejected') await this.notifyWorkspace(operationId);
-      if (outcome.outcome === 'committed') await this.notifyVirtualBox(operationId);
+      if (outcome.outcome === 'committed') {
+        await this.notifyVirtualBox(operationId);
+        await this.notifyRemaster(operationId);
+      }
       return outcome;
     } catch (error) {
       await connection.rollback();
@@ -1285,6 +1303,21 @@ export class RegistrationCoordinator {
       throw error;
     } finally {
       connection.release();
+    }
+  }
+
+  /** A remaster's obsolete archives go once its new master is durable. A missed call is retried by the sweep. */
+  private async notifyRemaster(operationId: string): Promise<void> {
+    if (!this.remasters) return;
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT 1 FROM registration_operations WHERE id = ? AND mode = 'remaster'`,
+      [operationId],
+    );
+    if (rows.length === 0) return;
+    try {
+      await this.remasters.committed(operationId);
+    } catch (error) {
+      this.log.error({ err: error, operationId }, 'Cannot start a remaster’s cleanup');
     }
   }
 
@@ -1346,6 +1379,21 @@ export class RegistrationCoordinator {
 
     if (row.mode === 'snapshot') {
       await this.commitSnapshotIn(connection, row);
+      return committed;
+    }
+    if (row.mode === 'remaster') {
+      // The new master replaces every version of the VM, in this transaction (decision 0048).
+      const problem = this.remasters
+        ? await this.remasters.commitIn(connection, row)
+        : { code: 'internal_error', message: 'This server cannot commit remasters.' };
+      if (problem) return refuse('failed', problem.code, problem.message);
+      await connection.execute(
+        `UPDATE registration_operations
+         SET state = 'cleaning_local', committed_at = UTC_TIMESTAMP(3),
+             progress_done_bytes = NULL, progress_total_bytes = NULL
+         WHERE id = ?`,
+        [operationId],
+      );
       return committed;
     }
 
@@ -1442,15 +1490,18 @@ export class RegistrationCoordinator {
   private async commitSnapshotIn(connection: PoolConnection, row: RowDataPacket): Promise<void> {
     await connection.execute(
       `INSERT INTO vm_versions
-         (id, emulator_type, vm_name, kind, parent_version_id, snapshot_name, repository_id,
-          archive_key, archive_sha256, archive_size_bytes, created_by_agent_id, created_by_user_id)
-       VALUES (?, ?, ?, 'snapshot', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, emulator_type, vm_name, kind, parent_version_id, snapshot_name, title, description,
+          repository_id, archive_key, archive_sha256, archive_size_bytes, created_by_agent_id,
+          created_by_user_id)
+       VALUES (?, ?, ?, 'snapshot', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.version_id,
         row.emulator_type,
         row.vm_name,
         row.parent_version_id,
         row.snapshot_name,
+        row.snapshot_title ?? null,
+        row.snapshot_description ?? null,
         row.repository_id,
         row.archive_key,
         row.archive_sha256,

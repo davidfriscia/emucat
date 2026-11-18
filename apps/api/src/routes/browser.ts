@@ -18,6 +18,7 @@ import type { ExecutionCoordinator } from '../execution/coordinator.js';
 import type { MediaPolicy } from '../media/uploads.js';
 import type { RegistrationCoordinator, RegistrationPolicy } from '../registration/coordinator.js';
 import type { RestoreCoordinator } from '../restore/coordinator.js';
+import type { RemasterCoordinator } from '../versions/remaster.js';
 import type { MediaStorage } from '../storage/media-storage.js';
 import type { RemoteSessionOptions, WorkspaceCoordinator } from '../workspaces/coordinator.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
@@ -70,7 +71,11 @@ export async function registerBrowserRoutes(
   captures: import('../execution/captures.js').CaptureCoordinator,
   workspaces: WorkspaceCoordinator,
   virtualbox: VirtualBoxManagement,
-  cleanup: { removals: LocalCopyRemovalCoordinator; deletions: VersionDeletionCoordinator },
+  cleanup: {
+    removals: LocalCopyRemovalCoordinator;
+    deletions: VersionDeletionCoordinator;
+    remasters?: RemasterCoordinator;
+  },
   authenticateAgent: AgentAuthenticator,
 ): Promise<void> {
   await api.register(cookie);
@@ -88,7 +93,14 @@ export async function registerBrowserRoutes(
   registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
   registerAdminRestoreRoutes(api, dependencies, restores);
   registerAdminExecutionRoutes(api, dependencies, execution, captures);
-  registerAdminVersionRoutes(api, dependencies, registrations, workspaces, cleanup.deletions);
+  registerAdminVersionRoutes(
+    api,
+    dependencies,
+    registrations,
+    workspaces,
+    cleanup.deletions,
+    cleanup.remasters ?? null,
+  );
   registerAdminCleanupRoutes(api, dependencies, cleanup.removals, cleanup.deletions);
   registerAdminSystemRoutes(api, dependencies);
   registerAdminVirtualBoxRoutes(api, dependencies, virtualbox);

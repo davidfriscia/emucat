@@ -6,6 +6,7 @@ import type {
   VmIdentity,
 } from '@emucat/contracts';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
+import { graphRevision, type GraphVersion } from './graph.js';
 
 /** Whether each version could be deleted now. Without one, nothing is offered for deletion. */
 export interface DeletabilitySource {
@@ -25,13 +26,16 @@ export async function versionTree(
   deletions: DeletabilitySource | null = null,
 ): Promise<VersionTreeResponse> {
   // A deleted snapshot leaves the tree; one being deleted stays, marked, until its archive is gone. Only
-  // leaves are deleted, so what remains is still a tree (decision 0041).
-  const [rows] = await pool.execute<RowDataPacket[]>(
+  // leaves are deleted, so what remains is still a tree (decision 0041). A version a remaster made obsolete
+  // leaves it at once, and its cleanup is the remaster's to show (decision 0048).
+  const [all] = await pool.execute<RowDataPacket[]>(
     `SELECT version.id, version.vm_name, version.kind, version.parent_version_id,
-            version.snapshot_name, version.created_at, version.archive_size_bytes,
+            version.snapshot_name, version.title, version.description, version.promoted_at,
+            version.retired_at, version.created_at, version.archive_size_bytes,
             version.archive_sha256, r.name AS repository_name, r.enabled AS repository_enabled,
             a.name AS agent_name, u.display_name AS user_display_name,
             reg.manifest_sha256, reg.file_count, reg.total_uncompressed_bytes,
+            d.state AS deletion_state, d.remaster_operation_id AS deletion_remaster_id,
             d.requested_at AS deletion_requested_at, d.attempts AS deletion_attempts,
             d.error_code AS deletion_error_code, d.error_message AS deletion_error_message
      FROM vm_versions AS version
@@ -41,10 +45,38 @@ export async function versionTree(
      LEFT JOIN registration_operations AS reg ON reg.version_id = version.id
      LEFT JOIN vm_version_deletions AS d ON d.version_id = version.id
      WHERE version.emulator_type = ? AND version.vm_name = ?
-       AND (d.state IS NULL OR d.state <> 'deleted')
      ORDER BY version.created_at, version.id`,
     [vm.emulatorType, vm.vmName],
   );
+  const revision = graphRevision(
+    all.map(
+      (row) =>
+        ({
+          id: row.id as string,
+          kind: row.kind as GraphVersion['kind'],
+          parentVersionId: (row.parent_version_id as string | null) ?? null,
+          retired: row.retired_at !== null,
+          deletion: (row.deletion_state as GraphVersion['deletion']) ?? null,
+        }) as GraphVersion,
+    ),
+  );
+  // What is drawn: live versions, and leaves still being deleted whose parent is drawn too.
+  const live = all.filter((row) => row.deletion_state === null || row.deletion_state === undefined);
+  const drawn = new Set(live.map((row) => row.id as string));
+  const leaving = all.filter(
+    (row) => row.deletion_state === 'deleting' && row.deletion_remaster_id === null,
+  );
+  for (let added = true; added;) {
+    added = false;
+    for (const row of leaving) {
+      const parent = row.parent_version_id as string | null;
+      if (!drawn.has(row.id as string) && parent !== null && drawn.has(parent)) {
+        drawn.add(row.id as string);
+        added = true;
+      }
+    }
+  }
+  const rows = all.filter((row) => drawn.has(row.id as string));
   const deletable = (await deletions?.deletability(vm)) ?? new Map<string, VersionDeletability>();
 
   const holders = new Map<string, VersionHolder[]>();
@@ -98,7 +130,10 @@ export async function versionTree(
     parentVersionId: (row.parent_version_id as string | null) ?? null,
     childVersionIds: children.get(row.id as string) ?? [],
     snapshotName: (row.snapshot_name as string | null) ?? null,
+    title: (row.title as string | null) ?? null,
+    description: (row.description as string | null) ?? null,
     createdAt: (row.created_at as Date).toISOString(),
+    promotedAt: (row.promoted_at as Date | null)?.toISOString() ?? null,
     archiveSizeBytes: Number(row.archive_size_bytes),
     archiveSha256: row.archive_sha256 as string,
     manifest: row.manifest_sha256
@@ -135,7 +170,10 @@ export async function versionTree(
   return {
     emulatorType: vm.emulatorType,
     vmName: (rows[0]?.vm_name as string | undefined) ?? vm.vmName,
-    rootVersionId: versions.find((version) => version.kind === 'master')?.id ?? null,
+    rootVersionId:
+      versions.find((version) => version.kind === 'master' && version.parentVersionId === null)
+        ?.id ?? null,
+    revision,
     versions,
   };
 }

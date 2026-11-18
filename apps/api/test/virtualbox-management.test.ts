@@ -9,6 +9,8 @@ import {
   captureOperationSchema,
   PROTOCOL_VERSION,
   registrationOperationSchema,
+  remasterOperationSchema,
+  remasterPreviewSchema,
   repositorySummarySchema,
   virtualBoxManagementResponseSchema,
   virtualBoxOperationSchema,
@@ -1232,5 +1234,166 @@ describe('screenshots of a VirtualBox VM', () => {
       available: false,
       reason: 'Update the agent to enable VirtualBox screenshot capture.',
     });
+  });
+});
+
+describe('remastering a VirtualBox VM (decision 0048)', () => {
+  /** What an agent that deletes archives says after its welcome; VirtualBox OVAs only when it says so. */
+  async function archiveCapabilities(w: World, virtualBoxArchives: boolean): Promise<void> {
+    w.agent.send(
+      envelope('agent.restore_sync', {
+        operations: [],
+        capabilities: {
+          emulators: [],
+          repositoryIds: [w.repository.id],
+          cacheMaxBytes: 0,
+          cacheUsedBytes: 0,
+          deleteArchives: true,
+          ...(virtualBoxArchives ? { deleteVirtualBoxArchives: true } : {}),
+        },
+        localCopies: [],
+      }),
+    );
+    await barrier(w.agent);
+  }
+
+  async function snapshotOf(w: World, parentVersionId: string): Promise<RegistrationOperation> {
+    const response = await snapshotRequest(w, parentVersionId);
+    expect(response.statusCode, response.body).toBe(202);
+    const snapshot = registrationOperationSchema.parse(response.json());
+    await w.agent.next('server.virtualbox_registration_request');
+    await exported(w, snapshot);
+    return snapshot;
+  }
+
+  async function remasterState(w: World, id: string) {
+    const response = await w.admin.get(`/admin/remasters/${id}`);
+    expect(response.statusCode, response.body).toBe(200);
+    return remasterOperationSchema.parse(response.json());
+  }
+
+  it('promotes an OVA snapshot, and deletes the old OVA only through an agent that says it can', async () => {
+    const w = await world();
+    const master = await registered(w);
+    const snapshot = await snapshotOf(w, master.versionId);
+
+    const shown = await w.admin.get(`${VM_PATH}/versions/${snapshot.versionId}/promotion`);
+    expect(shown.statusCode, shown.body).toBe(200);
+    const preview = remasterPreviewSchema.parse(shown.json());
+    expect(preview.removed.map((version) => version.id)).toEqual([master.versionId]);
+    expect(preview.retained.map((version) => version.id)).toEqual([snapshot.versionId]);
+    // The linked machine comes from the snapshot, which is kept: no copy loses its lineage.
+    expect(preview.lineageConflicts).toEqual([]);
+    expect(preview.cleanupAvailable).toBe(false);
+
+    const response = await w.admin.request({
+      method: 'POST',
+      url: `${VM_PATH}/versions/${snapshot.versionId}/promotion`,
+      payload: { requestId: randomUUID(), expectedRevision: preview.revision },
+    });
+    expect(response.statusCode, response.body).toBe(202);
+    const promoted = remasterOperationSchema.parse(response.json());
+    const [row] = await rows(w, 'SELECT * FROM vm_versions WHERE id = ?', [snapshot.versionId]);
+    expect(row).toMatchObject({ kind: 'master', parent_version_id: null, archive_sha256: SHA });
+    expect(row?.archive_key).toBe(snapshot.archiveKey);
+
+    // An agent that deletes archives, but has not said it can delete an OVA, is never asked to.
+    await archiveCapabilities(w, false);
+    await expect(w.agent.next('server.archive_delete', 300)).rejects.toThrow(/Timed out/);
+    expect((await remasterState(w, promoted.id)).state).toBe('cleaning');
+
+    await archiveCapabilities(w, true);
+    const attempt = await w.agent.next('server.archive_delete');
+    expect(attempt.payload).toMatchObject({
+      versionId: master.versionId,
+      emulatorType: 'virtualbox',
+      archiveKey: master.archiveKey,
+    });
+    expect(master.archiveKey).toBe(`archives/virtualbox/${VM_NAME}/${master.versionId}.ova`);
+    w.agent.send(
+      envelope('agent.archive_delete_result', {
+        operationId: attempt.payload.operationId,
+        versionId: master.versionId,
+        outcome: 'deleted',
+        code: null,
+        message: null,
+      }),
+    );
+    await barrier(w.agent);
+    await waitFor(
+      async () => ((await remasterState(w, promoted.id)).state === 'completed' ? true : undefined),
+      'the cleanup to finish',
+    );
+    // The machine is still linked, to the version that is now the master.
+    expect((await overview(w)).sourceVersionId).toBe(snapshot.versionId);
+  });
+
+  it('exports the linked machine, powered off, as a new master that stays linked to it', async () => {
+    const w = await world();
+    const master = await registered(w);
+    const snapshot = await snapshotOf(w, master.versionId);
+    const local = (url = `${VM_PATH}/remaster/local?agentId=${w.paired.agentId}`) =>
+      w.admin.get(url);
+
+    await observe(w, [observation({ state: 'running', rawState: 'running' })]);
+    let shown = await local();
+    expect(shown.statusCode, shown.body).toBe(200);
+    expect(remasterPreviewSchema.parse(shown.json()).refusal?.code).toBe('vm_running');
+
+    await observe(w, [observation()]);
+    shown = await local();
+    const preview = remasterPreviewSchema.parse(shown.json());
+    expect(preview.refusal).toBeNull();
+    expect(preview.source).toMatchObject({ machineUuid: MACHINE });
+    expect(preview.removed.map((version) => version.id).sort()).toEqual(
+      [master.versionId, snapshot.versionId].sort(),
+    );
+
+    const request = (body: object) =>
+      w.admin.request({
+        method: 'POST',
+        url: `${VM_PATH}/remaster/local`,
+        payload: {
+          agentId: w.paired.agentId,
+          requestId: randomUUID(),
+          expectedRevision: preview.revision,
+          ...body,
+        },
+      });
+    expect(errorCode(await request({ confirmVmName: 'Xenix-386' }))).toBe('confirmation_mismatch');
+    const response = await request({ confirmVmName: VM_NAME });
+    expect(response.statusCode, response.body).toBe(202);
+    const remaster = remasterOperationSchema.parse(response.json());
+    expect(remaster.state).toBe('exporting');
+
+    // The same export as a master: by UUID, of the machine that is linked, never a VirtualBox snapshot.
+    const exportRequest = await w.agent.next('server.virtualbox_registration_request');
+    expect(exportRequest.payload).toMatchObject({ machineUuid: MACHINE, vmName: VM_NAME });
+    const newMasterId = exportRequest.payload.versionId as string;
+    expect(exportRequest.payload.archiveKey).toBe(
+      `archives/virtualbox/${VM_NAME}/${newMasterId}.ova`,
+    );
+    // Nothing has changed yet: the old history is whole until the new OVA is committed.
+    expect(
+      await rows(w, 'SELECT 1 FROM vm_version_deletions WHERE vm_name = ?', [VM_NAME]),
+    ).toEqual([]);
+
+    const registration = registrationOperationSchema.parse(
+      (await w.admin.get(`/admin/registrations/${remaster.registrationOperationId}`)).json(),
+    );
+    await exported(w, registration);
+    const [created] = await rows(w, 'SELECT * FROM vm_versions WHERE id = ?', [newMasterId]);
+    expect(created).toMatchObject({ kind: 'master', parent_version_id: null, retired_at: null });
+    expect((await remasterState(w, remaster.id)).state).toBe('cleaning');
+    const removed = await rows(w, 'SELECT version_id FROM vm_version_deletions WHERE vm_name = ?', [
+      VM_NAME,
+    ]);
+    expect(removed.map((item) => String(item.version_id)).sort()).toEqual(
+      [master.versionId, snapshot.versionId].sort(),
+    );
+    // The machine keeps its UUID association, now with the new master.
+    const linked = await overview(w);
+    expect(linked.source?.machineUuid).toBe(MACHINE);
+    expect(linked.sourceVersionId).toBe(newMasterId);
   });
 });

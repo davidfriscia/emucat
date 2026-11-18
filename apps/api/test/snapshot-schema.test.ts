@@ -141,7 +141,10 @@ describe('snapshot operations', () => {
   });
 
   it('refuses an unknown mode', async () => {
-    await expect(insertOperation({ mode: 'incremental' })).rejects.toThrow(/ck_registration_mode/);
+    // Without a snapshot's parent and name, so that only the mode is wrong.
+    await expect(
+      insertOperation({ mode: 'incremental', parent: null, snapshotName: null }),
+    ).rejects.toThrow(/ck_registration_mode/);
   });
 
   it('makes a request ID unique, so a retry cannot create a second snapshot', async () => {

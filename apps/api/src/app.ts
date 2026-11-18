@@ -8,6 +8,7 @@ import type { AgentAuthenticator } from './auth/agent-auth.js';
 import { registerErrorHandling } from './errors.js';
 import { LocalCopyRemovalCoordinator } from './cleanup/local-removals.js';
 import { VersionDeletionCoordinator } from './cleanup/version-deletions.js';
+import { RemasterCoordinator } from './versions/remaster.js';
 import { ExecutionCoordinator } from './execution/coordinator.js';
 import { RegistrationCoordinator } from './registration/coordinator.js';
 import { RestoreCoordinator } from './restore/coordinator.js';
@@ -184,6 +185,22 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         // Deleting archives is retried by itself until the repository confirms.
         deletions.start();
         app.addHook('onClose', () => deletions.close());
+        // Remastering a VM (decision 0048): its commits happen inside registrations' and its cleanups are
+        // version deletions. The sweep settles exports that ended, and cleanups that finished.
+        const remasters = new RemasterCoordinator(
+          browser.pool,
+          {
+            isOnline: (agentId) => hub.isOnline(agentId),
+            isRegistrationCapable: (agentId) => hub.isRegistrationCapable(agentId),
+            isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
+          },
+          app.log,
+          deletions,
+          registrations,
+        );
+        registrations.remasters = remasters;
+        remasters.start();
+        app.addHook('onClose', () => remasters.close());
         await api.register(async (scope) =>
           registerBrowserRoutes(
             scope,
@@ -195,7 +212,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             captures,
             workspaces,
             virtualboxManagement,
-            { removals, deletions },
+            { removals, deletions, remasters },
             dependencies.authenticateAgent,
           ),
         );

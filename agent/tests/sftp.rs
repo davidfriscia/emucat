@@ -979,7 +979,7 @@ async fn deleting_a_snapshot_archive_removes_that_object_only_and_can_be_repeate
     let mut request = ArchiveDelete {
         operation_id: Uuid::new_v4(),
         version_id: Uuid::new_v4(),
-        emulator_type: EmulatorType::Qemu,
+        emulator_type: EmulatorType::Qemu.into(),
         vm_name: VmName::new("Clean Me").unwrap(),
         repository_id,
         archive_key: String::new(),

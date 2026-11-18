@@ -236,7 +236,11 @@ export const archiveDeletePayloadSchema = z.strictObject({
   /** This attempt. A new one is issued for each attempt. */
   operationId: z.uuid(),
   versionId: z.uuid(),
-  emulatorType: filesystemEmulatorTypeSchema,
+  /**
+   * A `virtualbox` version's archive is its OVA. Only sent to an agent that says `deleteVirtualBoxArchives`
+   * (decision 0048): an older one could not read this message.
+   */
+  emulatorType: emulatorTypeSchema,
   vmName: vmNameSchema,
   repositoryId: z.uuid(),
   archiveKey: z.string().min(1).max(512),

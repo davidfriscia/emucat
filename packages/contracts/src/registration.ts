@@ -10,9 +10,16 @@ import { vmNameSchema } from './vm-name.js';
  * local check has passed again. See decision 0015. Snapshot archives a registered VM again, as a new
  * immutable version whose parent is the version its local files came from. See decision 0037.
  */
-export const REGISTRATION_MODES = ['copy', 'transfer', 'snapshot'] as const;
+export const REGISTRATION_MODES = ['copy', 'transfer', 'snapshot', 'remaster'] as const;
 export const registrationModeSchema = z.enum(REGISTRATION_MODES);
 export type RegistrationMode = z.infer<typeof registrationModeSchema>;
+
+/**
+ * What an agent is told to do. A remaster (decision 0048) is a copy, as far as the agent is concerned: it exports
+ * its local copy as a new master and keeps it. Only the server's commit differs, so no agent needs to know.
+ */
+export const AGENT_REGISTRATION_MODES = ['copy', 'transfer', 'snapshot'] as const;
+export const agentRegistrationModeSchema = z.enum(AGENT_REGISTRATION_MODES);
 
 /** What a registration of an unregistered VM can be. Snapshots have their own request. */
 export const MASTER_REGISTRATION_MODES = ['copy', 'transfer'] as const;
@@ -217,7 +224,7 @@ export const registrationRequestPayloadSchema = z
     operationId: z.uuid(),
     emulatorType: filesystemEmulatorTypeSchema,
     vmName: vmNameSchema,
-    mode: registrationModeSchema,
+    mode: agentRegistrationModeSchema,
     repositoryId: z.uuid(),
     versionId: z.uuid(),
     archiveKey: z.string().min(1).max(512),
@@ -571,6 +578,7 @@ export type RegistrationOperation = z.infer<typeof registrationOperationSchema>;
 
 /** What a registration produces: a master for Copy and Transfer, a snapshot otherwise. */
 export function registrationVersionKind(mode: RegistrationMode): 'master' | 'snapshot' {
+  // A remaster makes a master too: the new one, which replaces every earlier version.
   return mode === 'snapshot' ? 'snapshot' : 'master';
 }
 

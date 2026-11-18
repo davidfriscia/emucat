@@ -245,6 +245,8 @@ export const restoreSyncPayloadSchema = z.object({
     removeLocal: z.boolean().optional(),
     /** Whether the agent can delete a version's archive from a repository (decision 0041). */
     deleteArchives: z.boolean().optional(),
+    /** Whether it can also delete a VirtualBox version's OVA (decision 0048). Older agents do not say. */
+    deleteVirtualBoxArchives: z.boolean().optional(),
   }),
   localCopies: z
     .array(

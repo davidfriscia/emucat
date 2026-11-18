@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { versionDeletabilitySchema } from './cleanup.js';
 import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
+import { versionDescriptionSchema, versionTitleSchema } from './version-details.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
 
@@ -40,9 +41,17 @@ export const versionNodeSchema = z.object({
   kind: versionKindSchema,
   parentVersionId: z.uuid().nullable(),
   childVersionIds: z.array(z.uuid()),
-  /** `VM_NAME_YYYYMMDDhhmm` for a snapshot. A label, never unique. */
+  /**
+   * `VM_NAME_YYYYMMDDhhmm` for a snapshot. A label, never unique. A snapshot promoted to master keeps its own.
+   */
   snapshotName: z.string().nullable(),
+  /** An administrator's title and description, plain text. Never generated. */
+  title: z.string().nullable().default(null),
+  description: z.string().nullable().default(null),
+  /** When the archive was made. A promotion never changes it. */
   createdAt: timestampSchema,
+  /** When this version, then a snapshot, became the master (decision 0048). */
+  promotedAt: timestampSchema.nullable().default(null),
   archiveSizeBytes: safeSizeSchema,
   archiveSha256: sha256HexSchema,
   /** What the agent verified when it published the archive, when that is recorded. */
@@ -80,6 +89,11 @@ export const versionTreeResponseSchema = z.object({
   emulatorType: emulatorTypeSchema,
   vmName: z.string(),
   rootVersionId: z.uuid().nullable(),
+  /**
+   * Identifies this exact history: which versions there are, their parents and which is the master. A remaster
+   * names the one it was confirmed against, and is refused if the history changed since (decision 0048).
+   */
+  revision: sha256HexSchema.optional(),
   /** Oldest first. Parents always come before their children. */
   versions: z.array(versionNodeSchema),
 });
@@ -188,8 +202,11 @@ export const createSnapshotRequestSchema = z.strictObject({
   parentVersionId: z.uuid(),
   /** Chosen by the browser, so that a repeated click or a retried request creates one snapshot. */
   requestId: z.uuid(),
+  /** The new snapshot's title and description, both optional plain text (decision 0048). */
+  title: versionTitleSchema.optional(),
+  description: versionDescriptionSchema.optional(),
 });
-export type CreateSnapshotRequest = z.infer<typeof createSnapshotRequestSchema>;
+export type CreateSnapshotRequest = z.input<typeof createSnapshotRequestSchema>;
 
 export const SNAPSHOT_INELIGIBLE_REASONS = [
   'agent_revoked',

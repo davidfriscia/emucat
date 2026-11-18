@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  REMASTER_REFUSAL_TEXT,
   SNAPSHOT_DELETE_REFUSAL_TEXT,
   VERSION_DELETED_TEXT,
   type ArchiveDeletePayload,
@@ -14,7 +15,6 @@ import {
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { ApiError } from '../errors.js';
-import { isFilesystemEmulatorType } from '@emucat/contracts';
 import type { CleanupLink } from './local-removals.js';
 
 /** "Record has changed since last read": a locking read found a row newer than the read view. */
@@ -31,14 +31,29 @@ export async function lockUsableVersion(
   versionId: string,
 ): Promise<void> {
   try {
-    await connection.execute('SELECT id FROM vm_versions WHERE id = ? LOCK IN SHARE MODE', [
-      versionId,
-    ]);
+    const [versions] = await connection.execute<RowDataPacket[]>(
+      'SELECT emulator_type, vm_name FROM vm_versions WHERE id = ? LOCK IN SHARE MODE',
+      [versionId],
+    );
     const [tombstones] = await connection.execute<RowDataPacket[]>(
       'SELECT 1 FROM vm_version_deletions WHERE version_id = ? LOCK IN SHARE MODE',
       [versionId],
     );
     if (tombstones.length > 0) throw new ApiError(409, 'version_deleted', VERSION_DELETED_TEXT);
+    // While a local copy is exported to replace every version of this VM, none gains a new reference: its
+    // commit makes them all obsolete (decision 0048). The export took every version's lock exclusively
+    // before it was recorded, so either it saw this reference, or this sees it.
+    const version = versions[0];
+    if (version) {
+      const [remasters] = await connection.execute<RowDataPacket[]>(
+        `SELECT 1 FROM vm_remaster_operations
+         WHERE emulator_type = ? AND vm_name = ? AND active_marker = 1 LOCK IN SHARE MODE`,
+        [version.emulator_type, version.vm_name],
+      );
+      if (remasters.length > 0) {
+        throw new ApiError(409, 'remaster_in_progress', REMASTER_REFUSAL_TEXT.remaster_in_progress);
+      }
+    }
   } catch (error) {
     // With snapshot isolation (MariaDB 11.6 and later), a locking read of a row committed after this
     // transaction's first read is refused rather than returned. Versions never change, so the row is
@@ -150,6 +165,11 @@ export class VersionDeletionCoordinator {
     this.options = { ...DEFAULT_OPTIONS, ...options };
   }
 
+  /** How long a new tombstone waits for its first attempt before the sweep sends one. */
+  get firstRetryDelayMs(): number {
+    return this.options.retryBaseMs;
+  }
+
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
@@ -164,8 +184,14 @@ export class VersionDeletionCoordinator {
     await this.sweeping;
   }
 
-  /** An online agent that can delete from this repository, or `null`. */
-  async deleterFor(repositoryId: string): Promise<string | null> {
+  /**
+   * An online agent that can delete from this repository, or `null`. A VirtualBox version's OVA needs an agent
+   * that says it can delete those too (decision 0048): an older one could not read the request.
+   */
+  async deleterFor(
+    repositoryId: string,
+    emulatorType: string | null = null,
+  ): Promise<string | null> {
     const [rows] = await this.pool.execute<RowDataPacket[]>(
       `SELECT a.id FROM agents AS a
        JOIN agent_repositories AS ar ON ar.agent_id = a.id AND ar.repository_id = ?
@@ -179,6 +205,7 @@ export class VersionDeletionCoordinator {
       if (
         this.link.isOnline(agentId) &&
         capabilities?.deleteArchives === true &&
+        (emulatorType !== 'virtualbox' || capabilities.deleteVirtualBoxArchives === true) &&
         capabilities.repositoryIds.includes(repositoryId)
       ) {
         return agentId;
@@ -248,7 +275,8 @@ export class VersionDeletionCoordinator {
       if (holders.length > 0) return 'snapshot_installed';
     }
     if (!version.repository_enabled) return 'repository_unavailable';
-    if ((await this.deleterFor(version.repository_id as string)) === null) {
+    const emulatorType = (version.emulator_type as string | undefined) ?? null;
+    if ((await this.deleterFor(version.repository_id as string, emulatorType)) === null) {
       return 'repository_unavailable';
     }
     return null;
@@ -257,7 +285,8 @@ export class VersionDeletionCoordinator {
   /** Whether each listed version could be deleted now, for the version tree. */
   async deletability(vm: VmIdentity): Promise<Map<string, VersionDeletability>> {
     const [versions] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT version.id, version.kind, version.repository_id, r.enabled AS repository_enabled
+      `SELECT version.id, version.kind, version.emulator_type, version.repository_id,
+              r.enabled AS repository_enabled
        FROM vm_versions AS version
        JOIN repositories AS r ON r.id = version.repository_id
        WHERE version.emulator_type = ? AND version.vm_name = ? AND ${NOT_DELETED('version')}`,
@@ -421,6 +450,20 @@ export class VersionDeletionCoordinator {
    * Sends one attempt to an eligible agent, with a new attempt ID, and schedules the next one in case
    * no answer comes. Returns whether one was sent.
    */
+  /**
+   * Sends the first attempt for each of these tombstones, recorded by a remaster's commit (decision 0048). What
+   * is not sent now is sent by the sweep, or when an eligible agent says hello.
+   */
+  async dispatch(versionIds: readonly string[]): Promise<void> {
+    for (const versionId of versionIds) {
+      try {
+        await this.attempt(versionId);
+      } catch (error) {
+        this.log.error({ err: error, versionId }, 'Cannot send an archive deletion');
+      }
+    }
+  }
+
   private async attempt(versionId: string): Promise<boolean> {
     const [rows] = await this.pool.execute<DeletionRow[]>(
       `${DELETION_QUERY} WHERE d.version_id = ? AND d.state = 'deleting'`,
@@ -428,7 +471,7 @@ export class VersionDeletionCoordinator {
     );
     const row = rows[0];
     if (!row) return false;
-    const agentId = await this.deleterFor(row.repository_id);
+    const agentId = await this.deleterFor(row.repository_id, row.emulator_type);
     if (!agentId) {
       await this.pool.execute(
         `UPDATE vm_version_deletions
@@ -452,13 +495,11 @@ export class VersionDeletionCoordinator {
        WHERE version_id = ? AND state = 'deleting'`,
       [attemptId, agentId, attempts, this.delay(attempts) * 1000, versionId],
     );
-    // A VirtualBox master is never deleted, and VB2 has no VirtualBox snapshots (decision 0045).
-    const emulatorType = row.emulator_type as string;
-    if (!isFilesystemEmulatorType(emulatorType)) return false;
+    // A VirtualBox OVA only goes to an agent that said it can delete one: deleterFor chose such an agent.
     const payload: ArchiveDeletePayload = {
       operationId: attemptId,
       versionId,
-      emulatorType,
+      emulatorType: row.emulator_type,
       vmName: row.vm_name,
       repositoryId: row.repository_id,
       archiveKey: row.archive_key,
@@ -499,7 +540,8 @@ export class VersionDeletionCoordinator {
     const [rows] = await this.pool.execute<RowDataPacket[]>(
       `SELECT d.version_id, d.agent_id FROM vm_version_deletions AS d
        JOIN agent_repositories AS ar ON ar.repository_id = d.repository_id AND ar.agent_id = ?
-       WHERE d.state = 'deleting' AND d.repository_id IN (${ids.map(() => '?').join(', ')})`,
+       WHERE d.state = 'deleting' AND d.repository_id IN (${ids.map(() => '?').join(', ')})
+         ${capabilities.deleteVirtualBoxArchives === true ? '' : "AND d.emulator_type <> 'virtualbox'"}`,
       [agentId, ...ids],
     );
     for (const row of rows) {
@@ -515,7 +557,8 @@ export class VersionDeletionCoordinator {
     try {
       await connection.beginTransaction();
       const [rows] = await connection.execute<RowDataPacket[]>(
-        `SELECT d.state, d.attempt_id, d.attempts, ar.agent_id AS authorized
+        `SELECT d.state, d.attempt_id, d.attempts, d.remaster_operation_id,
+                ar.agent_id AS authorized
          FROM vm_version_deletions AS d
          LEFT JOIN agent_repositories AS ar ON ar.repository_id = d.repository_id AND ar.agent_id = ?
          WHERE d.version_id = ? FOR UPDATE`,
@@ -541,7 +584,18 @@ export class VersionDeletionCoordinator {
            WHERE version_id = ?`,
           [archiveOutcome, versionId],
         );
-        this.log.info({ versionId, archiveOutcome }, 'Snapshot deleted');
+        // A remaster is complete only once every archive in its deletion manifest is confirmed gone.
+        if (row.remaster_operation_id) {
+          await connection.execute(
+            `UPDATE vm_remaster_operations
+             SET state = 'completed', finished_at = UTC_TIMESTAMP(3)
+             WHERE id = ? AND state = 'cleaning'
+               AND NOT EXISTS (SELECT 1 FROM vm_version_deletions
+                               WHERE remaster_operation_id = ? AND state <> 'deleted')`,
+            [row.remaster_operation_id, row.remaster_operation_id],
+          );
+        }
+        this.log.info({ versionId, archiveOutcome }, 'Archive deleted');
       } else if (operationId === row.attempt_id) {
         // Only the current attempt's failure counts; it is retried when its delay ends.
         await connection.execute(

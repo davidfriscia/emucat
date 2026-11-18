@@ -3220,7 +3220,7 @@ impl Harness {
         emucat_agent::protocol::ArchiveDelete {
             operation_id: Uuid::new_v4(),
             version_id: self.version,
-            emulator_type: EmulatorType::Qemu,
+            emulator_type: EmulatorType::Qemu.into(),
             vm_name: self.vm_name.clone(),
             repository_id: REPOSITORY,
             archive_key: archive_key(&self.vm_name, self.version),

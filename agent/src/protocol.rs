@@ -625,6 +625,9 @@ pub struct RestoreCapabilities {
     /// This agent can delete a version's archive from a repository it is configured for (decision 0041).
     #[serde(default)]
     pub delete_archives: bool,
+    /// It can also delete a VirtualBox version's OVA (decision 0048).
+    #[serde(default, rename = "deleteVirtualBoxArchives")]
+    pub delete_virtualbox_archives: bool,
 }
 
 /// What can honestly be said about a local copy without reading it. A difference proves a change, and no
@@ -721,6 +724,27 @@ pub struct LocalCopyRemoveAck {
     pub outcome: LocalCopyRemoveAckOutcome,
 }
 
+/// Whose archive a deletion names: a directory VM's ZIP, or a VirtualBox VM's OVA (decision 0048). The server
+/// sends `virtualbox` only to an agent that says `deleteVirtualBoxArchives`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArchiveEmulatorType {
+    #[serde(rename = "86box")]
+    Box86,
+    #[serde(rename = "qemu")]
+    Qemu,
+    #[serde(rename = "virtualbox")]
+    VirtualBox,
+}
+
+impl From<EmulatorType> for ArchiveEmulatorType {
+    fn from(emulator: EmulatorType) -> Self {
+        match emulator {
+            EmulatorType::Box86 => Self::Box86,
+            EmulatorType::Qemu => Self::Qemu,
+        }
+    }
+}
+
 /// Deletes one version's archive from a repository. The agent derives the key itself, and refuses when
 /// the one sent differs, so this can never name another object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,7 +752,7 @@ pub struct LocalCopyRemoveAck {
 pub struct ArchiveDelete {
     pub operation_id: Uuid,
     pub version_id: Uuid,
-    pub emulator_type: EmulatorType,
+    pub emulator_type: ArchiveEmulatorType,
     pub vm_name: VmName,
     pub repository_id: Uuid,
     pub archive_key: String,

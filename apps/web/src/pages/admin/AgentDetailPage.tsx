@@ -104,7 +104,10 @@ interface VmActions {
   running: ReadonlySet<string>;
   /** Committed since this report was read, and not yet reflected in it. */
   registered: ReadonlySet<string>;
-  onChoose: (vm: DiscoveryListedVm, mode: Exclude<RegistrationMode, 'snapshot'>) => void;
+  onChoose: (
+    vm: DiscoveryListedVm,
+    mode: Exclude<RegistrationMode, 'snapshot' | 'remaster'>,
+  ) => void;
 }
 
 const vmKey = (emulatorType: string, vmName: string) => `${emulatorType}/${vmName.toLowerCase()}`;
@@ -413,7 +416,7 @@ function RegistrationWorkspace({ agent }: { agent: AgentSummary }) {
   if (active !== isActive) setActive(isActive);
   const [choice, setChoice] = useState<{
     target: RegistrationTarget;
-    mode: Exclude<RegistrationMode, 'snapshot'>;
+    mode: Exclude<RegistrationMode, 'snapshot' | 'remaster'>;
   } | null>(null);
 
   const [running, setRunning] = useState(false);

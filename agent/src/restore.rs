@@ -978,6 +978,7 @@ impl RestoreManager {
             replace_local: true,
             remove_local: true,
             delete_archives: !self.config.repositories.repository_ids().is_empty(),
+            delete_virtualbox_archives: !self.config.repositories.repository_ids().is_empty(),
         }
     }
 

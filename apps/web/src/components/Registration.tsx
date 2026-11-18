@@ -49,6 +49,7 @@ export function registrationStateText(operation: Pick<RegistrationOperation, 'mo
 export const REGISTRATION_MODE_TEXT: Record<RegistrationMode, string> = {
   copy: 'Copy',
   transfer: 'Transfer',
+  remaster: 'Remaster',
   snapshot: 'Snapshot',
 };
 
@@ -486,7 +487,7 @@ export function RegistrationDialog({
   onStarted,
 }: {
   target: RegistrationTarget;
-  mode: Exclude<RegistrationMode, 'snapshot'>;
+  mode: Exclude<RegistrationMode, 'snapshot' | 'remaster'>;
   repository: RepositorySummary;
   onClose: () => void;
   onStarted: (operation: RegistrationOperation) => void;

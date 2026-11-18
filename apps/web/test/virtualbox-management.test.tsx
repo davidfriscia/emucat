@@ -123,6 +123,9 @@ function version(
     childVersionIds: parent === null ? [SNAPSHOT] : [],
     snapshotName: parent === null ? null : 'xenix-386_202611151000',
     createdAt: WHEN,
+    title: null,
+    description: null,
+    promotedAt: null,
     archiveSizeBytes: 4096,
     archiveSha256: SHA,
     manifest: null,
@@ -757,12 +760,14 @@ describe('the requests the page of a VirtualBox VM makes', () => {
       [`GET ${VM_PATH}/versions`]: 8,
       [`GET ${VM_PATH}/workspaces`]: 1,
       [`GET ${VM_PATH}/restore-options`]: 1,
+      // Remasters: once, since nothing is in progress.
+      [`GET ${VM_PATH}/remasters`]: 1,
       // The running session's screenshots: every 15 s. Each ended session's: once.
       [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 15,
       ...Object.fromEntries(ENDED.map((id) => [`GET /admin/sessions/${id}/screenshots`, 1])),
     });
     // Was 601, 444 of them for the three ended sessions.
-    expect(api.calls).toHaveLength(100);
+    expect(api.calls).toHaveLength(101);
   });
 
   it('requests nothing while the tab is hidden, and catches up when it shows', async () => {

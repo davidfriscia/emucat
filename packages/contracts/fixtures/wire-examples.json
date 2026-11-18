@@ -607,7 +607,8 @@
           "cacheUsedBytes": 10,
           "replaceLocal": true,
           "removeLocal": true,
-          "deleteArchives": true
+          "deleteArchives": true,
+          "deleteVirtualBoxArchives": true
         },
         "localCopies": [
           {

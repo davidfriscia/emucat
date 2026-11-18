@@ -384,7 +384,7 @@ export class ExecutionCoordinator {
     const [rows] = await this.pool.execute<RowDataPacket[]>(
       `SELECT
          (SELECT version.repository_id FROM vm_versions AS version
-           WHERE version.emulator_type = ? AND version.vm_name = ? AND version.kind = 'master'
+           WHERE version.emulator_type = ? AND version.vm_name = ? AND version.master_marker = 1
            LIMIT 1) AS repository_id,
          (SELECT COUNT(*) FROM vm_versions AS version
            WHERE version.emulator_type = ? AND version.vm_name = ? AND ${NOT_DELETED('version')})
@@ -392,7 +392,7 @@ export class ExecutionCoordinator {
          (SELECT COUNT(*) FROM vm_versions AS version
            JOIN agent_repositories AS ar
              ON ar.repository_id = version.repository_id AND ar.agent_id = ?
-           WHERE version.emulator_type = ? AND version.vm_name = ? AND version.kind = 'master')
+           WHERE version.emulator_type = ? AND version.vm_name = ? AND version.master_marker = 1)
            AS authorized,
          (SELECT COUNT(*) FROM vm_workspaces
            WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1)
@@ -537,7 +537,7 @@ export class ExecutionCoordinator {
 
   async executionOptions(vm: VmIdentity): Promise<ExecutionOptionsResponse> {
     const [masters] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT id FROM vm_versions WHERE emulator_type = ? AND vm_name = ? AND kind = 'master'`,
+      `SELECT id FROM vm_versions WHERE emulator_type = ? AND vm_name = ? AND master_marker = 1`,
       [vm.emulatorType, vm.vmName],
     );
     const hasMaster = masters.length > 0;

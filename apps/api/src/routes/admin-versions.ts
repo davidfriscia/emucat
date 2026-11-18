@@ -1,6 +1,18 @@
 import {
   createSnapshotRequestSchema,
   createWorkspaceRequestSchema,
+  localRemasterPreviewQuerySchema,
+  localRemasterRequestSchema,
+  promoteSnapshotRequestSchema,
+  remasterPathParamsSchema,
+  updateVersionDetailsRequestSchema,
+  versionPathParamsSchema,
+  type LocalRemasterRequest,
+  type PromoteSnapshotRequest,
+  type RemasterListResponse,
+  type RemasterOperation,
+  type RemasterPreview,
+  type VersionDetails,
   discardWorkspaceRequestSchema,
   launchWorkspaceRequestSchema,
   preserveWorkspaceRequestSchema,
@@ -34,6 +46,8 @@ import { vmExists } from '../catalog/repository.js';
 import { ApiError } from '../errors.js';
 import type { VersionDeletionCoordinator } from '../cleanup/version-deletions.js';
 import type { RegistrationCoordinator } from '../registration/coordinator.js';
+import { updateVersionDetails } from '../versions/details.js';
+import type { RemasterCoordinator } from '../versions/remaster.js';
 import { versionTree } from '../versions/tree.js';
 import type { WorkspaceCoordinator } from '../workspaces/coordinator.js';
 import type { BrowserDependencies } from './browser.js';
@@ -49,6 +63,7 @@ export function registerAdminVersionRoutes(
   registrations: RegistrationCoordinator,
   workspaces: WorkspaceCoordinator,
   deletions: VersionDeletionCoordinator | null = null,
+  remasters: RemasterCoordinator | null = null,
 ): void {
   const { pool, session, cookie, publicOrigin } = dependencies;
 
@@ -95,6 +110,120 @@ export function registerAdminVersionRoutes(
           return operation;
         },
       );
+
+      // A version's title and description: nothing else about it changes (decision 0048).
+      api.patch(
+        '/vms/:emulatorType/:vmName/versions/:versionId',
+        { schema: { params: versionPathParamsSchema, body: updateVersionDetailsRequestSchema } },
+        async (request): Promise<VersionDetails> => {
+          const { versionId, ...vm } = request.params as z.infer<typeof versionPathParamsSchema>;
+          await requireVm(vm);
+          const body = request.body as z.output<typeof updateVersionDetailsRequestSchema>;
+          const details = await updateVersionDetails(pool, vm, versionId, body);
+          request.log.info({ versionId, vmName: vm.vmName }, 'Version details edited');
+          return details;
+        },
+      );
+
+      if (remasters) {
+        const requireRemasters = (): RemasterCoordinator => remasters;
+
+        api.get(
+          '/vms/:emulatorType/:vmName/versions/:versionId/promotion',
+          { schema: { params: versionPathParamsSchema } },
+          async (request): Promise<RemasterPreview> => {
+            const { versionId, ...vm } = request.params as z.infer<typeof versionPathParamsSchema>;
+            await requireVm(vm);
+            return requireRemasters().previewPromotion(vm, versionId);
+          },
+        );
+
+        api.post(
+          '/vms/:emulatorType/:vmName/versions/:versionId/promotion',
+          { schema: { params: versionPathParamsSchema, body: promoteSnapshotRequestSchema } },
+          async (request, reply): Promise<RemasterOperation> => {
+            const { versionId, ...vm } = request.params as z.infer<typeof versionPathParamsSchema>;
+            await requireVm(vm);
+            const operation = await requireRemasters().promote(
+              vm,
+              versionId,
+              request.body as PromoteSnapshotRequest,
+              sessionOf(request).user.id,
+            );
+            request.log.info(
+              { remasterId: operation.id, vmName: vm.vmName, versionId },
+              'Snapshot promotion requested',
+            );
+            reply.status(202);
+            return operation;
+          },
+        );
+
+        api.get(
+          '/vms/:emulatorType/:vmName/remaster/local',
+          { schema: { params: vmPathParamsSchema, querystring: localRemasterPreviewQuerySchema } },
+          async (request): Promise<RemasterPreview> => {
+            const vm = request.params as VmIdentity;
+            await requireVm(vm);
+            const { agentId } = request.query as z.infer<typeof localRemasterPreviewQuerySchema>;
+            return requireRemasters().previewLocal(vm, agentId);
+          },
+        );
+
+        api.post(
+          '/vms/:emulatorType/:vmName/remaster/local',
+          { schema: { params: vmPathParamsSchema, body: localRemasterRequestSchema } },
+          async (request, reply): Promise<RemasterOperation> => {
+            const vm = request.params as VmIdentity;
+            await requireVm(vm);
+            const body = request.body as LocalRemasterRequest;
+            const operation = await requireRemasters().createLocal(
+              vm,
+              body,
+              sessionOf(request).user.id,
+            );
+            request.log.info(
+              { remasterId: operation.id, vmName: vm.vmName, agentId: body.agentId },
+              'Remaster from a local copy requested',
+            );
+            reply.status(202);
+            return operation;
+          },
+        );
+
+        api.get(
+          '/vms/:emulatorType/:vmName/remasters',
+          { schema: { params: vmPathParamsSchema } },
+          async (request): Promise<RemasterListResponse> => {
+            const vm = request.params as VmIdentity;
+            await requireVm(vm);
+            return { remasters: await requireRemasters().list(vm) };
+          },
+        );
+
+        api.get(
+          '/remasters/:remasterId',
+          { schema: { params: remasterPathParamsSchema } },
+          async (request): Promise<RemasterOperation> => {
+            const { remasterId } = request.params as z.infer<typeof remasterPathParamsSchema>;
+            const operation = await requireRemasters().get(remasterId);
+            if (!operation) throw new ApiError(404, 'remaster_not_found', 'Remaster not found');
+            return operation;
+          },
+        );
+
+        api.post(
+          '/remasters/:remasterId/cleanup/retry',
+          { schema: { params: remasterPathParamsSchema } },
+          async (request, reply): Promise<RemasterOperation> => {
+            const { remasterId } = request.params as z.infer<typeof remasterPathParamsSchema>;
+            const operation = await requireRemasters().retryCleanup(remasterId);
+            request.log.info({ remasterId }, 'Remaster cleanup retried');
+            reply.status(202);
+            return operation;
+          },
+        );
+      }
 
       api.get(
         '/vms/:emulatorType/:vmName/workspaces',

@@ -65,7 +65,13 @@ Every VM has one immutable **master** and any number of **snapshots**.
   origin and is never needed for a restore.
 - A snapshot's parent is the version it originated from. Parents can have many children, so history
   can branch. A parent must be a version of the same VM.
-- Versions never change after creation.
+- Versions never change after creation, except their optional **title** and **description**, which are plain
+  text and can be edited, and two remaster transitions ([decision 0048](decisions/0048-master-and-snapshot-lifecycle.md)):
+  a snapshot **promoted** to master loses its parent and records when and from which parent it was promoted, and
+  the master it replaces is **retired**. Archive, hash, size and creation time never change.
+- A **remaster** makes a new starting point: promoting a snapshot keeps it and its descendants, chosen by lineage
+  only, and removes everything else; remastering from a local copy exports a new master and replaces the whole
+  history once it is uploaded and verified. Removed versions' archives are deleted afterwards, by exact key.
 
 ```
 master ──▶ snapshot A ──▶ snapshot C
@@ -187,6 +193,14 @@ See [decision 0021](decisions/0021-restore-lifecycle.md).
 
 A snapshot is a `registration_operations` row with `mode = 'snapshot'`, naming its parent and its label, which commits one `vm_versions` row with `kind = 'snapshot'`. Its parent is the version the archived files came from: the agent's `local_source_version_id`, or a working copy's `source_version_id`. A commit moves that source to the new snapshot. See [decision 0037](decisions/0037-snapshots-as-registrations.md).
 
+## Remasters
+
+A `vm_remaster_operations` row is one remaster of a VM: `kind` `snapshot` (a promotion) or `local_copy`, `state`
+`exporting` (local copies only, until the new master commits), `cleaning`, `completed` or `failed`, the revision of the
+history it was confirmed against, the previous and new masters, and for a local copy its agent and registration
+(`mode = 'remaster'`). Its deletion manifest is the `vm_version_deletions` rows that name it. At most one is
+`exporting` per VM. See [decision 0048](decisions/0048-master-and-snapshot-lifecycle.md).
+
 ## Working copies
 
 A `vm_workspaces` row is a working copy of one VM on one agent, with a `purpose`: `remote_volatile` or `remote_snapshot` for a remote session, or `manual` for one prepared by hand in Milestone 7. A remote session moves through `preparing`, `ready`, `running`, then `held` when its emulator was not accounted for, `publishing` and `publish_failed` for Remote Snapshot, `discarding`, and ends `discarded`, `failed` or `lost`; manual ones keep their old lifecycle. It records the version chosen (`base_version_id`, a Remote Snapshot's parent), its session, its current publication attempt and their count, the version it published, and when an administrator abandoned it. Restores, snapshots and sessions that concern it name it. A restore that replaced a persistent copy records `replace_existing`, the version replaced and whether local changes were discarded. See decisions [0038](decisions/0038-remote-snapshot-working-copies.md) and [0040](decisions/0040-temporary-remote-sessions.md).
@@ -209,6 +223,8 @@ A `vm_workspaces` row is a working copy of one VM on one agent, with a `purpose`
 | `registration_operations` | Registrations, kept after they end       | `id`                                 |
 | `restore_operations`      | Restores, kept after they end            | `id`                                 |
 | `vm_workspaces`           | Remote sessions and working copies       | `id`                                 |
+| `vm_version_deletions`    | Versions being deleted, and deleted      | `version_id`                         |
+| `vm_remaster_operations`  | Remasters, kept after they end           | `id`                                 |
 | `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                       |
 | `schema_migrations`       | Migration history, managed by the runner | `version`                            |
 
