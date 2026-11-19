@@ -8,9 +8,11 @@ import { vmNameSchema } from './vm-name.js';
 /**
  * Copy keeps the local VM. Transfer removes it, only after a verified master is committed and every
  * local check has passed again. See decision 0015. Snapshot archives a registered VM again, as a new
- * immutable version whose parent is the version its local files came from. See decision 0037.
+ * immutable version whose parent is the version its local files came from. See decision 0037. Import makes
+ * an existing OVA file the master of a new VirtualBox catalog VM, from the agent's command line, and never touches
+ * VirtualBox. See decision 0049.
  */
-export const REGISTRATION_MODES = ['copy', 'transfer', 'snapshot', 'remaster'] as const;
+export const REGISTRATION_MODES = ['copy', 'transfer', 'snapshot', 'remaster', 'import'] as const;
 export const registrationModeSchema = z.enum(REGISTRATION_MODES);
 export type RegistrationMode = z.infer<typeof registrationModeSchema>;
 
@@ -109,6 +111,9 @@ export const REGISTRATION_ERROR_CODES = [
   'virtualbox_unavailable',
   'export_failed',
   'export_timeout',
+  // From an OVA import on the agent's command line (decision 0049).
+  'ova_invalid',
+  'import_abandoned',
   // From local cleanup, after the master exists.
   'cleanup_identity_mismatch',
   'cleanup_content_changed',
@@ -180,6 +185,10 @@ const RECOVERY: Partial<Record<string, string>> = {
     'VBoxManage could not export the machine. Nothing was registered and the machine is unchanged. Check the agent’s log, and try again.',
   export_timeout:
     'The export took longer than the agent allows. Nothing was registered and the machine is unchanged. Raise the export time limit, or try again.',
+  ova_invalid:
+    'The file is not an OVA that can be imported. Nothing was registered. Check the message, and the file.',
+  import_abandoned:
+    'The agent’s command line stopped before the archive was registered. Nothing was registered. Run the same import-ova command again.',
   cleanup_identity_mismatch:
     'The master is registered and safe. The directory is no longer the one that was archived, so it was kept. Decide what to do with it yourself.',
   cleanup_content_changed:

@@ -151,6 +151,52 @@ async function fingerprint(root: string): Promise<string[]> {
   return entries;
 }
 
+/** A TAR header as GNU tar writes one: ustar, octal fields, and the checksum computed last. */
+function tarHeader(name: string, size: number): Buffer {
+  const block = Buffer.alloc(512);
+  block.write(name, 0, 'utf8');
+  block.write('0000644\0', 100);
+  block.write('0000000\0', 108);
+  block.write('0000000\0', 116);
+  block.write(`${size.toString(8).padStart(11, '0')}\0`, 124);
+  block.write('14725237021\0', 136);
+  block.write('        ', 148);
+  block[156] = 0x30;
+  block.write('ustar\0', 257);
+  block.write('00', 263);
+  let sum = 0;
+  for (const byte of block) sum += byte;
+  block.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148);
+  return block;
+}
+
+/** An OVA as VirtualBox exports one: descriptor first, a disk of random bytes, and a SHA-256 manifest. */
+function makeOva(name: string, megabytes: number): Buffer {
+  const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+  const disk = randomBytes(megabytes * 1024 * 1024);
+  const diskName = `${name}-disk001.vmdk`;
+  const descriptor = Buffer.from(
+    `<?xml version="1.0"?>\n<Envelope ovf:version="1.0" xmlns="http://schemas.dmtf.org/ovf/envelope/1" xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1" xmlns:vbox="http://www.virtualbox.org/ovf/machine"><References><File ovf:id="file1" ovf:href="${diskName}"/></References><VirtualSystem ovf:id="${name}"><Info>A virtual machine</Info><vbox:Machine ovf:required="false" version="1.19-windows" uuid="{${randomUUID()}}" name="${name}"/></VirtualSystem></Envelope>\n`,
+  );
+  const manifest = Buffer.from(
+    `SHA256(${name}.ovf)= ${sha256(descriptor)}\nSHA256(${diskName})= ${sha256(disk)}\n`,
+  );
+  const parts: Buffer[] = [];
+  for (const [entry, data] of [
+    [`${name}.ovf`, descriptor],
+    [diskName, disk],
+    [`${name}.mf`, manifest],
+  ] as const) {
+    parts.push(
+      tarHeader(entry, data.length),
+      data,
+      Buffer.alloc((512 - (data.length % 512)) % 512),
+    );
+  }
+  parts.push(Buffer.alloc(1024));
+  return Buffer.concat(parts);
+}
+
 describe.runIf(process.platform === 'win32')('registration with nothing simulated', () => {
   let context: BrowserTestContext;
   let server: FastifyInstance;
@@ -924,6 +970,171 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
 
       sftp.stop();
       await sftp.start();
+    },
+    LONG,
+  );
+
+  /** `emucat-agent import-ova`, as an administrator runs it: standard output and error kept apart. */
+  async function importOva(
+    ...args: string[]
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    const child = spawn(AGENT_BINARY, ['--config', configPath, 'import-ova', ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += String(chunk);
+      allOutput.push(String(chunk));
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += String(chunk);
+      allOutput.push(String(chunk));
+    });
+    const code = await new Promise<number | null>((done) =>
+      child.on('close', (exit) => done(exit)),
+    );
+    return { code, stdout, stderr };
+  }
+
+  async function versionsOf(vmName: string): Promise<RowDataPacket[]> {
+    const [rows] = await context.pool.execute<RowDataPacket[]>(
+      "SELECT * FROM vm_versions WHERE emulator_type = 'virtualbox' AND vm_name = ?",
+      [vmName],
+    );
+    return rows;
+  }
+
+  it(
+    'imports an OVA from the command line straight into the repository, byte for byte, as a new master',
+    async () => {
+      const before = sftp.files();
+      const folder = join(directory, 'OVA esportati — Ελληνικά');
+      await mkdir(folder, { recursive: true });
+      const ova = makeOva('Imported', 12);
+      const file = join(folder, 'Imported VM 1.ova');
+      await writeFile(file, ova);
+      const sha256 = createHash('sha256').update(ova).digest('hex');
+
+      // A dry run checks everything and changes nothing.
+      const dry = await importOva('--file', file, '--name', 'OVA Import', '--dry-run', '--json');
+      expect(dry.code, dry.stdout + dry.stderr).toBe(0);
+      expect(JSON.parse(dry.stdout)).toMatchObject({
+        status: 'dry_run',
+        sha256,
+        sizeBytes: ova.length,
+        repositoryId,
+      });
+      expect(sftp.files()).toEqual(before);
+      expect(await versionsOf('OVA Import')).toEqual([]);
+
+      const result = await importOva(
+        '--file',
+        file,
+        '--name',
+        'OVA Import',
+        '--description',
+        'Imported from an existing OVA',
+        '--json',
+      );
+      expect(result.code, result.stdout + result.stderr).toBe(0);
+      const report = JSON.parse(result.stdout) as {
+        status: string;
+        sha256: string;
+        operationId: string;
+        versionId: string;
+        archiveKey: string;
+      };
+      expect(report).toMatchObject({ status: 'completed', sha256, emulatorType: 'virtualbox' });
+      expect(report.archiveKey).toMatch(
+        new RegExp(`^archives/virtualbox/[^/]+/${report.versionId}\\.ova$`),
+      );
+
+      // Exactly the file's bytes, at the issued key, and nothing else added or left in staging.
+      expect(sftp.files().sort()).toEqual([...before, report.archiveKey].sort());
+      const stored = sftp.exec(`sha256sum '/srv/sftp/repo/${report.archiveKey}'`).split(' ')[0];
+      expect(stored).toBe(sha256);
+      expect(sftp.exec(`stat -c %s '/srv/sftp/repo/${report.archiveKey}'`)).toBe(
+        String(ova.length),
+      );
+      expect(
+        createHash('sha256')
+          .update(await readFile(file))
+          .digest('hex'),
+        'the file is untouched',
+      ).toBe(sha256);
+
+      // One master and nothing else: no snapshot, no VirtualBox machine, no copy on any agent.
+      const versions = await versionsOf('OVA Import');
+      expect(versions).toHaveLength(1);
+      expect(versions[0]).toMatchObject({
+        id: report.versionId,
+        kind: 'master',
+        parent_version_id: null,
+        archive_key: report.archiveKey,
+        archive_sha256: sha256,
+        repository_id: repositoryId,
+        created_by_agent_id: agentId,
+      });
+      expect(Number(versions[0]?.archive_size_bytes)).toBe(ova.length);
+      const [machines] = await context.pool.execute<RowDataPacket[]>(
+        "SELECT description FROM virtual_machines WHERE emulator_type = 'virtualbox' AND vm_name = 'OVA Import'",
+      );
+      expect(machines).toEqual([{ description: 'Imported from an existing OVA' }]);
+      const [sources] = await context.pool.execute<RowDataPacket[]>(
+        "SELECT * FROM virtualbox_sources WHERE vm_name = 'OVA Import'",
+      );
+      expect(sources).toEqual([]);
+
+      // The running agent's next sync does not take the import for an operation it lost.
+      const operation = await read(report.operationId);
+      expect(operation).toMatchObject({ mode: 'import', state: 'succeeded' });
+      await new Promise((done) => setTimeout(done, 1500));
+      expect(await read(report.operationId)).toMatchObject({ state: 'succeeded' });
+      expect(await isOnline()).toBe(true);
+
+      // An existing VM is never replaced, whatever the case of its name.
+      const again = await importOva('--file', file, '--name', 'ova import', '--json');
+      expect(again.code, again.stdout + again.stderr).toBe(5);
+      expect(JSON.parse(again.stdout)).toMatchObject({
+        status: 'failed',
+        exitCode: 5,
+        error: { code: 'vm_already_registered' },
+      });
+      expect(sftp.files().sort()).toEqual([...before, report.archiveKey].sort());
+      expect(await versionsOf('OVA Import')).toHaveLength(1);
+    },
+    LONG,
+  );
+
+  it(
+    'imports with the agent stopped, and refuses an archive that is not an OVA',
+    async () => {
+      await killAgent();
+      try {
+        const before = sftp.files();
+        const ova = makeOva('Offline', 2);
+        const file = join(directory, 'offline.ova');
+        await writeFile(file, ova);
+        const result = await importOva('--file', file, '--name', 'OVA Offline');
+        expect(result.code, result.stdout + result.stderr).toBe(0);
+        expect(result.stdout).toContain('Import completed successfully.');
+        expect(result.stdout).toContain('Uploading');
+        const versions = await versionsOf('OVA Offline');
+        expect(versions).toHaveLength(1);
+        expect(sftp.files()).toHaveLength(before.length + 1);
+
+        const damaged = Buffer.from(ova);
+        damaged[600] = (damaged[600] as number) ^ 0xff;
+        const bad = join(directory, 'damaged.ova');
+        await writeFile(bad, damaged);
+        const refused = await importOva('--file', bad, '--name', 'OVA Damaged', '--json');
+        expect(refused.code, refused.stdout + refused.stderr).toBe(3);
+        expect(await versionsOf('OVA Damaged')).toEqual([]);
+        expect(sftp.files()).toHaveLength(before.length + 1);
+      } finally {
+        await startDaemon();
+      }
     },
     LONG,
   );

@@ -15,6 +15,7 @@ is committed.
 | `media-status`                            | Prints what the screenshot queue holds, without connecting                             |
 | `cache-status`                            | Prints what the archive cache holds, without connecting                                |
 | `launch-check --emulator E --vm NAME`     | Prints the command line the agent would use, and starts nothing                        |
+| `import-ova --file PATH --name NAME`      | Imports an existing OVA into the repository as a new VirtualBox master                 |
 | `repository-check --repository UUID`      | Tests a configured repository directly                                                 |
 | `repository-passphrase --repository UUID` | Stores the passphrase of a repository's key, protected with DPAPI                      |
 | `check-config`, `info`                    | Validates the configuration, or prints versions and default paths                      |
@@ -299,6 +300,76 @@ state directory, and hold no secrets and no VM contents.
 agent's page, with their actions. A partial success stays there until it is retried or you choose **Acknowledge** once you have dealt
 with it. Everything that ended is under _Recent registrations_, and the complete history, with filters, is on the **Registrations**
 page.
+
+## Importing an existing OVA
+
+`import-ova` puts an OVA file you already have into the repository as the master of a **new** VirtualBox catalog VM,
+byte for byte. It is for exports you have no machine for any more: backups, downloads, machines deleted long ago. It
+follows [decision 0049](decisions/0049-ova-repository-import.md).
+
+```powershell
+emucat-agent import-ova --file "D:\VM exports\DOS 6.22.ova" --name "DOS-6.22" --description "MS-DOS 6.22 with Windows 3.11"
+```
+
+It is **not** VirtualBox's own import: nothing is imported into VirtualBox, no machine is created, linked or changed,
+and the file is only read. To run the VM afterwards, import its master into VirtualBox from the VM's page
+([Importing, deleting and capturing VirtualBox machines](#importing-deleting-and-capturing-virtualbox-machines)).
+
+| Option                    | What it does                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------- |
+| `--file PATH`             | The `.ova` file. Absolute or relative; spaces and non-ASCII names work when quoted    |
+| `--name VM-NAME`          | The new catalog VM's name, under the usual [naming rules](decisions/0002-vm-names.md) |
+| `--description TEXT`      | Optional plain-text description of the new VM                                         |
+| `--dry-run`               | Validates, hashes and asks the server, and reserves, uploads and registers nothing    |
+| `--json`                  | One JSON object on standard output for scripts. Progress goes to standard error       |
+| `--config`, `--log-level` | As for every command. Logs show warnings only, unless `--log-level` says more         |
+
+**What it needs:** this agent's configuration file, the agent paired (`pair`), and the repository the server has
+associated with this agent configured in `[repositories."<uuid>"]`, as for registration. It uses the same credential
+and SSH key, and asks for nothing else. `emucat-agent run` may be running or not; the import does not use or disturb
+it. The server picks the repository: the agent's associated, enabled one.
+
+**What it does,** in order, printing each step:
+
+1. **Validating**: the file is a regular `.ova` TAR archive, undamaged and complete, with the OVF descriptor first, a
+   valid OVF envelope with a virtual system, every referenced file present, safe names only (no `..`, absolute path,
+   link or subdirectory), and no XML document type. Nothing is extracted.
+2. **Checking catalog**: the server confirms the agent may import, which repository, and that the name is free.
+3. **Hashing**: SHA-256 of the whole file, and each manifest digest checked against its part.
+4. **Reserving**: the server reserves the name and issues the version and archive key
+   `archives/virtualbox/<name>/<version>.ova`.
+5. **Uploading**, **Verifying**, **Publishing**: straight to the repository's staging key, read back and hashed there,
+   then published under the final key without overwriting anything.
+6. **Registering**: the server creates the VM and its master. No snapshot, and no copy on any agent.
+
+**Name conflicts:** a VirtualBox VM of that name, in any case, is refused with exit code 5 before anything is
+reserved or uploaded. An existing VM is never replaced or given a new master; to replace one's history, see
+[remastering](decisions/0048-master-and-snapshot-lifecycle.md).
+
+**Interruptions:** run **the same command again**. A journal in `state/ova-imports` (no secrets) lets it carry on:
+nothing already uploaded or published is sent again, and a registration that already happened is reported, not
+repeated. **Ctrl+C** cancels cleanly before registration: the operation is marked cancelled, and what it put in the
+repository is removed. A second Ctrl+C exits at once; run the command again to settle. An administrator can also
+cancel it on the **Registrations** page, where it appears as an **OVA import**; the command stops within seconds.
+
+| Exit code | Meaning                                                              |
+| --------- | -------------------------------------------------------------------- |
+| 0         | Imported, or the dry run found nothing wrong                         |
+| 1         | Unexpected error                                                     |
+| 2         | Invalid argument: name, description, path, missing file              |
+| 3         | Not an importable OVA                                                |
+| 4         | Agent configuration, pairing, credential or repository authorization |
+| 5         | Catalog conflict: the name is taken, or an import of it is under way |
+| 6         | Server or repository unavailable. Run the same command again         |
+| 130       | Cancelled                                                            |
+
+```powershell
+# Check first, without changing anything.
+emucat-agent import-ova --file .\win95.ova --name Win95 --dry-run
+# A script: read the result and the exit code.
+$result = emucat-agent import-ova --file "D:\VMs\OS2 Warp.ova" --name OS2-Warp-4 --json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { Write-Error "$($result.error.code): $($result.error.message)" }
+```
 
 ## Restoring VMs
 

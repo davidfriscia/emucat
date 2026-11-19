@@ -2,10 +2,8 @@ import {
   isFilesystemEmulatorType,
   isWatchedMediaPath,
   MEDIA_CAPTURED_AT_HEADER,
-  MEDIA_PROTOCOL_HEADER,
   MEDIA_SOURCE_PATH_HEADER,
   mediaAcknowledgementRequestSchema,
-  PROTOCOL_VERSION,
   sha256HexSchema,
   vmPathParamsSchema,
   type AgentMediaVmListResponse,
@@ -16,7 +14,8 @@ import {
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Readable } from 'node:stream';
 import { z } from 'zod';
-import { parseBearerToken, type AgentAuthenticator } from '../auth/agent-auth.js';
+import type { AgentAuthenticator } from '../auth/agent-auth.js';
+import { agentHttpGuard, agentIdOf } from '../auth/agent-http.js';
 import { noStore } from '../auth/guards.js';
 import { ApiError } from '../errors.js';
 import {
@@ -100,37 +99,11 @@ export function registerAgentMediaRoutes(
   void parent.register(
     async (api) => {
       api.addHook('onRequest', noStore);
-      api.addHook('onRequest', async (request, reply) => {
-        const token = parseBearerToken(request.headers.authorization);
-        const principal = token ? await authenticate(token).catch(() => undefined) : null;
-        if (principal === undefined) {
-          // The database is away, which says nothing about the credential.
-          throw new ApiError(503, 'temporarily_unavailable', 'Try again shortly');
-        }
-        if (!principal) {
-          reply.header('www-authenticate', 'Bearer');
-          throw new ApiError(401, 'unauthorized', 'Authentication required');
-        }
-        request.agent = principal;
-        const version = header(request, MEDIA_PROTOCOL_HEADER);
-        if (version !== String(PROTOCOL_VERSION)) {
-          throw new ApiError(
-            400,
-            'unsupported_protocol_version',
-            `This server speaks protocol ${PROTOCOL_VERSION}`,
-          );
-        }
-      });
+      api.addHook('onRequest', agentHttpGuard(authenticate));
       // The body is a stream here. It is measured and hashed as it is written, not parsed.
       api.addContentTypeParser('application/octet-stream', (_request, payload, done) => {
         done(null, payload);
       });
-
-      const agentIdOf = (request: FastifyRequest): string => {
-        const agentId = request.agent?.agentId;
-        if (!agentId) throw new Error('Route is missing the agent guard');
-        return agentId;
-      };
 
       api.get('/vms', async (request): Promise<AgentMediaVmListResponse> => {
         return {

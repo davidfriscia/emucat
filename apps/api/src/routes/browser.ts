@@ -32,6 +32,8 @@ import { registerAdminVersionRoutes } from './admin-versions.js';
 import { registerAdminVirtualBoxRoutes } from './admin-virtualbox.js';
 import type { VirtualBoxManagement } from '../virtualbox/management.js';
 import { registerAgentMediaRoutes } from './agent-media.js';
+import { registerAgentOvaImportRoutes } from './agent-ova-imports.js';
+import { OvaImportCoordinator } from '../registration/ova-imports.js';
 import { registerAgentPairingRoutes, type PairingRateLimits } from './agent-pairing.js';
 import { registerAuthRoutes, type AuthRateLimits } from './auth.js';
 import { registerPublicCatalogRoutes } from './public-catalog.js';
@@ -88,6 +90,11 @@ export async function registerBrowserRoutes(
   registerPublicCatalogRoutes(api, dependencies);
   registerAdminCatalogRoutes(api, dependencies, hub);
   registerAgentMediaRoutes(api, dependencies, authenticateAgent);
+  registerAgentOvaImportRoutes(
+    api,
+    new OvaImportCoordinator(dependencies.pool, registrations, api.log),
+    authenticateAgent,
+  );
   registerAgentPairingRoutes(api, dependencies);
   registerAdminAgentRoutes(api, dependencies, hub);
   registerAdminRegistrationRoutes(api, dependencies, hub, registrations);

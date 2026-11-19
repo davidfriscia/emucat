@@ -10,6 +10,7 @@ export * from './emulator.js';
 export * from './execution.js';
 export * from './media.js';
 export * from './operations.js';
+export * from './ova-import.js';
 export * from './protocol.js';
 export * from './registration.js';
 export * from './remaster.js';

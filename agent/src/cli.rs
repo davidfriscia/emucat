@@ -28,7 +28,8 @@ use crate::protocol::PROTOCOL_VERSION;
         VirtualBox configured, it also lists VirtualBox machines, exports a powered-off machine an \
         administrator registers into an OVA master, and starts, shuts down (ACPI) or powers off a \
         registered machine in place, by UUID, watching its state; it never imports, deletes or \
-        modifies one. It has \
+        modifies one. `import-ova` puts an existing OVA file into the repository, byte for byte, as \
+        the master of a new VirtualBox catalog VM, without VirtualBox. It has \
         no listener. It removes a local VM only for an explicitly confirmed transfer, after the server \
         has committed a verified master, and never while it runs. Pair it once with `pair`, then keep \
         it running with `run`."
@@ -91,6 +92,44 @@ pub enum Command {
         /// The VM's directory name under the emulator's base path
         #[arg(long, value_name = "NAME")]
         vm: String,
+    },
+    /// Import an existing OVA file into the EmuCat repository as the master of a new VirtualBox catalog VM.
+    /// Nothing is imported into VirtualBox
+    #[command(
+        long_about = "Import an existing OVA file into the EmuCat repository, as the master of a new VirtualBox \
+            catalog VM.\n\n\
+            The file is validated (TAR structure, OVF descriptor, manifest digests) and hashed, the name is \
+            reserved on the server, and the file is uploaded as it is, byte for byte, straight to the configured \
+            SSH repository, verified there, published without overwriting anything, and registered. It uses this \
+            agent's configuration, paired credential and repository settings; `emucat-agent run` need not be \
+            running. Nothing is imported into VirtualBox, and no VirtualBox machine is created or linked: import \
+            the master into VirtualBox later, from the VM's page.\n\n\
+            An existing catalog VM is never replaced: a name that is taken is refused. Ctrl+C cancels before the \
+            master is registered. Running the same command again after an interruption carries on where it \
+            stopped, without uploading again what is already in the repository.\n\n\
+            Exit codes: 0 success; 1 unexpected error; 2 invalid argument; 3 not an importable OVA; 4 agent \
+            configuration or authorization; 5 catalog conflict; 6 server or repository unavailable; 130 cancelled.",
+        after_help = "Examples:\n  \
+            emucat-agent import-ova --file \"D:\\VMs\\DOS-6.22.ova\" --name \"DOS-6.22\"\n  \
+            emucat-agent import-ova --file .\\win95.ova --name Win95 --description \"Windows 95 OSR2\" --dry-run\n  \
+            emucat-agent import-ova --file \"D:\\VMs\\OS2 Warp.ova\" --name \"OS2-Warp-4\" --json"
+    )]
+    ImportOva {
+        /// The OVA file to import. Absolute or relative
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+        /// The new catalog VM's name, under the usual naming rules. It must not exist yet
+        #[arg(long, value_name = "VM-NAME")]
+        name: String,
+        /// A description for the new catalog VM. Plain text
+        #[arg(long, value_name = "TEXT")]
+        description: Option<String>,
+        /// Validate, hash and check the catalog, without reserving, uploading or registering anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the result as one JSON object on standard output. Progress goes to standard error
+        #[arg(long)]
+        json: bool,
     },
     /// Validate the configuration and exit
     CheckConfig,

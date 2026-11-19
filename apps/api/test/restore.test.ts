@@ -554,23 +554,22 @@ describe('the lifecycle', () => {
     expect(Number(rows[0]?.total)).toBe(1);
   });
 
-  it('refuses a result with identities it did not issue, and records no copy', async () => {
-    for (const overrides of [
-      { versionId: randomUUID() },
-      { archiveSha256: hash('another archive') },
-      { archiveSizeBytes: ARCHIVE_SIZE + 1 },
-    ]) {
-      const w = await world();
-      const operation = await start(w);
-      await w.agent.next('server.restore_request');
-      w.agent.send(envelope('agent.restore_result', resultFor(operation, overrides)));
-      const ack = await w.agent.next('server.restore_ack');
-      expect(ack.payload).toEqual({ operationId: operation.id, outcome: 'rejected' });
-      const failed = await read(w, operation.id);
-      expect(failed.state).toBe('failed');
-      expect(failed.error?.code).toBe('invalid_result');
-      expect(await vmState(w)).toBeUndefined();
-    }
+  // One test per identity, each with its own world, so that none comes near the timeout on a loaded machine.
+  it.each([
+    ['version', { versionId: randomUUID() }],
+    ['SHA-256', { archiveSha256: hash('another archive') }],
+    ['size', { archiveSizeBytes: ARCHIVE_SIZE + 1 }],
+  ])('refuses a result with a %s it did not issue, and records no copy', async (_, overrides) => {
+    const w = await world();
+    const operation = await start(w);
+    await w.agent.next('server.restore_request');
+    w.agent.send(envelope('agent.restore_result', resultFor(operation, overrides)));
+    const ack = await w.agent.next('server.restore_ack');
+    expect(ack.payload).toEqual({ operationId: operation.id, outcome: 'rejected' });
+    const failed = await read(w, operation.id);
+    expect(failed.state).toBe('failed');
+    expect(failed.error?.code).toBe('invalid_result');
+    expect(await vmState(w)).toBeUndefined();
   });
 
   it('refuses a result for an operation it never issued', async () => {

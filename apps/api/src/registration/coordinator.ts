@@ -79,6 +79,9 @@ interface OperationRow extends RowDataPacket {
   snapshot_name: string | null;
   workspace_id: string | null;
   request_id: string | null;
+  import_size_bytes: number | string | null;
+  import_sha256: string | null;
+  import_source_name: string | null;
   archive_key: string;
   progress_done_bytes: number | string | null;
   progress_total_bytes: number | string | null;
@@ -109,6 +112,7 @@ const OPERATION_QUERY = `
          op.emulator_type, op.vm_name, op.virtualbox_uuid, op.mode, op.state, op.version_id,
          op.archive_key,
          op.parent_version_id, op.snapshot_name, op.workspace_id, op.request_id,
+         op.import_size_bytes, op.import_sha256, op.import_source_name,
          op.progress_done_bytes, op.progress_total_bytes,
          op.archive_size_bytes, op.archive_sha256, op.manifest_version, op.manifest_sha256,
          op.file_count, op.total_uncompressed_bytes, op.local_copy,
@@ -248,6 +252,8 @@ function requestFor(
       },
     };
   }
+  // Unreachable: an import is always a VirtualBox VM's, and never sent to an agent (decision 0049).
+  if (row.mode === 'import') throw new Error('An OVA import is never sent to an agent');
   return {
     type: 'server.registration_request',
     payload: {
@@ -301,6 +307,8 @@ const FAILURE_TEXT: Record<string, string> = {
   invalid_result: 'The agent reported a result that does not belong to this operation.',
   duplicate_registration: 'This VM was registered by something else in the meantime.',
   repository_not_authorized: 'This agent is no longer allowed to use this repository.',
+  hash_mismatch:
+    'The agent reported an archive other than the one it declared when the import began.',
 };
 
 /**
@@ -347,7 +355,8 @@ export class RegistrationCoordinator {
   private async notifyVirtualBox(operationId: string): Promise<void> {
     if (!this.onVirtualBoxRegistered) return;
     const [rows] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT agent_id FROM registration_operations WHERE id = ? AND emulator_type = 'virtualbox'`,
+      `SELECT agent_id FROM registration_operations
+       WHERE id = ? AND emulator_type = 'virtualbox' AND mode <> 'import'`,
       [operationId],
     );
     const agentId = rows[0]?.agent_id as string | undefined;
@@ -365,7 +374,8 @@ export class RegistrationCoordinator {
   /** Sends a queued operation's request, once its row exists. Undelivered, it goes out at the next welcome. */
   async dispatchOperation(agentId: string, operationId: string): Promise<void> {
     const row = await this.rowFor(agentId, operationId);
-    if (row?.state === 'queued') this.dispatch(requestFor(row), agentId);
+    // An import is driven by the agent's command line over HTTP: there is nothing to send (decision 0049).
+    if (row?.state === 'queued' && row.mode !== 'import') this.dispatch(requestFor(row), agentId);
   }
 
   // What an administrator does.
@@ -937,7 +947,7 @@ export class RegistrationCoordinator {
     try {
       await connection.beginTransaction();
       const [rows] = await connection.execute<RowDataPacket[]>(
-        'SELECT agent_id, state FROM registration_operations WHERE id = ? FOR UPDATE',
+        'SELECT agent_id, state, mode FROM registration_operations WHERE id = ? FOR UPDATE',
         [operationId],
       );
       const row = rows[0];
@@ -953,7 +963,8 @@ export class RegistrationCoordinator {
       if (isRegistrationTerminal(state)) {
         throw new ApiError(409, 'registration_finished', 'This registration has already ended.');
       }
-      const online = this.link.isOnline(row.agent_id as string);
+      // An import's command line is not reachable from here: it finds out at its next report (decision 0049).
+      const online = row.mode !== 'import' && this.link.isOnline(row.agent_id as string);
       // With no agent to wait for, or only a commit to stop, there is nothing to wait for.
       const immediate = state === 'queued' || state === 'committing' || !online;
       await connection.execute(
@@ -987,7 +998,10 @@ export class RegistrationCoordinator {
     const before = await this.require(operationId);
     if (before.state === 'committing') {
       const ack = await this.commit(operationId);
-      this.link.send(before.agentId, { type: 'server.registration_ack', payload: ack });
+      // An import's command line asks for its outcome itself (decision 0049).
+      if (before.mode !== 'import') {
+        this.link.send(before.agentId, { type: 'server.registration_ack', payload: ack });
+      }
     } else if (!isRegistrationCommitted(before.state)) {
       throw new ApiError(
         409,
@@ -1139,7 +1153,8 @@ export class RegistrationCoordinator {
 
     const placeholders = ACTIVE_STATES.map(() => '?').join(', ');
     const [active] = await this.pool.execute<OperationRow[]>(
-      `${OPERATION_QUERY} WHERE op.agent_id = ? AND op.state IN (${placeholders})`,
+      // An import belongs to the agent's command line, which its connection never lists (decision 0049).
+      `${OPERATION_QUERY} WHERE op.agent_id = ? AND op.mode <> 'import' AND op.state IN (${placeholders})`,
       [agentId, ...ACTIVE_STATES],
     );
     for (const row of active) {
@@ -1213,32 +1228,62 @@ export class RegistrationCoordinator {
   }
 
   private async verified(agentId: string, payload: VerifiedArchive): Promise<void> {
+    const row = await this.rowFor(agentId, payload.operationId);
+    if (row?.mode === 'import') {
+      // Only the command line that created an import completes it, over HTTP (decision 0049).
+      this.log.warn(
+        { agentId, operationId: payload.operationId },
+        'An import reported over the socket',
+      );
+      this.ack(agentId, { operationId: payload.operationId, outcome: 'rejected' });
+      return;
+    }
+    this.ack(agentId, await this.verifiedOutcome(agentId, payload, row));
+  }
+
+  /**
+   * The published OVA of an import from the agent's command line (decision 0049): the checks and the commit of any
+   * registration, with the answer returned rather than sent, since the command line asked for it. The archive must
+   * also be exactly the one the agent declared when it reserved the name.
+   */
+  async completeImport(
+    agentId: string,
+    payload: Omit<VerifiedArchive, 'manifest'>,
+  ): Promise<RegistrationAckPayload> {
+    const row = await this.rowFor(agentId, payload.operationId);
+    if (!row || row.mode !== 'import') {
+      return { operationId: payload.operationId, outcome: 'rejected' };
+    }
+    return this.verifiedOutcome(agentId, { ...payload, manifest: null }, row);
+  }
+
+  private async verifiedOutcome(
+    agentId: string,
+    payload: VerifiedArchive,
+    row: OperationRow | null,
+  ): Promise<RegistrationAckPayload> {
     const { operationId } = payload;
-    const row = await this.rowFor(agentId, operationId);
     if (!row) {
       // Not this agent's, or not known at all. Nothing is deleted on the word of an unknown operation.
       this.log.warn({ agentId, operationId }, 'A registration result for an unknown operation');
-      this.ack(agentId, { operationId, outcome: 'rejected' });
-      return;
+      return { operationId, outcome: 'rejected' };
     }
 
     if (isRegistrationCommitted(row.state)) {
       // The earlier acknowledgement was lost. Removal is allowed only while cleanup is what is left.
-      this.ack(agentId, {
+      return {
         operationId,
         outcome: 'committed',
         versionId: row.version_id,
         removeLocal: row.mode === 'transfer' && row.state === 'cleaning_local',
-      });
-      return;
+      };
     }
     if (isRegistrationTerminal(row.state)) {
-      this.ack(agentId, {
+      return {
         operationId,
         outcome: 'rejected',
         deletePublished: payload.versionId === row.version_id,
-      });
-      return;
+      };
     }
 
     // Only the identities this server issued count, and only the kind of archive this VM has: a ZIP with
@@ -1251,8 +1296,17 @@ export class RegistrationCoordinator {
     ) {
       this.log.error({ agentId, operationId }, 'A registration result with the wrong identities');
       await this.markFailed(operationId, 'invalid_result');
-      this.ack(agentId, { operationId, outcome: 'rejected' });
-      return;
+      return { operationId, outcome: 'rejected' };
+    }
+    if (
+      row.mode === 'import' &&
+      (payload.archiveSha256 !== row.import_sha256 ||
+        payload.archiveSizeBytes !== Number(row.import_size_bytes))
+    ) {
+      // Not the file that was declared: it is not registered, and nothing refers to it.
+      this.log.error({ agentId, operationId }, 'An import completed with another archive');
+      await this.markFailed(operationId, 'hash_mismatch');
+      return { operationId, outcome: 'rejected', deletePublished: true };
     }
 
     await this.pool.execute(
@@ -1274,7 +1328,7 @@ export class RegistrationCoordinator {
     );
     // If this throws, nothing was committed and no answer is sent. The agent will report this again,
     // and the archive stays where it is, ready for that.
-    this.ack(agentId, await this.commit(operationId));
+    return this.commit(operationId);
   }
 
   /**
@@ -1381,6 +1435,10 @@ export class RegistrationCoordinator {
       await this.commitSnapshotIn(connection, row);
       return committed;
     }
+    if (row.mode === 'import') {
+      await this.commitImportIn(connection, row);
+      return committed;
+    }
     if (row.mode === 'remaster') {
       // The new master replaces every version of the VM, in this transaction (decision 0048).
       const problem = this.remasters
@@ -1439,6 +1497,42 @@ export class RegistrationCoordinator {
       [operationId],
     );
     return committed;
+  }
+
+  /**
+   * An imported OVA (decision 0049): a new VirtualBox VM and its master, and nothing else. No machine is linked and
+   * no agent holds a copy of it, so there is no source and no agent state: the VM is imported into VirtualBox from
+   * its master, which links the machine that creates. Nothing is left to clean up, so it ends here.
+   */
+  private async commitImportIn(connection: PoolConnection, row: RowDataPacket): Promise<void> {
+    await connection.execute(
+      `INSERT INTO virtual_machines
+         (emulator_type, vm_name, description, registered_by_user_id, discovered_by_agent_id)
+       VALUES ('virtualbox', ?, ?, NULL, ?)`,
+      [row.vm_name, row.import_description ?? null, row.agent_id],
+    );
+    await connection.execute(
+      `INSERT INTO vm_versions
+         (id, emulator_type, vm_name, kind, repository_id, archive_key, archive_sha256,
+          archive_size_bytes, created_by_agent_id, created_by_user_id)
+       VALUES (?, 'virtualbox', ?, 'master', ?, ?, ?, ?, ?, NULL)`,
+      [
+        row.version_id,
+        row.vm_name,
+        row.repository_id,
+        row.archive_key,
+        row.archive_sha256,
+        row.archive_size_bytes,
+        row.agent_id,
+      ],
+    );
+    await connection.execute(
+      `UPDATE registration_operations
+       SET state = 'succeeded', local_copy = 'preserved', committed_at = UTC_TIMESTAMP(3),
+           finished_at = UTC_TIMESTAMP(3), progress_done_bytes = NULL, progress_total_bytes = NULL
+       WHERE id = ?`,
+      [row.id],
+    );
   }
 
   /**

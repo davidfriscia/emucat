@@ -51,6 +51,7 @@ export const REGISTRATION_MODE_TEXT: Record<RegistrationMode, string> = {
   transfer: 'Transfer',
   remaster: 'Remaster',
   snapshot: 'Snapshot',
+  import: 'OVA import',
 };
 
 /** How a version reads to a person: the master, or the snapshot's own name. */
@@ -487,7 +488,7 @@ export function RegistrationDialog({
   onStarted,
 }: {
   target: RegistrationTarget;
-  mode: Exclude<RegistrationMode, 'snapshot' | 'remaster'>;
+  mode: Exclude<RegistrationMode, 'snapshot' | 'remaster' | 'import'>;
   repository: RepositorySummary;
   onClose: () => void;
   onStarted: (operation: RegistrationOperation) => void;

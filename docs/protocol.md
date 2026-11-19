@@ -433,6 +433,12 @@ under version 1 for this reason:** an agent ignores message types it does not kn
 agent, so adding a message an agent sends requires a server that knows it first. A server only registers through an agent that
 has shown it can, with `agent.registration_sync`. **Milestone 5 added restoring the same way:** a server only restores through an agent that has sent `agent.restore_sync`.
 
+**Milestone 6.1 added OVA imports without touching this protocol:** `emucat-agent import-ova` uses HTTP routes under
+`/api/v1/agent/ova-imports` ([REST API](api.md#agent-ova-imports)), authenticated like agent media. The server never sends an
+import to an agent, and leaves imports out of `agent.registration_sync`, dispatch and reconciliation, so there is no new
+capability and no version change. An older server answers 404, reported as `server_unsupported`
+([decision 0049](decisions/0049-ova-repository-import.md)).
+
 ## User authentication
 
 Browser sessions are not part of this protocol. They are described in [authentication](authentication.md) and

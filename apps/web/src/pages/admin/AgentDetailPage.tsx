@@ -106,7 +106,7 @@ interface VmActions {
   registered: ReadonlySet<string>;
   onChoose: (
     vm: DiscoveryListedVm,
-    mode: Exclude<RegistrationMode, 'snapshot' | 'remaster'>,
+    mode: Exclude<RegistrationMode, 'snapshot' | 'remaster' | 'import'>,
   ) => void;
 }
 
@@ -416,7 +416,7 @@ function RegistrationWorkspace({ agent }: { agent: AgentSummary }) {
   if (active !== isActive) setActive(isActive);
   const [choice, setChoice] = useState<{
     target: RegistrationTarget;
-    mode: Exclude<RegistrationMode, 'snapshot' | 'remaster'>;
+    mode: Exclude<RegistrationMode, 'snapshot' | 'remaster' | 'import'>;
   } | null>(null);
 
   const [running, setRunning] = useState(false);

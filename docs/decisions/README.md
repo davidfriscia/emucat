@@ -53,3 +53,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0046](0046-virtualbox-management.md)                   | VirtualBox snapshots, imports, deletions and links, each by UUID              |
 | [0047](0047-virtualbox-import-links-and-polling.md)     | An import links the machine it creates; pages poll at the pace they show      |
 | [0048](0048-master-and-snapshot-lifecycle.md)           | A snapshot can become the master, a local copy can replace the history        |
+| [0049](0049-ova-repository-import.md)                   | An existing OVA is imported into the repository from the agent's command line |

@@ -139,7 +139,9 @@ The directory is the lowercase VM name. The file name is the version's UUID, so 
 master or snapshot is the OVA itself, uploaded and verified by size and SHA-256 like any archive, with no manifest of EmuCat's. Importing one
 into VirtualBox downloads it into the agent's staging directory, checks its size and SHA-256 again, and removes only that
 download afterwards ([decision 0046](decisions/0046-virtualbox-management.md)). Deleting a
-machine from VirtualBox never touches the repository. A remaster ([decision 0048](decisions/0048-master-and-snapshot-lifecycle.md))
+machine from VirtualBox never touches the repository. An OVA imported with `emucat-agent import-ova`
+([decision 0049](decisions/0049-ova-repository-import.md)) is stored the same way, as the file's own bytes, through the same
+staging, verification and publication without overwrite. A remaster ([decision 0048](decisions/0048-master-and-snapshot-lifecycle.md))
 reuses the promoted snapshot's object as it is, and deletes the objects of the versions it removes one exact key at a
 time, through an agent, after the new master is safe. Nothing overwrites or modifies an archive once it is there. Never edit them by hand: the database holds their hashes.
 

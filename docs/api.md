@@ -150,6 +150,39 @@ created }`, with 201 for a new item and 200 for bytes already stored for this VM
 | 422    | `hash_mismatch`                                                              | Retried, and a scan notices if the file changed         |
 | 503    | `media_busy`, `processing_timeout`, `temporarily_unavailable`                | Retried                                                 |
 
+## Agent OVA imports
+
+How `emucat-agent import-ova` reserves and registers an OVA it uploads itself. See
+[decision 0049](decisions/0049-ova-repository-import.md) and [the agent guide](agent.md#importing-an-existing-ova).
+Authentication is the same as for agent media: `Authorization: Bearer <agent credential>` and
+`X-EmuCat-Protocol-Version: 1`; a browser session means nothing. The agent comes from the credential, and every route
+sees only that agent's own imports. The OVA itself never reaches the server.
+
+| Route                                           | What it does                                                                                                                                 |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /agent/ova-imports/preflight`             | `{ vmName, archiveSizeBytes }`: whether this agent may import under this name, and which repository                                          |
+| `POST /agent/ova-imports`                       | `{ requestId, vmName, description?, sourceFileName, archiveSizeBytes, archiveSha256 }`: reserves. 201, or 200 for the same `requestId` again |
+| `GET /agent/ova-imports/:operationId`           | The operation, as on the Registrations page                                                                                                  |
+| `POST /agent/ova-imports/:operationId/progress` | `{ stage: uploading \| verifying, doneBytes, totalBytes }`. The answer says if it was cancelled                                              |
+| `POST /agent/ova-imports/:operationId/complete` | `{ versionId, archiveKey, archiveSizeBytes, archiveSha256 }`: registers, or `rejected` with `deletePublished`                                |
+| `POST /agent/ova-imports/:operationId/fail`     | `{ code, message }`: ends it as failed, or cancelled with code `cancelled`                                                                   |
+
+Every check is made on the server and again when it commits: the agent not revoked and not busy, associated with an
+enabled repository (the server chooses it), and the name free among VirtualBox VMs, ignoring case. The completion must
+match the size and SHA-256 declared when reserving and the key issued then.
+
+| Status | Code                                                                                                                                                                                            | Meaning                             |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| 400    | `invalid_request`, `unsupported_protocol_version`                                                                                                                                               | The request is wrong                |
+| 401    | `unauthorized`                                                                                                                                                                                  | Unknown or revoked credential       |
+| 404    | `import_not_found`                                                                                                                                                                              | No such import of this agent        |
+| 409    | `repository_not_authorized`: no enabled repository is associated with this agent. `vm_already_registered`, `registration_in_progress`, `agent_busy`, `request_conflict`, `invalid_import_state` | A conflict. Nothing changed         |
+| 413    | `archive_too_large`                                                                                                                                                                             | Over the limit the preflight states |
+| 503    | `temporarily_unavailable`                                                                                                                                                                       | The database is away. Retry         |
+
+An import is an operation with `mode: "import"` in `GET /admin/registrations`. An administrator's cancel takes effect
+at once, since no agent message is involved.
+
 ## Agent pairing
 
 Used by an agent with no credential yet. See the [protocol](protocol.md#pairing) for the flow. Responses are

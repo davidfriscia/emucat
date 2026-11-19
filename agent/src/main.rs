@@ -24,7 +24,25 @@ use uuid::Uuid;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(Command::ImportOva {
+        file,
+        name,
+        description,
+        dry_run,
+        json,
+    }) = cli.command.as_ref()
+    {
+        return ExitCode::from(import_ova(
+            &cli,
+            file,
+            name,
+            description.as_deref(),
+            *dry_run,
+            *json,
+        ));
+    }
     let result = match cli.command.as_ref().unwrap_or(&Command::Run) {
+        Command::ImportOva { .. } => unreachable!("handled above"),
         Command::Info => {
             print_info();
             Ok(())
@@ -408,6 +426,182 @@ fn discover(cli: &Cli) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
     println!("{json}");
     Ok(())
+}
+
+/// `import-ova` (decision 0049): an existing OVA becomes the master of a new VirtualBox catalog VM. Returns the exit
+/// code, which says what kind of problem there was.
+fn import_ova(
+    cli: &Cli,
+    file: &std::path::Path,
+    name: &str,
+    description: Option<&str>,
+    dry_run: bool,
+    json: bool,
+) -> u8 {
+    use emucat_agent::emulators::VmName;
+    use emucat_agent::import_cli::{Terminal, check_description};
+    use emucat_agent::ova_import::{
+        self, HttpImportApi, ImportError, ImportErrorKind as Kind, ImportRequest, ImportSettings,
+    };
+
+    let terminal = Terminal::new(json);
+    let fail = |kind: Kind, code: &str, message: String| {
+        terminal.finish(&Err(ImportError::new(kind, code, message)))
+    };
+
+    // The arguments and the file first: they need no configuration, no credential and no server.
+    let vm_name = match VmName::new(name) {
+        Ok(vm_name) => vm_name,
+        Err(error) => {
+            return fail(
+                Kind::InvalidInput,
+                "invalid_vm_name",
+                format!("Invalid catalog VM name: {error}"),
+            );
+        }
+    };
+    let description = match check_description(description) {
+        Ok(description) => description,
+        Err(error) => return terminal.finish(&Err(error)),
+    };
+    let path = match std::path::absolute(file) {
+        Ok(path) => path,
+        Err(error) => {
+            return fail(
+                Kind::InvalidInput,
+                "invalid_path",
+                format!("Invalid path: {error}"),
+            );
+        }
+    };
+    let inspection = match emucat_agent::ova::inspect(&path) {
+        Ok(inspection) => inspection,
+        Err(error) => return terminal.finish(&Err(error.into())),
+    };
+
+    let config = match load(cli) {
+        Ok(config) => config,
+        Err(error) => {
+            return fail(
+                Kind::Configuration,
+                "invalid_configuration",
+                error.to_string(),
+            );
+        }
+    };
+    // Logs only what is wrong: the progress is the terminal's. `--log-level` shows more.
+    let level = cli.log_level.clone().unwrap_or_else(|| "warn".to_owned());
+    if let Err(error) = logging::init(&level, config.log_format) {
+        return fail(
+            Kind::Configuration,
+            "invalid_configuration",
+            error.to_string(),
+        );
+    }
+    if validate(&config)
+        .iter()
+        .any(|issue| issue.severity == Severity::Error)
+    {
+        let _ = report_validation(&config);
+        return fail(
+            Kind::Configuration,
+            "invalid_configuration",
+            "The agent's configuration has errors. Run `emucat-agent check-config`".to_owned(),
+        );
+    }
+    if let Err(error) = check_transport(&config.api_url) {
+        return fail(
+            Kind::Configuration,
+            "invalid_configuration",
+            error.to_string(),
+        );
+    }
+    let state_dir = match config.state_dir.clone() {
+        Some(state_dir) => state_dir,
+        None => {
+            return fail(
+                Kind::Configuration,
+                "invalid_configuration",
+                "No state directory is configured and no default is known".to_owned(),
+            );
+        }
+    };
+    // The same credential `run` uses, and never sent to a server it does not belong to.
+    let stored = match credential_store(&config)
+        .and_then(|store| store.load().map_err(|error| error.to_string()))
+    {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            return fail(
+                Kind::Configuration,
+                "not_paired",
+                "This agent is not paired. Run `emucat-agent pair` first".to_owned(),
+            );
+        }
+        Err(error) => return fail(Kind::Configuration, "credential_unreadable", error),
+    };
+    if !stored.belongs_to(&config.api_url) {
+        return fail(
+            Kind::Configuration,
+            "credential_mismatch",
+            format!(
+                "The stored credential belongs to {}, not to {}. It is not sent to another server",
+                stored.server_origin, config.api_url
+            ),
+        );
+    }
+    let api = match HttpImportApi::new(&config.api_url, stored.credential) {
+        Ok(api) => api,
+        Err(error) => return fail(Kind::Configuration, "invalid_configuration", error),
+    };
+
+    terminal.banner(&path, vm_name.as_str(), config.api_url.as_str(), dry_run);
+    let settings = ImportSettings {
+        state_dir: state_dir.clone(),
+        server_origin: stored.server_origin.clone(),
+        api: Arc::new(api),
+        repositories: Arc::new(ConfiguredRepositories::new(
+            config.repositories.clone(),
+            state_dir,
+        )),
+        reporter: terminal.reporter(),
+        retry_delay: Duration::from_secs(5),
+    };
+    let request = ImportRequest {
+        file: path,
+        vm_name,
+        description,
+        dry_run,
+        inspection: Some(inspection),
+    };
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => return fail(Kind::Internal, "internal_error", error),
+    };
+    let result = runtime.block_on(async {
+        let cancel = CancelFlag::new();
+        // The first Ctrl+C asks for a cancellation, which still tells the server and cleans up. A second one leaves
+        // at once: the journal lets the next run settle whatever was left.
+        let watcher = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                if shutdown::wait_for_signal().await.is_ok() {
+                    cancel.cancel();
+                    eprintln!(
+                        "\nCancelling... Press Ctrl+C again to leave at once; the next run settles what is left."
+                    );
+                    if shutdown::wait_for_signal().await.is_ok() {
+                        std::process::exit(130);
+                    }
+                }
+            })
+        };
+        let result = ova_import::run(&settings, request, &cancel).await;
+        watcher.abort();
+        result
+    });
+    runtime.shutdown_timeout(Duration::from_secs(5));
+    terminal.finish(&result)
 }
 
 /// Everything a launch checks, and the command it would run. Starts nothing.
