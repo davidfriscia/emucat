@@ -489,6 +489,281 @@ fn hashing_stops_when_cancelled() {
     assert_eq!(error.kind, OvaErrorKind::Cancelled);
 }
 
+// Archives that end exactly after their last entry, with no end marker (M6.1.1). Some exporters write them; they
+// are complete when the file ends exactly where the last entry's padding does, and truncated otherwise.
+
+/// [`virtualbox_ova`], without the two zero blocks at the end.
+fn unterminated(bytes: Vec<u8>) -> Vec<u8> {
+    let end = bytes.len() - 1024;
+    assert!(
+        bytes[end..].iter().all(|&byte| byte == 0),
+        "the builder's end marker"
+    );
+    bytes[..end].to_vec()
+}
+
+fn inspect_bytes(bytes: &[u8]) -> Result<ova::OvaInspection, ova::OvaError> {
+    ova::inspect_reader(&mut Cursor::new(bytes), bytes.len() as u64)
+}
+
+#[test]
+fn an_archive_ending_right_after_its_last_entry_is_complete() {
+    let terminated = virtualbox_ova("DOS", &disk(70_000));
+    let bytes = unterminated(terminated.clone());
+    assert_eq!(bytes.len() % 512, 0);
+    let inspection = inspect_bytes(&bytes).unwrap();
+    assert_eq!(inspection.entries.len(), 3);
+    assert_eq!(inspection.manifest.as_deref(), Some("DOS.mf"));
+    // The manifest is still checked, part by part, and so is the whole file, byte for byte.
+    assert_eq!(inspection.checked_digests().count(), 2);
+    let (size, sha256) = ova::hash_reader(
+        &mut Cursor::new(&bytes),
+        &inspection,
+        &CancelFlag::new(),
+        &|_, _| {},
+    )
+    .unwrap();
+    assert_eq!(size, bytes.len() as u64);
+    assert_eq!(sha256, hex(&Sha256::digest(&bytes)));
+    // And a terminated archive is as it was.
+    assert_eq!(inspect_bytes(&terminated).unwrap().entries.len(), 3);
+}
+
+#[test]
+fn a_last_entry_that_needs_no_padding_ends_the_archive_too() {
+    // As in the Xenix export: the disk is a whole number of blocks, and the manifest is last.
+    let bytes = unterminated(virtualbox_ova("DOS", &disk(512 * 40)));
+    assert!(inspect_bytes(&bytes).is_ok());
+    let only_blocks = unterminated(
+        Tar::default()
+            .file("DOS.ovf", ovf("DOS", &["disk.vmdk"]).as_bytes())
+            .file("disk.vmdk", &disk(1024))
+            .finish(),
+    );
+    let inspection = inspect_bytes(&only_blocks).unwrap();
+    assert_eq!(inspection.entries[1].size_bytes, 1024);
+    assert_eq!(inspection.manifest, None);
+}
+
+#[test]
+fn an_empty_manifest_is_accepted_and_proves_nothing() {
+    // As in the Windows XP export: the manifest is the last entry, and empty.
+    let descriptor = ovf("XP", &["XP-disk001.vmdk"]);
+    let tar = Tar::default()
+        .file("XP.ovf", descriptor.as_bytes())
+        .file("XP-disk001.vmdk", &disk(10_000))
+        .file("XP.mf", b"");
+    for bytes in [
+        unterminated(
+            Tar {
+                bytes: tar.bytes.clone(),
+            }
+            .finish(),
+        ),
+        Tar { bytes: tar.bytes }.finish(),
+    ] {
+        let inspection = inspect_bytes(&bytes).unwrap();
+        assert_eq!(inspection.manifest.as_deref(), Some("XP.mf"));
+        assert_eq!(inspection.entries[2].size_bytes, 0);
+        assert!(inspection.manifest_digests.is_empty());
+        assert_eq!(
+            inspection.checked_digests().count(),
+            0,
+            "no digest is invented"
+        );
+        let (_, sha256) = ova::hash_reader(
+            &mut Cursor::new(&bytes),
+            &inspection,
+            &CancelFlag::new(),
+            &|_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            sha256,
+            hex(&Sha256::digest(&bytes)),
+            "the whole file is still hashed"
+        );
+    }
+}
+
+#[test]
+fn a_manifest_without_an_end_marker_is_still_checked() {
+    let mut bytes = unterminated(virtualbox_ova("DOS", &disk(10_000)));
+    let offset = inspect_bytes(&bytes).unwrap().entries[1].data_offset;
+    bytes[usize::try_from(offset).unwrap() + 10] ^= 0x01;
+    let inspection = inspect_bytes(&bytes).unwrap();
+    let error = ova::hash_reader(
+        &mut Cursor::new(&bytes),
+        &inspection,
+        &CancelFlag::new(),
+        &|_, _| {},
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, OvaErrorKind::ManifestMismatch);
+    // A digest line that is not one, and a manifest naming a missing file.
+    for manifest in [
+        "not a digest\n".to_owned(),
+        format!("SHA256(gone.vmdk)= {}\n", "0".repeat(64)),
+    ] {
+        let bytes = unterminated(
+            Tar::default()
+                .file("DOS.ovf", ovf("DOS", &[]).as_bytes())
+                .file("DOS.mf", manifest.as_bytes())
+                .finish(),
+        );
+        assert_eq!(
+            inspect_bytes(&bytes).unwrap_err().kind,
+            OvaErrorKind::InvalidManifest,
+            "{manifest}"
+        );
+    }
+}
+
+#[test]
+fn an_archive_cut_anywhere_but_an_entry_boundary_is_truncated() {
+    let whole = unterminated(virtualbox_ova("DOS", &disk(70_000)));
+    let entries = inspect_bytes(&whole).unwrap().entries;
+    let manifest = &entries[2];
+    let manifest_header = usize::try_from(manifest.data_offset).unwrap() - 512;
+    let manifest_data_end = usize::try_from(manifest.data_offset + manifest.size_bytes).unwrap();
+    let disk_data = usize::try_from(entries[1].data_offset).unwrap();
+    let cases = [
+        // In the middle of a header.
+        (manifest_header + 100, "header"),
+        (manifest_header + 511, "header"),
+        // In the middle of a file's data.
+        (disk_data + 1000, "middle of a file"),
+        (manifest_data_end - 1, "middle of a file"),
+        // After the data, in its padding.
+        (manifest_data_end, "padding"),
+        (whole.len() - 1, "padding"),
+    ];
+    for (cut, what) in cases {
+        let error = inspect_bytes(&whole[..cut]).unwrap_err();
+        assert_eq!(error.kind, OvaErrorKind::Truncated, "cut at {cut}");
+        assert!(
+            error.message.contains(what),
+            "cut at {cut}: {}",
+            error.message
+        );
+    }
+    // Cutting exactly after the disk is a complete archive of two entries: the manifest is simply not there.
+    assert_eq!(
+        inspect_bytes(&whole[..manifest_header])
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn only_a_proper_end_marker_or_an_entry_boundary_ends_an_archive() {
+    let whole = unterminated(virtualbox_ova("DOS", &disk(10_000)));
+    let with = |tail: &[u8]| {
+        let mut bytes = whole.clone();
+        bytes.extend_from_slice(tail);
+        inspect_bytes(&bytes)
+            .map(|_| ())
+            .map_err(|error| error.kind)
+    };
+    // A full end marker, or one zero block, as tar itself accepts.
+    assert_eq!(with(&[0; 1024]), Ok(()));
+    assert_eq!(with(&[0; 512]), Ok(()));
+    // Zeros that are not a whole block, or a partial header, are not an end.
+    assert_eq!(with(&[0; 100]), Err(OvaErrorKind::Truncated));
+    assert_eq!(
+        with(&header("next.vmdk", 10, b'0')[..300]),
+        Err(OvaErrorKind::Truncated)
+    );
+    // Data that is not a header, and data after a zero block.
+    assert_eq!(with(&[0x41; 512]), Err(OvaErrorKind::Malformed));
+    let mut after_zero = vec![0u8; 512];
+    after_zero.extend_from_slice(&[0x41; 512]);
+    assert_eq!(with(&after_zero), Err(OvaErrorKind::Malformed));
+    // An extended header with nothing after it.
+    let pax = Tar::default().pax_path("next.vmdk").bytes;
+    assert_eq!(with(&pax), Err(OvaErrorKind::Truncated));
+    // A header with a damaged checksum.
+    let mut damaged = header("next.vmdk", 0, b'0');
+    damaged[0] ^= 0x20;
+    assert_eq!(with(&damaged), Err(OvaErrorKind::Malformed));
+}
+
+#[test]
+fn the_other_checks_apply_without_an_end_marker_too() {
+    let descriptor = ovf("DOS", &[]);
+    let check = |tar: Tar| inspect_bytes(&unterminated(tar.finish())).unwrap_err().kind;
+    assert_eq!(
+        check(Tar::default().file("disk.vmdk", &disk(10))),
+        OvaErrorKind::MissingDescriptor
+    );
+    assert_eq!(
+        check(Tar::default().file("DOS.ovf", ovf("DOS", &["missing.vmdk"]).as_bytes())),
+        OvaErrorKind::InvalidDescriptor
+    );
+    assert_eq!(
+        check(
+            Tar::default()
+                .file("DOS.ovf", descriptor.as_bytes())
+                .file("../evil.vmdk", b"x")
+        ),
+        OvaErrorKind::UnsafeEntry
+    );
+    assert_eq!(
+        check(
+            Tar::default()
+                .file("DOS.ovf", descriptor.as_bytes())
+                .pax_path("/etc/passwd")
+                .file("x", b"x")
+        ),
+        OvaErrorKind::UnsafeEntry
+    );
+    assert_eq!(
+        check(
+            Tar::default()
+                .file("DOS.ovf", descriptor.as_bytes())
+                .file("a.vmdk", b"x")
+                .file("A.VMDK", b"y")
+        ),
+        OvaErrorKind::Malformed
+    );
+    assert_eq!(
+        check(
+            Tar::default()
+                .file("DOS.ovf", descriptor.as_bytes())
+                .entry("link.vmdk", b'2', b"")
+        ),
+        OvaErrorKind::UnsafeEntry
+    );
+}
+
+#[test]
+fn a_dry_run_accepts_an_archive_without_an_end_marker() {
+    let world = World::new();
+    let bytes = unterminated(world.bytes.clone());
+    fs::write(&world.file, &bytes).unwrap();
+    let report = runtime()
+        .block_on(ova_import::run(
+            &world.settings(),
+            world.request(true),
+            &CancelFlag::new(),
+        ))
+        .unwrap();
+    assert_eq!(report.status, Outcome::DryRun);
+    assert_eq!(report.size_bytes, bytes.len() as u64);
+    assert_eq!(report.sha256, hex(&Sha256::digest(&bytes)));
+    assert_eq!(report.ovf.manifest.as_deref(), Some("DOS-6.22.mf"));
+    assert_eq!(report.ovf.manifest_digests_checked, 2);
+    assert_eq!(world.server.calls(), ["preflight"]);
+    assert!(world.repository.keys().is_empty());
+    assert_eq!(
+        fs::read(&world.file).unwrap(),
+        bytes,
+        "the file is untouched"
+    );
+}
+
 // The workflow, against a repository in memory and a scripted server.
 
 #[derive(Default)]

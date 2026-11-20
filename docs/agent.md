@@ -333,9 +333,15 @@ it. The server picks the repository: the agent's associated, enabled one.
 
 1. **Validating**: the file is a regular `.ova` TAR archive, undamaged and complete, with the OVF descriptor first, a
    valid OVF envelope with a virtual system, every referenced file present, safe names only (no `..`, absolute path,
-   link or subdirectory), and no XML document type. Nothing is extracted.
+   link or subdirectory), and no XML document type. Nothing is extracted. An archive may end with the usual TAR end
+   marker, or exactly after its last file, as some exporters write it; one that stops anywhere else (inside a header,
+   a file or its padding) is refused as truncated.
 2. **Checking catalog**: the server confirms the agent may import, which repository, and that the name is free.
-3. **Hashing**: SHA-256 of the whole file, and each manifest digest checked against its part.
+3. **Hashing**: SHA-256 of the whole file, and each SHA-256 in the manifest checked against its part. A manifest is
+   optional; an empty one, or one with only SHA-1 digests, checks nothing, and the summary says so
+   (`Manifest: …, with no SHA-256 digest, so no part was checked against it`). These checks prove the archive is
+   complete and its parts are what it declares, not that the disk image inside boots: VirtualBox finds that out when
+   the master is imported. The file's bytes are uploaded as they are, never rewritten.
 4. **Reserving**: the server reserves the name and issues the version and archive key
    `archives/virtualbox/<name>/<version>.ova`.
 5. **Uploading**, **Verifying**, **Publishing**: straight to the repository's staging key, read back and hashed there,

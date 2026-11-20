@@ -432,6 +432,9 @@ pub struct OvfSummary {
     pub virtual_systems: Vec<String>,
     pub files: usize,
     pub virtualbox_machine: bool,
+    /// The manifest's name, when there is one. It may be empty, and then nothing was checked against it.
+    pub manifest: Option<String>,
+    /// How many parts were hashed and matched a SHA-256 in the manifest. Zero without one, or with an empty one.
     pub manifest_digests_checked: usize,
 }
 
@@ -443,6 +446,7 @@ impl OvfSummary {
             virtual_systems: inspection.virtual_systems.clone(),
             files: inspection.entries.len(),
             virtualbox_machine: inspection.virtualbox_machine,
+            manifest: inspection.manifest.clone(),
             manifest_digests_checked: inspection.checked_digests().count(),
         }
     }

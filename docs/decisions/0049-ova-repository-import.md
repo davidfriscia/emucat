@@ -28,9 +28,16 @@ and nothing else. It needs no running `emucat-agent run`, and does not disturb o
 
 The file is checked by streaming (`agent/src/ova.rs`), never extracted, executed or handed to VirtualBox:
 
-- It must be a regular file ending in `.ova`, and a TAR archive whose every header checksum is right, ending with
-  its end marker. A truncated, damaged or non-TAR file is refused. Headers are read and data is seeked over, so the
-  check reads kilobytes, whatever the disk's size.
+- It must be a regular file ending in `.ova`, and a TAR archive whose every header checksum is right. A truncated,
+  damaged or non-TAR file is refused. Headers are read and data is seeked over, so the check reads kilobytes,
+  whatever the disk's size.
+- **The archive ends** with its end marker (zero blocks, whatever follows them being zeros too), or, as some
+  exporters write it (M6.1.1), **exactly where the last entry's padding ends**, with nothing after it. Every entry
+  has then been read whole, so this is complete. Nothing else ends an archive: a file that stops inside a header,
+  inside a file's data or its padding, after an extended header with no entry, or with trailing bytes that are not a
+  whole zero block, is refused as truncated or damaged. Completeness is decided by these exact boundaries, never by
+  the file's size alone. It is only the archive's structure: whether the disk image inside is sound is not checked,
+  and VirtualBox decides that when the master is imported.
 - Every entry must be a regular file at the top level with a safe name: no `..`, no absolute path, no drive, no
   control character, no link, no device, no directory, no duplicate (ignoring case). PAX and GNU long names are read,
   and checked like any other.
@@ -38,8 +45,11 @@ The file is checked by streaming (`agent/src/ova.rs`), never extracted, executed
   document type: a `DOCTYPE` is refused, so no entity is ever expanded or fetched. The root must be an OVF 1 or 2
   `Envelope`, with at least one `VirtualSystem`. Every `References/File href` must name a file in the archive; an
   external URL is refused.
-- A manifest (`.mf`), when present, must name only files that are there. While hashing, each SHA-256 entry is
-  checked against the bytes of its part. SHA-1 entries are read but not relied on.
+- A manifest (`.mf`) is optional. When present, it must name only files that are there. While hashing, each SHA-256
+  entry is checked against the bytes of its part. SHA-1 entries are read and must be well formed, but are not
+  relied on. **An empty manifest** is accepted as declaring nothing, like one with only SHA-1 entries: no part is
+  then reported as checked against it (the command says so), and the descriptor's references, the TAR structure,
+  the whole file's SHA-256 and the repository's verification are checked as for any other.
 - The whole file is hashed with SHA-256 in one pass, in 1 MiB chunks, and its size and modification time are checked
   again before upload. The bytes uploaded are the file's own: nothing is rewritten.
 

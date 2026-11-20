@@ -178,6 +178,16 @@ impl Terminal {
                             ""
                         }
                     ));
+                    // What the manifest proved, and no more: an empty one, or one with only SHA-1, proves nothing.
+                    match (&report.ovf.manifest, report.ovf.manifest_digests_checked) {
+                        (None, _) => self.line("Manifest: none, so no part was checked against one"),
+                        (Some(name), 0) => self.line(&format!(
+                            "Manifest: {name}, with no SHA-256 digest, so no part was checked against it"
+                        )),
+                        (Some(name), count) => {
+                            self.line(&format!("Manifest: {name}, {count} SHA-256 digest(s) matched"));
+                        }
+                    }
                     match &report.repository_name {
                         Some(name) => {
                             self.line(&format!("Repository: {name} ({})", report.repository_id))

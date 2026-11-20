@@ -510,10 +510,25 @@ fn walk<R: Read + Seek>(reader: &mut R, length: u64) -> Result<Vec<OvaEntry>, Ov
     let mut pax: (Option<String>, Option<u64>) = (None, None);
     let mut block = [0u8; BLOCK as usize];
     loop {
-        if position + BLOCK > length {
+        // The file ends exactly where the previous entry's padding ends, with no end marker. Some exporters write
+        // OVAs this way, and every entry has been read whole, so this is a complete archive. Only that exact
+        // boundary counts: anything shorter than a header, or an extended header with no entry after it, does not.
+        if position == length && !entries.is_empty() {
+            if long_name.is_some() || pax != (None, None) {
+                return Err(error(
+                    OvaErrorKind::Truncated,
+                    "The archive ends after an extended header, before the file it describes: it is truncated",
+                ));
+            }
+            break;
+        }
+        if position
+            .checked_add(BLOCK)
+            .is_none_or(|header_end| header_end > length)
+        {
             return Err(error(
                 OvaErrorKind::Truncated,
-                "The archive ends before its end marker: the file is truncated",
+                "The archive ends in the middle of a header: the file is truncated",
             ));
         }
         reader
@@ -552,10 +567,17 @@ fn walk<R: Read + Seek>(reader: &mut R, length: u64) -> Result<Vec<OvaEntry>, Ov
         let next = data_offset
             .checked_add(padded)
             .ok_or_else(|| malformed("A size is too large"))?;
+        // `next` is at least `data_offset + size`, so it cannot overflow where this would.
         if data_offset + size > length {
             return Err(error(
                 OvaErrorKind::Truncated,
                 "The archive ends in the middle of a file: it is truncated",
+            ));
+        }
+        if next > length {
+            return Err(error(
+                OvaErrorKind::Truncated,
+                "The archive ends in the padding after a file: it is truncated",
             ));
         }
         match header.kind {
