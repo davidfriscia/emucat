@@ -155,7 +155,11 @@ function options(): ExecutionOptionsResponse {
   };
 }
 
-function discovery(): DiscoveryOperation {
+/** Ten minutes either side of now: inside and outside the server's validity window, whenever the test runs. */
+const soon = () => new Date(Date.now() + 10 * 60_000).toISOString();
+const ago = () => new Date(Date.now() - 10 * 60_000).toISOString();
+
+function discovery(overrides: Partial<DiscoveryOperation> = {}): DiscoveryOperation {
   return {
     id: DISCOVERY_ID,
     agentId: AGENT_ID,
@@ -167,7 +171,7 @@ function discovery(): DiscoveryOperation {
     emulators: [],
     vms: [],
     skipped: [],
-    expiresAt: '2030-01-01T00:00:00.000Z',
+    expiresAt: soon(),
     fromCurrentConnection: true,
     virtualbox: {
       status: 'ok',
@@ -180,6 +184,7 @@ function discovery(): DiscoveryOperation {
       ],
     },
     virtualboxRegistrations: [{ machineUuid: MACHINE, vmName: 'xenix-386' }],
+    ...overrides,
   };
 }
 
@@ -388,6 +393,226 @@ describe('the machine of a VirtualBox VM', () => {
     expect((await view.findByRole('alert')).textContent).toMatch(/EmuCat removes none of them/);
     expect(view.getByText(IMPORTED)).toBeTruthy();
     expect(view.queryByRole('button', { name: /Link this machine|Replace link with/ })).toBeNull();
+  });
+});
+
+describe('linking a machine from the latest discovery', () => {
+  const DISCOVERY_PATH = `/admin/agents/${AGENT_ID}/discovery`;
+  const OLD_DISCOVERY_PATH = `/admin/agents/${OLD_AGENT_ID}/discovery`;
+
+  async function openLinkDialog(button = 'Change machine…') {
+    renderAt(VM_PATH);
+    fireEvent.click(await screen.findByRole('button', { name: button }));
+    return within(await screen.findByRole('dialog'));
+  }
+
+  async function expectGuidance(
+    dialog: ReturnType<typeof within>,
+    title: string,
+    submit = 'Replace link',
+  ) {
+    const status = await dialog.findByText(title);
+    expect(dialog.queryAllByRole('radio')).toHaveLength(0);
+    expect(disabled(dialog.getByRole('button', { name: submit }))).toBe(true);
+    const link = dialog.getByRole('link', { name: 'Go to Agent page' });
+    expect(link.getAttribute('href')).toBe(`/admin/agents/${AGENT_ID}`);
+    return status;
+  }
+
+  it('explains what to do when the agent has no discovery', async () => {
+    routes({
+      [`GET ${MANAGEMENT_PATH}`]: management({ source: null }),
+      [`GET ${DISCOVERY_PATH}`]: { operation: null },
+    });
+    const dialog = await openLinkDialog('Link a machine…');
+    await expectGuidance(dialog, 'No recent VirtualBox discovery available', 'Link');
+    expect(dialog.getByText(/open the Agent page and run VirtualBox discovery/)).toBeTruthy();
+  });
+
+  it('does not offer the machines of an expired discovery', async () => {
+    routes({ [`GET ${DISCOVERY_PATH}`]: { operation: discovery({ expiresAt: ago() }) } });
+    const dialog = await openLinkDialog();
+    await expectGuidance(dialog, 'No recent VirtualBox discovery available');
+    expect(dialog.queryByText(/Xenix spare/)).toBeNull();
+  });
+
+  it('treats a discovery without a readable expiry as expired', async () => {
+    routes({ [`GET ${DISCOVERY_PATH}`]: { operation: discovery({ expiresAt: null }) } });
+    const dialog = await openLinkDialog();
+    await expectGuidance(dialog, 'No recent VirtualBox discovery available');
+  });
+
+  it('does not offer the machines of a discovery from an earlier connection', async () => {
+    routes({
+      [`GET ${DISCOVERY_PATH}`]: { operation: discovery({ fromCurrentConnection: false }) },
+    });
+    const dialog = await openLinkDialog();
+    await expectGuidance(dialog, 'No recent VirtualBox discovery available');
+    expect(dialog.queryByText(/Xenix spare/)).toBeNull();
+  });
+
+  it('says a running discovery is not complete yet', async () => {
+    routes({
+      [`GET ${DISCOVERY_PATH}`]: {
+        operation: discovery({ status: 'running', finishedAt: null, expiresAt: null }),
+      },
+    });
+    const dialog = await openLinkDialog();
+    await expectGuidance(dialog, 'VirtualBox discovery is not complete');
+    expect(dialog.getByText(/return when it has finished/)).toBeTruthy();
+  });
+
+  it('says a failed discovery failed, and to run it again', async () => {
+    routes({
+      [`GET ${DISCOVERY_PATH}`]: {
+        operation: discovery({
+          status: 'failed',
+          expiresAt: null,
+          failure: { code: 'timeout', message: 'The agent did not answer in time.' },
+        }),
+      },
+    });
+    const dialog = await openLinkDialog();
+    await expectGuidance(dialog, 'The latest VirtualBox discovery failed');
+    expect(dialog.getByText('The agent did not answer in time.')).toBeTruthy();
+    expect(dialog.getByText(/run VirtualBox discovery again/)).toBeTruthy();
+  });
+
+  it('offers the eligible machines of a valid discovery, and links only once one is chosen', async () => {
+    routes();
+    const dialog = await openLinkDialog();
+    const spare = await dialog.findByLabelText(/Xenix spare/);
+    expect(dialog.queryByText('No recent VirtualBox discovery available')).toBeNull();
+    expect(dialog.queryByRole('link', { name: 'Go to Agent page' })).toBeNull();
+    const submit = dialog.getByRole('button', { name: 'Replace link' });
+    expect(disabled(submit)).toBe(true);
+    fireEvent.click(spare);
+    expect(disabled(submit)).toBe(false);
+  });
+
+  it('says so when no machine of the discovery can be linked, and still says why for each', async () => {
+    routes({
+      [`GET ${DISCOVERY_PATH}`]: {
+        operation: discovery({
+          virtualboxRegistrations: [
+            { machineUuid: MACHINE, vmName: 'xenix-386' },
+            { machineUuid: SPARE, vmName: 'os2-warp' },
+          ],
+        }),
+      },
+    });
+    const dialog = await openLinkDialog();
+    expect(
+      await dialog.findByText(
+        'No eligible VirtualBox machines were found in the latest discovery.',
+      ),
+    ).toBeTruthy();
+    expect(dialog.getByText(/Linked to this VM now/)).toBeTruthy();
+    expect(dialog.getByText(/Linked to os2-warp/)).toBeTruthy();
+    expect(dialog.getByText(/Power it off first/)).toBeTruthy();
+    expect(disabled(dialog.getByRole('button', { name: 'Replace link' }))).toBe(true);
+  });
+
+  it('reads the other agent’s discovery when the agent changes, and forgets the choice', async () => {
+    const api = routes({
+      [`GET ${OLD_DISCOVERY_PATH}`]: { operation: null },
+    });
+    const dialog = await openLinkDialog();
+    fireEvent.click(await dialog.findByLabelText(/Xenix spare/));
+    const submit = dialog.getByRole('button', { name: 'Replace link' });
+    expect(disabled(submit)).toBe(false);
+    fireEvent.change(dialog.getByLabelText('Agent'), { target: { value: OLD_AGENT_ID } });
+    expect(await dialog.findByText('No recent VirtualBox discovery available')).toBeTruthy();
+    expect(api.callsTo('GET', OLD_DISCOVERY_PATH)).toHaveLength(1);
+    expect(dialog.getByRole('link', { name: 'Go to Agent page' }).getAttribute('href')).toBe(
+      `/admin/agents/${OLD_AGENT_ID}`,
+    );
+    expect(disabled(submit)).toBe(true);
+    // Back to the first agent: its discovery is read again, and nothing is chosen.
+    fireEvent.change(dialog.getByLabelText('Agent'), { target: { value: AGENT_ID } });
+    const spare = (await dialog.findByLabelText(/Xenix spare/)) as HTMLInputElement;
+    expect(spare.checked).toBe(false);
+    expect(disabled(submit)).toBe(true);
+    expect(api.callsTo('GET', DISCOVERY_PATH)).toHaveLength(2);
+  });
+
+  it('reads the discovery again each time the dialog opens', async () => {
+    let reply: unknown = { operation: null };
+    const api = routes({ [`GET ${DISCOVERY_PATH}`]: () => reply });
+    const view = await machineSection();
+    fireEvent.click(view.getByRole('button', { name: 'Change machine…' }));
+    let dialog = within(await screen.findByRole('dialog'));
+    await dialog.findByText('No recent VirtualBox discovery available');
+    fireEvent.click(dialog.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // Discovery was run on the agent's page in the meantime.
+    reply = { operation: discovery() };
+    fireEvent.click(view.getByRole('button', { name: 'Change machine…' }));
+    dialog = within(await screen.findByRole('dialog'));
+    expect(await dialog.findByLabelText(/Xenix spare/)).toBeTruthy();
+    expect(api.callsTo('GET', DISCOVERY_PATH)).toHaveLength(2);
+  });
+
+  it('runs no discovery from the dialog, and leads to the agent’s page', async () => {
+    const api = routes({
+      [`GET ${DISCOVERY_PATH}`]: { operation: null },
+      [`GET /admin/agents/${AGENT_ID}`]: new Promise(() => undefined),
+    });
+    const dialog = await openLinkDialog();
+    const link = await dialog.findByRole('link', { name: 'Go to Agent page' });
+    expect(dialog.queryByRole('button', { name: /discover/i })).toBeNull();
+    fireEvent.click(link);
+    await waitFor(() =>
+      expect(screen.getByTestId('location').textContent).toBe(`/admin/agents/${AGENT_ID}`),
+    );
+    expect(api.calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+  });
+
+  it('chooses no agent for the user when the linked machine’s agent cannot be used', async () => {
+    const api = routes({
+      [`GET ${MANAGEMENT_PATH}`]: management({
+        source: source({ agentId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f99', agentName: 'Gone PC' }),
+      }),
+      [`GET ${OLD_DISCOVERY_PATH}`]: { operation: discovery({ agentId: OLD_AGENT_ID }) },
+    });
+    const dialog = await openLinkDialog();
+    const select = dialog.getByLabelText('Agent') as HTMLSelectElement;
+    expect(select.value).toBe('');
+    expect(dialog.getByText(/Gone PC cannot link a VirtualBox machine now/)).toBeTruthy();
+    expect(api.calls.filter((call) => call.path.endsWith('/discovery'))).toHaveLength(0);
+    fireEvent.change(select, { target: { value: OLD_AGENT_ID } });
+    expect(await dialog.findByLabelText(/Xenix spare/)).toBeTruthy();
+  });
+
+  it('says when no agent can link a machine at all', async () => {
+    routes({ [`GET ${MANAGEMENT_PATH}`]: management({ source: null, agents: [] }) });
+    const dialog = await openLinkDialog('Link a machine…');
+    expect(dialog.getByText('No agent can link a VirtualBox machine')).toBeTruthy();
+    expect(dialog.getByRole('link', { name: 'Go to Agents page' }).getAttribute('href')).toBe(
+      '/admin/agents',
+    );
+    expect(disabled(dialog.getByRole('button', { name: 'Link' }))).toBe(true);
+  });
+
+  it('leaves linking an imported machine from its history as it was, without discovery', async () => {
+    const api = routes({
+      [`GET ${MANAGEMENT_PATH}`]: management({ source: null, operations: [operation()] }),
+      [`GET ${DISCOVERY_PATH}`]: { operation: null },
+      [`POST ${MANAGEMENT_PATH}/link`]: operation({ kind: 'link' }),
+    });
+    renderAt(VM_PATH);
+    fireEvent.click(await screen.findByRole('button', { name: 'Link this machine…' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Link the imported machine' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Link' }));
+    await waitFor(() =>
+      expect(api.callsTo('POST', `${MANAGEMENT_PATH}/link`)[0]?.body).toEqual({
+        agentId: AGENT_ID,
+        machineUuid: IMPORTED,
+        importOperationId: IMPORT_ID,
+        replaceMachineUuid: null,
+      }),
+    );
+    expect(api.calls.filter((call) => call.path.endsWith('/discovery'))).toHaveLength(0);
   });
 });
 

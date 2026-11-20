@@ -27,6 +27,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
+import { Link } from 'react-router';
 import {
   deleteFromVirtualBox,
   fetchDiscovery,
@@ -714,9 +715,59 @@ function FormDialog({
   );
 }
 
+/** Why an agent's latest discovery cannot be linked from, or `null` when it can. */
+type DiscoveryProblem = 'none' | 'running' | 'failed' | 'expired' | 'previous_connection';
+
+/**
+ * Whether a report can still be linked from, by the server's own fields: completed, not yet expired, and from the
+ * agent's current connection. A missing or unreadable `expiresAt` counts as expired. The server checks all of this
+ * again, and refuses a stale report whatever this says.
+ */
+function discoveryProblem(
+  discovery: DiscoveryOperation | null,
+  now: number,
+): DiscoveryProblem | null {
+  if (!discovery) return 'none';
+  if (discovery.status === 'failed') return 'failed';
+  if (discovery.status !== 'completed') return 'running';
+  const expiresAt = discovery.expiresAt === null ? Number.NaN : Date.parse(discovery.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return 'expired';
+  if (discovery.fromCurrentConnection !== true) return 'previous_connection';
+  return null;
+}
+
+/** The time now, read again once `at` passes, so that a report expiring while the dialog is open stops counting. */
+function useClockPast(at: string | null): number {
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const when = at === null ? Number.NaN : Date.parse(at);
+    if (!Number.isFinite(when)) return undefined;
+    const timer = setTimeout(() => setClock(Date.now()), Math.max(0, when - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [at]);
+  return clock;
+}
+
+const RUN_DISCOVERY =
+  'To link a machine, open the Agent page and run VirtualBox discovery. Then return here to select the machine.';
+
+const DISCOVERY_GUIDANCE: Record<DiscoveryProblem, { title: string; text: string }> = {
+  none: { title: 'No recent VirtualBox discovery available', text: RUN_DISCOVERY },
+  expired: { title: 'No recent VirtualBox discovery available', text: RUN_DISCOVERY },
+  previous_connection: { title: 'No recent VirtualBox discovery available', text: RUN_DISCOVERY },
+  running: {
+    title: 'VirtualBox discovery is not complete',
+    text: 'Check its status on the Agent page and return when it has finished.',
+  },
+  failed: {
+    title: 'The latest VirtualBox discovery failed',
+    text: 'Open the Agent page and run VirtualBox discovery again. Then return here to select the machine.',
+  },
+};
+
 /**
  * Links a machine an agent's latest discovery saw. Only a machine that is powered off and readable can be linked,
- * and only one no other catalog VM is linked to.
+ * and only one no other catalog VM is linked to. Discovery itself is only ever run from the agent's page.
  */
 function LinkMachineDialog({
   vm,
@@ -730,8 +781,16 @@ function LinkMachineDialog({
   onLinked: () => void;
 }) {
   const usable = data.agents.filter((agent) => agent.virtualbox);
-  const [agentId, setAgentId] = useState(
-    () => data.source?.agentId ?? usable.find((agent) => agent.online)?.agentId ?? '',
+  // The linked machine's agent, when it can still be used. When it cannot, nothing is chosen for the user: linking
+  // on another agent is a different change, so they pick one themselves.
+  const linkedAgent = data.source?.agentId ?? null;
+  const linkedAgentUsable = linkedAgent !== null && usable.some((a) => a.agentId === linkedAgent);
+  const [agentId, setAgentId] = useState(() =>
+    linkedAgent !== null
+      ? linkedAgentUsable
+        ? linkedAgent
+        : ''
+      : (usable.find((agent) => agent.online)?.agentId ?? ''),
   );
   // What the agent's latest discovery said, for the agent it was asked of.
   const [loaded, setLoaded] = useState<{
@@ -770,18 +829,23 @@ function LinkMachineDialog({
     if (machine.state !== 'powered_off') return 'Power it off first';
     return null;
   };
-  const machines = discovery?.virtualbox?.vms ?? [];
-  const usableDiscovery = discovery?.status === 'completed' && discovery.expiresAt !== null;
+  const clock = useClockPast(discovery?.status === 'completed' ? discovery.expiresAt : null);
+  const problem = current && !loadError ? discoveryProblem(discovery, clock) : null;
+  const usableDiscovery = current !== null && !loadError && problem === null;
+  const machines = usableDiscovery ? (discovery?.virtualbox?.vms ?? []) : [];
+  const eligible = machines.filter((machine) => reasonFor(machine) === null);
+  // A choice only ever stands for a machine this report offers now.
+  const choice = chosen !== null && eligible.some((m) => m.uuid === chosen) ? chosen : null;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!chosen || !discovery) return;
+    if (!choice || !discovery) return;
     setBusy(true);
     setError(null);
     try {
       await linkVirtualBoxMachine(vm, {
         agentId,
-        machineUuid: chosen,
+        machineUuid: choice,
         discoveryOperationId: discovery.id,
         replaceMachineUuid: data.source?.machineUuid ?? null,
       });
@@ -815,6 +879,7 @@ function LinkMachineDialog({
           }}
         >
           {usable.length === 0 ? <option value="">No agent can use VirtualBox</option> : null}
+          {usable.length > 0 && agentId === '' ? <option value="">Choose an agent</option> : null}
           {usable.map((agent: VirtualBoxAgentOption) => (
             <option key={agent.agentId} value={agent.agentId}>
               {agent.agentName}
@@ -823,16 +888,36 @@ function LinkMachineDialog({
           ))}
         </select>
       </div>
+      {usable.length === 0 ? (
+        <div className="small mb-3" role="status">
+          <p className="fw-semibold mb-1">No agent can link a VirtualBox machine</p>
+          <p className="mb-1">
+            A machine can be linked only through an agent that reports VirtualBox support.
+          </p>
+          <Link to="/admin/agents">Go to Agents page</Link>
+        </div>
+      ) : null}
+      {usable.length > 0 && agentId === '' && linkedAgent !== null ? (
+        <p className="small" role="status">
+          {data.source?.agentName ?? 'The agent of the linked machine'} cannot link a VirtualBox
+          machine now. Choose the agent whose machine {vm.vmName} should run from.
+        </p>
+      ) : null}
       {loadError ? (
         <p className="small text-danger">The agent’s discovery could not be loaded.</p>
       ) : null}
       {agentId && !current ? (
         <p className="small text-body-secondary">Loading the agent’s latest discovery…</p>
       ) : null}
-      {discovery && !usableDiscovery ? (
-        <p className="small">
-          This agent has no recent, completed discovery. Run discovery on its page first.
-        </p>
+      {agentId && problem ? (
+        <div className="small mb-3" role="status">
+          <p className="fw-semibold mb-1">{DISCOVERY_GUIDANCE[problem].title}</p>
+          {problem === 'failed' && discovery?.failure ? (
+            <p className="mb-1 text-body-secondary">{discovery.failure.message}</p>
+          ) : null}
+          <p className="mb-1">{DISCOVERY_GUIDANCE[problem].text}</p>
+          <Link to={`/admin/agents/${agentId}`}>Go to Agent page</Link>
+        </div>
       ) : null}
       {usableDiscovery ? (
         machines.length === 0 ? (
@@ -840,7 +925,7 @@ function LinkMachineDialog({
         ) : (
           <fieldset className="mb-3">
             <legend className="form-label small">
-              Machine, as seen {formatTime(discovery.finishedAt)}
+              Machine, as seen {formatTime(discovery?.finishedAt ?? null)}
             </legend>
             {machines.map((machine) => {
               const reason = reasonFor(machine);
@@ -852,7 +937,7 @@ function LinkMachineDialog({
                     name={`${id}-machine`}
                     id={`${id}-${machine.uuid}`}
                     disabled={reason !== null}
-                    checked={chosen === machine.uuid}
+                    checked={choice === machine.uuid}
                     onChange={() => setChosen(machine.uuid)}
                   />
                   <label className="form-check-label" htmlFor={`${id}-${machine.uuid}`}>
@@ -866,6 +951,11 @@ function LinkMachineDialog({
                 </div>
               );
             })}
+            {eligible.length === 0 ? (
+              <p className="small mt-2 mb-0" role="status">
+                No eligible VirtualBox machines were found in the latest discovery.
+              </p>
+            ) : null}
           </fieldset>
         )
       ) : null}
@@ -878,7 +968,7 @@ function LinkMachineDialog({
       </p>
       <FormError error={error} />
       <div className="d-flex flex-wrap gap-2">
-        <button type="submit" className="btn btn-primary" disabled={busy || !chosen}>
+        <button type="submit" className="btn btn-primary" disabled={busy || !choice}>
           {busy ? 'Working…' : data.source ? 'Replace link' : 'Link'}
         </button>
         <button type="button" className="btn btn-outline-secondary theme-button" onClick={onClose}>
