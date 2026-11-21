@@ -13,6 +13,9 @@
   --emucat-placeholder-to: #ccfbf1;
   --emucat-pale-mark: 0.55;
   --emucat-image-frame: #e9ecef;
+  --emucat-tag-bg: #f0fdfa;
+  --emucat-tag-border: #99f6e4;
+  --emucat-tag-text: #115e59;
 
   --bs-primary: #0f766e;
   --bs-primary-rgb: 15, 118, 110;
@@ -35,6 +38,9 @@
   --emucat-placeholder-to: #0b1a1e;
   --emucat-pale-mark: 0.7;
   --emucat-image-frame: #0b0f12;
+  --emucat-tag-bg: #10252a;
+  --emucat-tag-border: #1f5f5a;
+  --emucat-tag-text: #99f6e4;
 
   --bs-primary: #2dd4bf;
   --bs-primary-rgb: 45, 212, 191;
@@ -756,4 +762,101 @@ main.container:has(> .page-wide) {
  */
 .table-responsive {
   position: relative;
+}
+
+/* Tags: compact chips, always with their #, wrapping with the text around them. */
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tag-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--emucat-tag-border);
+  border-radius: 999px;
+  background: var(--emucat-tag-bg);
+  color: var(--emucat-tag-text);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.tag-list-inline {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.tag-selector .tag-select__multi-value__label {
+  font-size: 0.8rem;
+}
+
+/* Reordering screenshots: a scrolling table, rows dragged by their handles. */
+.reorder-dialog {
+  max-width: 48rem;
+}
+
+.reorder-scroll {
+  max-height: min(60vh, 36rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+}
+
+.reorder-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bs-body-bg);
+}
+
+.reorder-row {
+  position: relative;
+  background: var(--bs-body-bg);
+}
+
+.reorder-row-dragging {
+  z-index: 1;
+  box-shadow: 0 0.25rem 0.75rem rgb(0 0 0 / 25%);
+  opacity: 0.95;
+}
+
+.reorder-handle {
+  cursor: grab;
+  touch-action: none;
+  line-height: 1;
+}
+
+.reorder-row-dragging .reorder-handle {
+  cursor: grabbing;
+}
+
+.reorder-position {
+  width: 2.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.reorder-thumbnail {
+  width: 5.5rem;
+}
+
+.reorder-thumbnail .vm-image,
+.reorder-thumbnail .vm-image-placeholder,
+.confirm-thumbnail .vm-image-placeholder,
+.confirm-thumbnail .vm-image {
+  width: 5rem;
+}
+
+.reorder-name {
+  overflow-wrap: anywhere;
+}
+
+.confirm-thumbnail {
+  flex: 0 0 5rem;
 }

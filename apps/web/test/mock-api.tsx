@@ -128,6 +128,7 @@ export function adminVm(overrides: Partial<AdminVmDetail> = {}): AdminVmDetail {
     publicCover: 'vm_private',
     mediaCount: 0,
     versionCount: 1,
+    tags: [],
     createdAt: PAST,
     updatedAt: PAST,
     ...overrides,
@@ -145,6 +146,7 @@ export function adminMedia(overrides: Partial<AdminMedia> = {}): AdminMedia {
     capturedAt: null,
     createdAt: PAST,
     shownAsPublicMain: false,
+    tags: [],
     ...overrides,
   };
 }

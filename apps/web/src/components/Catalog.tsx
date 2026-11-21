@@ -4,11 +4,13 @@ import {
   isEmulatorType,
   type EmulatorType,
   type Pagination as PaginationInfo,
+  type Tag,
   type VmVisibility,
 } from '@emucat/contracts';
 import { useCallback, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { BrandMark } from './Brand';
+import { TagList } from './TagList';
 
 export function EmulatorBadge({ emulatorType }: { emulatorType: EmulatorType }) {
   return (
@@ -62,6 +64,7 @@ export function VmCard({
   summary,
   imageSrc,
   badges,
+  tags = [],
 }: {
   to: string;
   title: string;
@@ -69,6 +72,8 @@ export function VmCard({
   summary: string | null;
   imageSrc: string | null;
   badges?: ReactNode;
+  /** The VM's own tags. */
+  tags?: readonly Tag[];
 }) {
   return (
     <article className="card vm-card h-100 position-relative">
@@ -84,6 +89,7 @@ export function VmCard({
         {summary ? (
           <p className="small text-body-secondary mb-0 vm-card-summary">{summary}</p>
         ) : null}
+        <TagList tags={tags} label={`Tags of ${title}`} className="mt-2" />
       </div>
     </article>
   );
@@ -144,7 +150,7 @@ function SearchBox({ initial, onSearch }: { initial: string; onSearch: (text: st
       <input
         type="search"
         className="form-control"
-        placeholder="Search by name or description"
+        placeholder="Search by name, description or #tag"
         aria-label="Search virtual machines"
         maxLength={100}
         value={text}

@@ -6,6 +6,7 @@ import {
   publicVmRoute,
   vmPathParamsSchema,
   vmTitle,
+  type PublicGalleryMedia,
   type PublicMedia,
   type PublicVmDetail,
   type VmIdentity,
@@ -25,6 +26,7 @@ import {
   type GalleryItem,
 } from '../components/Gallery';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
+import { TagList } from '../components/TagList';
 import { VmVersionHistory } from '../components/Versions';
 import { useAsync } from '../useAsync';
 
@@ -145,6 +147,7 @@ function GeneralInformation({
             ) : (
               <p className="small text-body-secondary mb-0">No description yet.</p>
             )}
+            <TagList tags={vm.tags} label={`Tags of ${vmTitle(vm)}`} className="mt-3" />
           </div>
         </div>
       </div>
@@ -261,7 +264,7 @@ function DetailTabs({
 
 function galleryItems(
   title: string,
-  gallery: readonly PublicMedia[],
+  gallery: readonly PublicGalleryMedia[],
   mainImage: PublicMedia | null,
 ): GalleryItem[] {
   return gallery.map((image, index) => ({
@@ -273,6 +276,7 @@ function galleryItems(
     widthPx: image.widthPx,
     heightPx: image.heightPx,
     isMain: image.id === mainImage?.id,
+    tags: image.tags,
   }));
 }
 

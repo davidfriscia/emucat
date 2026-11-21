@@ -63,6 +63,7 @@ export function CatalogPage() {
                 title={vmTitle(vm)}
                 emulatorType={vm.emulatorType}
                 summary={vm.summary}
+                tags={vm.tags}
                 imageSrc={vm.mainImage ? publicMediaPath(vm.mainImage.id, 'thumbnail') : null}
               />
             ))}

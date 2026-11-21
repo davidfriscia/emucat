@@ -125,6 +125,7 @@ function version(
     createdAt: WHEN,
     title: null,
     description: null,
+    tags: [],
     promotedAt: null,
     archiveSizeBytes: 4096,
     archiveSha256: SHA,

@@ -38,6 +38,7 @@ function node(
     createdAt: `2026-01-01T00:${String(minute).padStart(2, '0')}:00.000Z`,
     title: null,
     description: null,
+    tags: [],
     promotedAt: null,
     archiveSizeBytes: 2048,
     archiveSha256: SHA,
@@ -1117,5 +1118,38 @@ describe('remastering from a local copy', () => {
     await waitFor(() =>
       expect(api.callsTo('POST', `/admin/remasters/${REMASTER_ID}/cleanup/retry`)).toHaveLength(1),
     );
+  });
+});
+
+describe('version tags', () => {
+  const GOLD = { id: '018f47a0-7c2b-4f7e-9a3d-00000000b001', name: 'gold' };
+  const BETA = { id: '018f47a0-7c2b-4f7e-9a3d-00000000b002', name: 'beta' };
+
+  it('shows each version’s own tags, and edits a snapshot’s without touching its master', async () => {
+    const tree = branchingTree();
+    tree.versions[0] = { ...(tree.versions[0] as VersionNode), tags: [GOLD] };
+    const api = base({
+      [`GET ${VM_PATH}/versions`]: tree,
+      'GET /admin/tags': { tags: [GOLD, BETA] },
+      [`PUT ${VM_PATH}/versions/${SNAP_B}/tags`]: { tags: [BETA] },
+    });
+    const drawn = await history();
+    expect(within(drawn).getByRole('list', { name: 'Tags of Master' }).textContent).toBe('#gold');
+    expect(within(drawn).queryByRole('list', { name: 'Tags of Win98_202601010002' })).toBeNull();
+
+    fireEvent.click(within(drawn).getByRole('button', { name: 'Tags of Win98_202601010002' }));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Snapshot tags' }));
+    fireEvent.change(dialog.getByLabelText('Tags'), { target: { value: 'be' } });
+    fireEvent.click(await dialog.findByRole('option', { name: '#beta' }));
+    await waitFor(() =>
+      expect(
+        within(drawn).getByRole('list', { name: 'Tags of Win98_202601010002' }).textContent,
+      ).toBe('#beta'),
+    );
+    expect(api.callsTo('PUT', `${VM_PATH}/versions/${SNAP_B}/tags`)[0]?.body).toEqual({
+      tagIds: [BETA.id],
+    });
+    // The master keeps its own.
+    expect(within(drawn).getByRole('list', { name: 'Tags of Master' }).textContent).toBe('#gold');
   });
 });

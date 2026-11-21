@@ -5,10 +5,11 @@ import {
   type AdminMediaSyncResponse,
   type VmIdentity,
 } from '@emucat/contracts';
-import { useCallback } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import { ApiRequestError, fetchVmMedia, fetchVmMediaSync } from '../../api';
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
+import { ReorderScreenshotsDialog } from '../../components/ReorderScreenshots';
 import { VmMediaGrid } from '../../components/VmMediaGrid';
 import { useAsync } from '../../useAsync';
 import { usePolledData } from '../../usePolledData';
@@ -96,6 +97,9 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
     void fetchVmMedia({ emulatorType, vmName }).then(setData, () => undefined);
   }, [emulatorType, vmName, setData]);
   useCaptureGalleryRefresh({ emulatorType, vmName }, refreshCapturedMedia);
+  const [reordering, setReordering] = useState(false);
+  const [reordered, setReordered] = useState(false);
+  const reorderButton = useRef<HTMLButtonElement>(null);
 
   if (state.status === 'loading') return <LoadingState label="Loading media" />;
   if (state.status === 'error') {
@@ -122,7 +126,27 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
       <nav aria-label="Breadcrumb" className="small mb-3">
         <Link to={adminVmRoute(vm)}>{vmName}</Link>
       </nav>
-      <h1 className="h3 mb-3">Media</h1>
+      <div className="d-flex flex-wrap align-items-center gap-2 mb-3">
+        <h1 className="h3 mb-0 flex-grow-1">Media</h1>
+        <button
+          ref={reorderButton}
+          type="button"
+          className="btn btn-outline-primary"
+          disabled={state.data.media.length < 2}
+          title={state.data.media.length < 2 ? 'There is nothing to reorder yet' : undefined}
+          onClick={() => {
+            setReordered(false);
+            setReordering(true);
+          }}
+        >
+          Reorder Screenshots
+        </button>
+      </div>
+      {reordered ? (
+        <div className="alert alert-success" role="status">
+          The new order is saved. Every gallery shows it.
+        </div>
+      ) : null}
       <p className="small text-body-secondary">
         Screenshots arrive from the agent that holds this VM. They have no visibility of their own:
         all of them are public while this VM is public, and none of them while it is private. The
@@ -139,6 +163,20 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
       ) : (
         <VmMediaGrid vm={vm} media={state.data.media} onChange={setData} />
       )}
+      {reordering ? (
+        <ReorderScreenshotsDialog
+          vm={vm}
+          media={state.data.media}
+          onSaved={(next) => {
+            setData(next);
+            setReordered(true);
+          }}
+          onClose={() => {
+            setReordering(false);
+            reorderButton.current?.focus();
+          }}
+        />
+      ) : null}
     </>
   );
 }

@@ -31,6 +31,7 @@ import {
   VirtualBoxSourceSection,
 } from '../../components/VirtualBoxSource';
 import { EmptyState, ErrorState, FormError, LoadingState } from '../../components/States';
+import { TagSelector } from '../../components/Tags';
 import { VmMediaGrid } from '../../components/VmMediaGrid';
 import { useAsync } from '../../useAsync';
 import { NotFoundPage } from '../NotFoundPage';
@@ -269,6 +270,14 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
               Metadata
             </h2>
             <MetadataForm vm={vm} onSaved={setData} />
+            <hr />
+            <TagSelector
+              target={{ kind: 'vm', vm: identity }}
+              value={vm.tags}
+              onChange={(tags) => setData({ ...vm, tags })}
+              label="Tags"
+              description="Saved as you change them. Shown in the catalog with the VM, and found by search. Screenshots and versions have their own tags."
+            />
           </div>
         </section>
         <section className="card" aria-labelledby="vm-details-heading">

@@ -41,6 +41,7 @@ import {
   type SnapshotRequest,
 } from './Snapshots';
 import { FormError } from './States';
+import { TagEditorDialog, TagList } from './Tags';
 import {
   ImportIntoVirtualBoxDialog,
   notifyVirtualBoxChanged,
@@ -95,10 +96,12 @@ function VersionItem({
   virtualbox,
   onImport,
   onEditDetails,
+  onEditTags,
   onPromote,
 }: {
   entry: VersionTreeEntry;
   onEditDetails: (node: VersionNode) => void;
+  onEditTags: (node: VersionNode) => void;
   onPromote: (node: VersionNode) => void;
   vm: VmIdentity;
   /** For a VirtualBox VM, its machine and agents; `null` while unknown or for another emulator. */
@@ -211,6 +214,7 @@ function VersionItem({
               </p>
             </details>
           ) : null}
+          <TagList tags={node.tags} label={`Tags of ${nameOf(node)}`} className="mb-1" />
           <p className="small text-body-secondary mb-1">{verificationText(node)}</p>
           {node.deletion ? (
             <div className="small mb-1" role="status">
@@ -379,6 +383,15 @@ function VersionItem({
               >
                 Edit details…
               </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary theme-button"
+                aria-label={`Tags of ${nameOf(node)}`}
+                aria-haspopup="dialog"
+                onClick={() => onEditTags(node)}
+              >
+                Tags…
+              </button>
               {node.kind === 'snapshot' ? (
                 <button
                   type="button"
@@ -411,6 +424,7 @@ function VersionItem({
               virtualbox={virtualbox}
               onImport={onImport}
               onEditDetails={onEditDetails}
+              onEditTags={onEditTags}
               onPromote={onPromote}
             />
           ))}
@@ -630,6 +644,7 @@ function VersionHistory({
   const [importing, setImporting] = useState<VersionNode | null>(null);
   const [retryError, setRetryError] = useState<unknown>(null);
   const [editing, setEditing] = useState<VersionNode | null>(null);
+  const [tagging, setTagging] = useState<VersionNode | null>(null);
   const [promoting, setPromoting] = useState<VersionNode | null>(null);
   const [remastering, setRemastering] = useState(false);
   const [startedRemaster, setStartedRemaster] = useState<string | null>(null);
@@ -785,6 +800,7 @@ function VersionHistory({
               virtualbox={virtualbox}
               onImport={setImporting}
               onEditDetails={setEditing}
+              onEditTags={setTagging}
               onPromote={setPromoting}
             />
           </ul>
@@ -860,6 +876,27 @@ function VersionHistory({
             setImporting(null);
             notifyVirtualBoxChanged(identity);
           }}
+        />
+      ) : null}
+      {tagging ? (
+        <TagEditorDialog
+          title={tagging.kind === 'master' ? 'Master tags' : 'Snapshot tags'}
+          subject={nameOf(tagging)}
+          target={{ kind: 'version', vm: identity, versionId: tagging.id }}
+          value={tagging.tags}
+          onChange={(tags) => {
+            const id = tagging.id;
+            setTagging((current) => (current?.id === id ? { ...current, tags } : current));
+            if (tree.data) {
+              tree.setData({
+                ...tree.data,
+                versions: tree.data.versions.map((node) =>
+                  node.id === id ? { ...node, tags } : node,
+                ),
+              });
+            }
+          }}
+          onClose={() => setTagging(null)}
         />
       ) : null}
       {editing ? (

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { BrandMark } from './Brand';
+import type { Tag } from '@emucat/contracts';
 import { VmImage } from './Catalog';
+import { TagList } from './TagList';
 
 /** Open dialogs, innermost last. Only the innermost one answers the keyboard. */
 const openDialogs: object[] = [];
@@ -36,6 +38,8 @@ export function useModalDialog(
     openDialogs.push(token);
     const onKey = (event: KeyboardEvent) => {
       if (openDialogs.at(-1) !== token) return;
+      // A control inside that used Escape itself, such as an open menu or a drag, keeps it.
+      if (event.key === 'Escape' && event.defaultPrevented) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         onClose();
@@ -81,6 +85,8 @@ export interface GalleryItem {
   isMain?: boolean;
   /** Extra controls in the viewer's bar, for administrators. */
   viewerActions?: ReactNode;
+  /** The screenshot's own tags, shown in the viewer. */
+  tags?: readonly Tag[];
 }
 
 function ViewerImage({ item }: { item: GalleryItem }) {
@@ -171,6 +177,13 @@ export function ImageViewer({
             <span className="ms-2 text-nowrap">
               ({index + 1} of {count})
             </span>
+          ) : null}
+          {item.tags && item.tags.length > 0 ? (
+            <TagList
+              tags={item.tags}
+              label="Tags of this screenshot"
+              className="tag-list-inline ms-2"
+            />
           ) : null}
         </span>
         {item.viewerActions}

@@ -1,4 +1,11 @@
 import {
+  createTagResponseSchema,
+  entityTagsResponseSchema,
+  tagListResponseSchema,
+  type CreateTagResponse,
+  type Tag,
+} from '@emucat/contracts';
+import {
   captureOperationSchema,
   captureStatusSchema,
   virtualBoxManagementResponseSchema,
@@ -405,6 +412,58 @@ export function clearMainMedia(vm: VmIdentity): Promise<AdminMediaListResponse> 
   return requestJson(`${relative(adminVmApiPath(vm))}/main-media`, adminMediaListResponseSchema, {
     method: 'DELETE',
   });
+}
+
+/** Saves a VM's screenshot order, first to last. Refused with 409 when the screenshots changed meanwhile. */
+export function reorderMedia(
+  vm: VmIdentity,
+  mediaIds: readonly string[],
+): Promise<AdminMediaListResponse> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/media-order`, adminMediaListResponseSchema, {
+    method: 'PUT',
+    body: { mediaIds },
+  });
+}
+
+/** Something tags are assigned to. Each kind's tags are its own: nothing is inherited. */
+export type TagTarget =
+  | { kind: 'vm'; vm: VmIdentity }
+  | { kind: 'media'; vm: VmIdentity; mediaId: string }
+  | { kind: 'version'; vm: VmIdentity; versionId: string };
+
+function tagTargetPath(target: TagTarget): string {
+  const base = relative(adminVmApiPath(target.vm));
+  switch (target.kind) {
+    case 'vm':
+      return `${base}/tags`;
+    case 'media':
+      return `${base}/media/${target.mediaId}/tags`;
+    case 'version':
+      return `${base}/versions/${target.versionId}/tags`;
+  }
+}
+
+export async function searchTags(q: string, signal?: AbortSignal): Promise<Tag[]> {
+  const query = new URLSearchParams({ limit: '20' });
+  if (q.trim() !== '') query.set('q', q);
+  const response = await requestJson(`/admin/tags?${query.toString()}`, tagListResponseSchema, {
+    signal,
+  });
+  return response.tags;
+}
+
+/** Creates a tag, or returns the existing one with the same normalized name. */
+export function createTag(name: string): Promise<CreateTagResponse> {
+  return requestJson('/admin/tags', createTagResponseSchema, { method: 'POST', body: { name } });
+}
+
+/** Replaces the target's tags with exactly these, and returns what the server then holds. */
+export async function setTags(target: TagTarget, tagIds: readonly string[]): Promise<Tag[]> {
+  const response = await requestJson(tagTargetPath(target), entityTagsResponseSchema, {
+    method: 'PUT',
+    body: { tagIds },
+  });
+  return response.tags;
 }
 
 export function deleteMedia(vm: VmIdentity, mediaId: string): Promise<AdminMediaListResponse> {

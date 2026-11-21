@@ -64,6 +64,7 @@ export function CatalogManagementPage() {
                 title={vmTitle(vm)}
                 emulatorType={vm.emulatorType}
                 summary={vm.summary}
+                tags={vm.tags}
                 imageSrc={vm.mainMediaId ? adminMediaPath(vm, vm.mainMediaId, 'thumbnail') : null}
                 badges={
                   <>

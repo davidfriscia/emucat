@@ -359,13 +359,19 @@ describe('media management', () => {
 
     fireEvent.click(card.getByRole('button', { name: 'Delete' }));
     expect(api.callsTo('DELETE', `${VM_PATH}/media/${OTHER_MEDIA_ID}`)).toEqual([]);
-    fireEvent.click(card.getByRole('button', { name: 'Keep' }));
+    // The dialog names the screenshot it would delete.
+    let dialog = within(await screen.findByRole('dialog', { name: 'Delete this screenshot?' }));
+    expect(dialog.getByText('desktop.png')).toBeTruthy();
+    fireEvent.click(dialog.getByRole('button', { name: 'Keep' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(api.callsTo('DELETE', `${VM_PATH}/media/${OTHER_MEDIA_ID}`)).toEqual([]);
 
     fireEvent.click(card.getByRole('button', { name: 'Delete' }));
-    fireEvent.click(card.getByRole('button', { name: 'Confirm delete' }));
+    dialog = within(await screen.findByRole('dialog', { name: 'Delete this screenshot?' }));
+    fireEvent.click(dialog.getByRole('button', { name: 'Delete screenshot' }));
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'desktop.png' })).toBeNull());
     expect(api.callsTo('DELETE', `${VM_PATH}/media/${OTHER_MEDIA_ID}`)).toHaveLength(1);
+    expect(screen.getByText('desktop.png was deleted.').getAttribute('role')).toBe('status');
   });
 
   it('shows a failure and keeps the list', async () => {

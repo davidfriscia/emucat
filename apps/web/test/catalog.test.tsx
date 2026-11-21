@@ -28,6 +28,7 @@ const card = (overrides: Partial<PublicVmCard> = {}): PublicVmCard => ({
   vmName: 'Win98',
   displayName: 'Windows 98 SE',
   summary: 'A retro machine',
+  tags: [],
   mainImage: null,
   ...overrides,
 });
