@@ -26,6 +26,7 @@ function node(n: number, parent: number | null, minute = n): VersionNode {
     childVersionIds: [],
     title: null,
     description: null,
+    tags: [],
     snapshotName: parent === null ? null : `Win98_2026010100${String(minute).padStart(2, '0')}`,
     createdAt: `2026-01-01T00:${String(minute).padStart(2, '0')}:00.000Z`,
     promotedAt: null,
