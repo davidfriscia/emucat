@@ -58,8 +58,9 @@ async function addMedia(
   await context.pool.execute(
     `INSERT INTO vm_media
        (id, emulator_type, vm_name, visibility, is_main, original_filename, original_sha256,
-        original_size_bytes, original_key, original_mime, jpeg_key, thumbnail_key, width_px, height_px)
-     VALUES (?, 'qemu', ?, ?, ?, ?, ?, 10, ?, 'image/png', ?, ?, 640, 480)`,
+        original_size_bytes, original_key, original_mime, jpeg_key, thumbnail_key, width_px, height_px,
+        sort_order)
+     VALUES (?, 'qemu', ?, ?, ?, ?, ?, 10, ?, 'image/png', ?, ?, 640, 480, ?)`,
     [
       id,
       vmName,
@@ -70,6 +71,7 @@ async function addMedia(
       keys.original,
       keys.full,
       keys.thumbnail,
+      counter,
     ],
   );
   return { id, files: keys };
@@ -381,7 +383,7 @@ describe('retrieving images', () => {
     expect(parsed.gallery.map((image) => image.id)).toEqual([item.id]);
   });
 
-  it('keeps the gallery in the same order on every request, with the main image first', async () => {
+  it('keeps the gallery in the administrator’s order on every request, wherever the main image is', async () => {
     await insertVm(context.pool, { vmName: 'Ordered', visibility: 'public' });
     const items: Item[] = [];
     for (let index = 0; index < 5; index += 1) {
@@ -391,8 +393,8 @@ describe('retrieving images', () => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       expect((await publicDetail('Ordered'))?.gallery.map((image) => image.id)).toEqual(first);
     }
-    expect(first?.[0]).toBe(items[3]?.id);
-    expect(first).toHaveLength(5);
+    // The main image is the cover, and nothing more: it does not move to the front (decision 0050).
+    expect(first).toEqual(items.map((item) => item.id));
   });
 
   it('matches a VM’s identity without regard to capitalization', async () => {

@@ -98,6 +98,11 @@ export async function agentMediaVms(
   }));
 }
 
+/**
+ * The hashes the server holds for this VM. Only what it holds: a hash an administrator deleted is not among them
+ * (decision 0050), because a transfer takes this answer as proof that removing the local file loses nothing, and
+ * deleting a screenshot from the catalog must never be what deletes the file. Suppression applies to uploads.
+ */
 export async function acknowledgedHashes(
   pool: Pool,
   vm: VmIdentity,
@@ -111,6 +116,20 @@ export async function acknowledgedHashes(
     [vm.emulatorType, vm.vmName, ...hashes],
   );
   return rows.map((row) => row.original_sha256 as string);
+}
+
+/** The deleted item these bytes were, while their deletion suppresses them for this VM. */
+async function findSuppressed(
+  executor: Pool | PoolConnection,
+  vm: VmIdentity,
+  sha256: string,
+): Promise<string | null> {
+  const [rows] = await executor.execute<RowDataPacket[]>(
+    `SELECT media_id FROM vm_media_suppressions
+     WHERE emulator_type = ? AND vm_name = ? AND original_sha256 = ?`,
+    [vm.emulatorType, vm.vmName, sha256],
+  );
+  return (rows[0]?.media_id as string | undefined) ?? null;
 }
 
 async function findExisting(
@@ -158,6 +177,13 @@ export interface UploadRequest {
 
 export interface UploadOutcome extends MediaUploadResponse {
   sizeBytes: number;
+}
+
+/** Thrown inside the commit when a deletion of these bytes won the race against this upload. */
+class SuppressedDuringUpload extends Error {
+  constructor(readonly mediaId: string) {
+    super('suppressed');
+  }
 }
 
 /**
@@ -240,6 +266,15 @@ export async function storeUpload(
 
     const existing = await findExisting(pool, vm, sha256);
     if (existing) return { mediaId: existing, sha256, created: false, sizeBytes };
+    // Deleted on purpose: nothing is stored, and the agent is told it is done (decision 0050), so it marks the
+    // file completed and does not send it again unless the file changes. A requested
+    // capture is an administrator asking for this image now, so it is the one upload that brings it back.
+    if (!captureId) {
+      const suppressed = await findSuppressed(pool, vm, sha256);
+      if (suppressed) {
+        return { mediaId: suppressed, sha256, created: false, suppressed: true, sizeBytes };
+      }
+    }
 
     let image;
     try {
@@ -296,12 +331,29 @@ export async function storeUpload(
         }
         const again = await findExisting(connection, vm, sha256);
         if (again) return again;
+        if (captureId) {
+          await connection.execute(
+            `DELETE FROM vm_media_suppressions
+             WHERE emulator_type = ? AND vm_name = ? AND original_sha256 = ?`,
+            [vm.emulatorType, vm.vmName, sha256],
+          );
+        } else {
+          const suppressed = await findSuppressed(connection, vm, sha256);
+          if (suppressed) throw new SuppressedDuringUpload(suppressed);
+        }
+        // Last in the gallery: positions are read and written under the VM's lock, so two uploads cannot
+        // take the same one.
+        const [last] = await connection.execute<RowDataPacket[]>(
+          `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_position FROM vm_media
+           WHERE emulator_type = ? AND vm_name = ?`,
+          [vm.emulatorType, vm.vmName],
+        );
         await connection.execute(
           `INSERT INTO vm_media
              (id, emulator_type, vm_name, original_filename, original_sha256, original_size_bytes,
               original_key, original_mime, jpeg_key, thumbnail_key, width_px, height_px, captured_at,
-              uploaded_by_agent_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              uploaded_by_agent_id, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             mediaId,
             vm.emulatorType,
@@ -317,6 +369,7 @@ export async function storeUpload(
             image.heightPx,
             capturedAt,
             agentId,
+            Number(last[0]?.next_position ?? 1),
           ],
         );
         return null;
@@ -328,6 +381,9 @@ export async function storeUpload(
       return { mediaId, sha256, created: true, sizeBytes };
     } catch (error) {
       await removePublished();
+      if (error instanceof SuppressedDuringUpload) {
+        return { mediaId: error.mediaId, sha256, created: false, suppressed: true, sizeBytes };
+      }
       if (isDuplicateEntry(error)) {
         const row = await findExisting(pool, vm, sha256);
         if (row) return { mediaId: row, sha256, created: false, sizeBytes };

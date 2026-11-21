@@ -6,6 +6,7 @@ import type {
   VmIdentity,
 } from '@emucat/contracts';
 import type { Pool, RowDataPacket } from 'mysql2/promise';
+import { tagsOfVmVersions } from '../catalog/tags.js';
 import { graphRevision, type GraphVersion } from './graph.js';
 
 /** Whether each version could be deleted now. Without one, nothing is offered for deletion. */
@@ -119,6 +120,8 @@ export async function versionTree(
     });
   }
 
+  // Every version's tags in one query. They are not part of the revision: tags never change a history.
+  const tags = await tagsOfVmVersions(pool, vm);
   const children = new Map<string, string[]>();
   for (const row of rows) {
     const parent = row.parent_version_id as string | null;
@@ -132,6 +135,7 @@ export async function versionTree(
     snapshotName: (row.snapshot_name as string | null) ?? null,
     title: (row.title as string | null) ?? null,
     description: (row.description as string | null) ?? null,
+    tags: tags.get(row.id as string) ?? [],
     createdAt: (row.created_at as Date).toISOString(),
     promotedAt: (row.promoted_at as Date | null)?.toISOString() ?? null,
     archiveSizeBytes: Number(row.archive_size_bytes),

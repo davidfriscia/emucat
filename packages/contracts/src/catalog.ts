@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { API_PREFIX } from './api.js';
 import { emulatorTypeSchema, type EmulatorType } from './emulator.js';
+import { tagSchema } from './tags.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema, type VmIdentity } from './vm-name.js';
 
@@ -62,6 +63,25 @@ export type UpdateVmVisibilityRequest = z.infer<typeof updateVmVisibilityRequest
 export const selectMainMediaRequestSchema = z.strictObject({ mediaId: z.uuid() });
 export type SelectMainMediaRequest = z.infer<typeof selectMainMediaRequestSchema>;
 
+/** More than any VM is expected to hold, and few enough to check in one transaction. */
+export const MEDIA_ORDER_MAX = 10_000;
+
+/**
+ * The new order of a VM's screenshots: every one of them, exactly once, first to last. A list that is not
+ * exactly the VM's current screenshots is refused, so an order made before a screenshot arrived or was
+ * deleted cannot silently drop or misplace one. The main image is independent and never changes with it.
+ */
+export const reorderMediaRequestSchema = z.strictObject({
+  mediaIds: z
+    .array(z.uuid())
+    .min(1)
+    .max(MEDIA_ORDER_MAX)
+    .refine((ids) => new Set(ids.map((id) => id.toLowerCase())).size === ids.length, {
+      message: 'A screenshot is listed twice',
+    }),
+});
+export type ReorderMediaRequest = z.infer<typeof reorderMediaRequestSchema>;
+
 const pageParameter = z.coerce.number().int().min(1).max(1_000_000).default(1);
 const pageSizeParameter = z.coerce
   .number()
@@ -114,6 +134,12 @@ export const publicMediaSchema = z.strictObject({
 });
 export type PublicMedia = z.infer<typeof publicMediaSchema>;
 
+/** A screenshot in a public VM's gallery, with its own tags. */
+export const publicGalleryMediaSchema = publicMediaSchema.extend({
+  tags: z.array(tagSchema).default([]),
+});
+export type PublicGalleryMedia = z.infer<typeof publicGalleryMediaSchema>;
+
 export const publicVmCardSchema = z.strictObject({
   emulatorType: emulatorTypeSchema,
   vmName: z.string(),
@@ -121,6 +147,8 @@ export const publicVmCardSchema = z.strictObject({
   summary: z.string().nullable(),
   /** The main image when every rule allows it. `null` means show the placeholder. */
   mainImage: publicMediaSchema.nullable(),
+  /** The VM's own tags. Never those of its screenshots or versions. */
+  tags: z.array(tagSchema).default([]),
 });
 export type PublicVmCard = z.infer<typeof publicVmCardSchema>;
 
@@ -136,8 +164,12 @@ export const publicVmDetailSchema = z.strictObject({
   displayName: z.string().nullable(),
   description: z.string().nullable(),
   mainImage: publicMediaSchema.nullable(),
-  /** Every image of this VM, including the main image. A public VM's images are all public. */
-  gallery: z.array(publicMediaSchema),
+  tags: z.array(tagSchema).default([]),
+  /**
+   * Every image of this VM, including the main image, in the order an administrator chose. A public VM's
+   * images are all public, and so are their tags.
+   */
+  gallery: z.array(publicGalleryMediaSchema),
 });
 export type PublicVmDetail = z.infer<typeof publicVmDetailSchema>;
 
@@ -161,6 +193,7 @@ export const adminVmCardSchema = z.strictObject({
   mediaCount: z.number().int().nonnegative(),
   /** Sessions that may have an emulator running now, on any agent. Never in the public catalog. */
   activeSessions: z.number().int().nonnegative(),
+  tags: z.array(tagSchema).default([]),
   updatedAt: timestampSchema,
 });
 export type AdminVmCard = z.infer<typeof adminVmCardSchema>;
@@ -181,6 +214,7 @@ export const adminVmDetailSchema = z.strictObject({
   publicCover: publicCoverStatusSchema,
   mediaCount: z.number().int().nonnegative(),
   versionCount: z.number().int().nonnegative(),
+  tags: z.array(tagSchema).default([]),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 });
@@ -198,6 +232,8 @@ export const adminMediaSchema = z.strictObject({
   createdAt: timestampSchema,
   /** Whether the public catalog shows this item as the main image right now. */
   shownAsPublicMain: z.boolean(),
+  /** This screenshot's own tags. */
+  tags: z.array(tagSchema).default([]),
 });
 export type AdminMedia = z.infer<typeof adminMediaSchema>;
 

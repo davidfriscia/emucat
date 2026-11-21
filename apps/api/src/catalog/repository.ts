@@ -16,11 +16,16 @@ import {
   type PublicVmCard,
   type PublicVmDetail,
   type UpdateVmMetadataRequest,
+  type ReorderMediaRequest,
+  type Tag,
+  tagSearchTerm,
   type VmIdentity,
   type VmVisibility,
 } from '@emucat/contracts';
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import { withTransaction } from '../db/pool.js';
+import { ApiError } from '../errors.js';
+import { tagsOfVmMedia, tagsOfVms, vmKey } from './tags.js';
 
 /**
  * All catalog SQL. Queries name every column they read, and the mappers below build each response
@@ -41,6 +46,8 @@ export class CatalogNotFoundError extends Error {
 /** `vm_name` is ASCII. This lets it sort and search alongside the utf8mb4 display name. */
 const VM_NAME_TEXT = 'CONVERT(vm.vm_name USING utf8mb4) COLLATE utf8mb4_uca1400_ai_ci';
 const TITLE_ORDER = `COALESCE(vm.display_name, ${VM_NAME_TEXT}), vm.emulator_type, vm.vm_name`;
+/** Every gallery's order: an administrator's, then the ID, so that it is total and stable (decision 0050). */
+const MEDIA_ORDER = 'media.sort_order, media.id';
 
 interface Filter {
   clause: string;
@@ -52,11 +59,38 @@ function likePattern(text: string): string {
   return `%${text.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
 }
 
-function catalogFilter(query: {
-  q?: string | undefined;
-  emulatorType?: EmulatorType | undefined;
-  visibility?: VmVisibility | undefined;
-}): Filter {
+/**
+ * Tags that make a VM match a search: its own, its screenshots', and for administrators its versions'. A child's
+ * tag finds the parent VM without becoming the VM's tag. EXISTS keeps one row per VM however many children match.
+ * The public query has already required a public VM, and every screenshot of a public VM is public; versions are
+ * administrative (decision 0039), so their tags never reach a public search. A version that is deleted, or being
+ * deleted, no longer counts.
+ */
+function tagMatch(scope: CatalogScope, operator: '=' | 'LIKE'): { clause: string; count: number } {
+  const own = `EXISTS (SELECT 1 FROM vm_tags AS vt JOIN tags AS tag ON tag.id = vt.tag_id
+      WHERE vt.emulator_type = vm.emulator_type AND vt.vm_name = vm.vm_name
+        AND tag.normalized_name ${operator} ?)`;
+  const media = `EXISTS (SELECT 1 FROM vm_media_tags AS mt JOIN tags AS tag ON tag.id = mt.tag_id
+      WHERE mt.emulator_type = vm.emulator_type AND mt.vm_name = vm.vm_name
+        AND tag.normalized_name ${operator} ?)`;
+  const versions = `EXISTS (SELECT 1 FROM vm_version_tags AS xt JOIN tags AS tag ON tag.id = xt.tag_id
+      WHERE xt.emulator_type = vm.emulator_type AND xt.vm_name = vm.vm_name
+        AND tag.normalized_name ${operator} ?
+        AND NOT EXISTS (SELECT 1 FROM vm_version_deletions AS d WHERE d.version_id = xt.version_id))`;
+  const parts = scope === 'admin' ? [own, media, versions] : [own, media];
+  return { clause: parts.join(' OR '), count: parts.length };
+}
+
+type CatalogScope = 'public' | 'admin';
+
+function catalogFilter(
+  query: {
+    q?: string | undefined;
+    emulatorType?: EmulatorType | undefined;
+    visibility?: VmVisibility | undefined;
+  },
+  scope: CatalogScope,
+): Filter {
   const conditions: string[] = [];
   const values: string[] = [];
   if (query.visibility) {
@@ -68,9 +102,29 @@ function catalogFilter(query: {
     values.push(query.emulatorType);
   }
   if (query.q) {
-    const pattern = likePattern(query.q);
-    conditions.push(`(vm.display_name LIKE ? OR ${VM_NAME_TEXT} LIKE ? OR vm.description LIKE ?)`);
-    values.push(pattern, pattern, pattern);
+    const tag = tagSearchTerm(query.q);
+    if (tag?.tagOnly) {
+      // `#retro` asks for that tag, exactly, and nothing else.
+      const match = tagMatch(scope, '=');
+      conditions.push(`(${match.clause})`);
+      values.push(...Array<string>(match.count).fill(tag.term));
+    } else {
+      const pattern = likePattern(query.q);
+      const text = `vm.display_name LIKE ? OR ${VM_NAME_TEXT} LIKE ? OR vm.description LIKE ?`;
+      if (tag) {
+        const match = tagMatch(scope, 'LIKE');
+        conditions.push(`(${text} OR ${match.clause})`);
+        values.push(
+          pattern,
+          pattern,
+          pattern,
+          ...Array<string>(match.count).fill(likePattern(tag.term)),
+        );
+      } else {
+        conditions.push(`(${text})`);
+        values.push(pattern, pattern, pattern);
+      }
+    }
   }
   return { clause: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '', values };
 }
@@ -95,6 +149,10 @@ interface PublicVmRow extends RowDataPacket {
   height_px: number | null;
 }
 
+function identityOf(row: { emulator_type: EmulatorType; vm_name: string }): VmIdentity {
+  return { emulatorType: row.emulator_type, vmName: row.vm_name };
+}
+
 function publicImage(row: PublicVmRow): PublicMedia | null {
   return row.media_id && row.width_px && row.height_px
     ? { id: row.media_id, widthPx: row.width_px, heightPx: row.height_px }
@@ -105,7 +163,7 @@ export async function listPublicVms(
   pool: Pool,
   query: PublicCatalogQuery,
 ): Promise<{ items: PublicVmCard[]; pagination: Pagination }> {
-  const filter = catalogFilter({ ...query, visibility: 'public' });
+  const filter = catalogFilter({ ...query, visibility: 'public' }, 'public');
   const [counts] = await pool.execute<RowDataPacket[]>(
     `SELECT COUNT(*) AS total FROM virtual_machines AS vm ${filter.clause}`,
     filter.values,
@@ -122,6 +180,7 @@ export async function listPublicVms(
      ${limitClause(query.page, query.pageSize)}`,
     filter.values,
   );
+  const tags = await tagsOfVms(pool, rows.map(identityOf));
   return {
     items: rows.map((row) => ({
       emulatorType: row.emulator_type,
@@ -129,6 +188,7 @@ export async function listPublicVms(
       displayName: row.display_name,
       summary: row.summary,
       mainImage: publicImage(row),
+      tags: tags.get(vmKey(identityOf(row))) ?? [],
     })),
     pagination: paginate(query.page, query.pageSize, Number(counts[0]?.total)),
   };
@@ -153,19 +213,24 @@ export async function getPublicVm(pool: Pool, vm: VmIdentity): Promise<PublicVmD
      JOIN virtual_machines AS vm
        ON vm.emulator_type = media.emulator_type AND vm.vm_name = media.vm_name
      WHERE vm.visibility = 'public' AND media.emulator_type = ? AND media.vm_name = ?
-     ORDER BY media.is_main DESC, COALESCE(media.captured_at, media.created_at), media.id`,
+     ORDER BY ${MEDIA_ORDER}`,
     [vm.emulatorType, vm.vmName],
   );
+  // Read only once the VM is known to be public: these are the tags of public things.
+  const vmTags = await tagsOfVms(pool, [identityOf(row)]);
+  const mediaTags = gallery.length > 0 ? await tagsOfVmMedia(pool, vm) : new Map<string, Tag[]>();
   return {
     emulatorType: row.emulator_type,
     vmName: row.vm_name,
     displayName: row.display_name,
     description: row.description,
     mainImage: publicImage(row),
+    tags: vmTags.get(vmKey(identityOf(row))) ?? [],
     gallery: gallery.map((item) => ({
       id: item.id as string,
       widthPx: item.width_px as number,
       heightPx: item.height_px as number,
+      tags: mediaTags.get(item.id as string) ?? [],
     })),
   };
 }
@@ -308,7 +373,7 @@ export async function listAdminVms(
   pool: Pool,
   query: AdminCatalogQuery,
 ): Promise<{ items: AdminVmCard[]; pagination: Pagination }> {
-  const filter = catalogFilter(query);
+  const filter = catalogFilter(query, 'admin');
   const [counts] = await pool.execute<RowDataPacket[]>(
     `SELECT COUNT(*) AS total FROM virtual_machines AS vm ${filter.clause}`,
     filter.values,
@@ -325,6 +390,7 @@ export async function listAdminVms(
      ${limitClause(query.page, query.pageSize)}`,
     filter.values,
   );
+  const tags = await tagsOfVms(pool, rows.map(identityOf));
   return {
     items: rows.map((row) => ({
       emulatorType: row.emulator_type,
@@ -336,6 +402,7 @@ export async function listAdminVms(
       publicCover: publicCover(row),
       mediaCount: Number(row.media_count),
       activeSessions: Number(row.active_sessions ?? 0),
+      tags: tags.get(vmKey(identityOf(row))) ?? [],
       updatedAt: row.updated_at.toISOString(),
     })),
     pagination: paginate(query.page, query.pageSize, Number(counts[0]?.total)),
@@ -357,6 +424,7 @@ export async function getAdminVm(pool: Pool, vm: VmIdentity): Promise<AdminVmDet
   );
   const row = rows[0];
   if (!row) return null;
+  const tags = await tagsOfVms(pool, [identityOf(row)]);
   return {
     emulatorType: row.emulator_type,
     vmName: row.vm_name,
@@ -367,6 +435,7 @@ export async function getAdminVm(pool: Pool, vm: VmIdentity): Promise<AdminVmDet
     publicCover: publicCover(row),
     mediaCount: Number(row.media_count),
     versionCount: Number(row.version_count),
+    tags: tags.get(vmKey(identityOf(row))) ?? [],
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -436,9 +505,10 @@ export async function listAdminMedia(pool: Pool, vm: VmIdentity): Promise<AdminM
      FROM vm_media AS media
      LEFT JOIN public_catalog_card_media AS card ON card.media_id = media.id
      WHERE media.emulator_type = ? AND media.vm_name = ?
-     ORDER BY media.is_main DESC, COALESCE(media.captured_at, media.created_at), media.id`,
+     ORDER BY ${MEDIA_ORDER}`,
     [vm.emulatorType, vm.vmName],
   );
+  const tags = rows.length > 0 ? await tagsOfVmMedia(pool, vm) : new Map<string, Tag[]>();
   return rows.map((row) => ({
     id: row.id,
     isMain: Boolean(row.is_main),
@@ -449,6 +519,7 @@ export async function listAdminMedia(pool: Pool, vm: VmIdentity): Promise<AdminM
     capturedAt: row.captured_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     shownAsPublicMain: Boolean(row.shown_as_public_main),
+    tags: tags.get(row.id) ?? [],
   }));
 }
 
@@ -498,31 +569,51 @@ export async function clearMainMedia(pool: Pool, vm: VmIdentity): Promise<void> 
 }
 
 /**
- * Deletes a media item and its files as one unit, as far as a database and a filesystem can be.
+ * Deletes a media item from the catalog, and its files, as one unit as far as a database and a filesystem can be.
  *
- * The row is removed inside a transaction, then the files, and only then does it commit. If removing
- * a file fails, the transaction rolls back and the row survives, so the item is still listed and the
- * delete can be retried (removal ignores files that are already gone). The opposite order could
- * leave files nothing refers to, which nobody could then find or remove.
+ * The row is removed inside a transaction, then the files, and only then does it commit. If removing a file
+ * fails, the transaction rolls back and the row survives, so the item is still listed and the delete can be
+ * retried (removal ignores files that are already gone). The opposite order could leave files nothing refers
+ * to, which nobody could then find or remove. A file another row still refers to is left alone.
  *
- * A file another row still refers to is left alone.
+ * The same transaction records a suppression of these bytes for this VM (decision 0050), so that the agent,
+ * which still has the file, does not bring the screenshot back: see `acknowledgedHashes` and `storeUpload`.
+ * The item's tags go with its row, and so does the main selection: nothing is promoted in its place. The
+ * remaining screenshots keep their positions, gaps and all, so their order does not change.
  */
 export async function deleteMedia(
   pool: Pool,
   vm: VmIdentity,
   mediaId: string,
   removeFile: (key: string) => Promise<void>,
+  deletedByUserId: string | null = null,
 ): Promise<void> {
   await withTransaction(pool, async (connection) => {
     await lockVm(connection, vm);
     const [rows] = await connection.execute<RowDataPacket[]>(
-      `SELECT original_key, jpeg_key, thumbnail_key FROM vm_media
+      `SELECT original_key, jpeg_key, thumbnail_key, original_sha256, original_filename FROM vm_media
        WHERE id = ? AND emulator_type = ? AND vm_name = ? FOR UPDATE`,
       [mediaId, vm.emulatorType, vm.vmName],
     );
     const row = rows[0];
     if (!row) throw new CatalogNotFoundError('media');
     await connection.execute('DELETE FROM vm_media WHERE id = ?', [mediaId]);
+    await connection.execute(
+      `INSERT INTO vm_media_suppressions
+         (emulator_type, vm_name, original_sha256, media_id, original_filename, deleted_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE media_id = VALUES(media_id),
+         original_filename = VALUES(original_filename),
+         deleted_by_user_id = VALUES(deleted_by_user_id), deleted_at = CURRENT_TIMESTAMP(3)`,
+      [
+        vm.emulatorType,
+        vm.vmName,
+        row.original_sha256 as string,
+        mediaId,
+        row.original_filename as string,
+        deletedByUserId,
+      ],
+    );
 
     const keys = [row.original_key, row.jpeg_key, row.thumbnail_key].filter(
       (key): key is string => typeof key === 'string',
@@ -533,6 +624,52 @@ export async function deleteMedia(
         [key, key, key],
       );
       if (others.length === 0) await removeFile(key);
+    }
+  });
+}
+
+/**
+ * Puts a VM's screenshots in this order, first to last, in one transaction under the VM's row lock. The list
+ * must be exactly the VM's screenshots, each once: a screenshot that arrived or was deleted since the order was
+ * made makes it stale, and it is refused with 409 rather than guessed at. Nothing else changes, the main image
+ * included.
+ */
+export async function reorderMedia(
+  pool: Pool,
+  vm: VmIdentity,
+  { mediaIds }: ReorderMediaRequest,
+): Promise<void> {
+  await withTransaction(pool, async (connection) => {
+    await lockVm(connection, vm);
+    const [rows] = await connection.execute<RowDataPacket[]>(
+      'SELECT id FROM vm_media WHERE emulator_type = ? AND vm_name = ?',
+      [vm.emulatorType, vm.vmName],
+    );
+    const current = new Set(rows.map((row) => (row.id as string).toLowerCase()));
+    const requested = mediaIds.map((id) => id.toLowerCase());
+    if (requested.length !== current.size || requested.some((id) => !current.has(id))) {
+      throw new ApiError(
+        409,
+        'media_order_conflict',
+        'The screenshots changed since this order was made. Reload them and try again',
+      );
+    }
+    // One statement, whatever the count: CASE over the positions, in chunks to keep each statement small.
+    const CHUNK = 500;
+    for (let start = 0; start < requested.length; start += CHUNK) {
+      const chunk = requested.slice(start, start + CHUNK);
+      const cases = chunk.map(() => 'WHEN ? THEN ?').join(' ');
+      const placeholders = chunk.map(() => '?').join(', ');
+      await connection.execute(
+        `UPDATE vm_media SET sort_order = CASE id ${cases} END
+         WHERE emulator_type = ? AND vm_name = ? AND id IN (${placeholders})`,
+        [
+          ...chunk.flatMap((id, index) => [id, start + index + 1]),
+          vm.emulatorType,
+          vm.vmName,
+          ...chunk,
+        ],
+      );
     }
   });
 }

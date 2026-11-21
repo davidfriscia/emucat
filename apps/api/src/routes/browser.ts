@@ -23,6 +23,7 @@ import type { MediaStorage } from '../storage/media-storage.js';
 import type { RemoteSessionOptions, WorkspaceCoordinator } from '../workspaces/coordinator.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
+import { registerAdminTagRoutes } from './admin-tags.js';
 import { registerAdminCleanupRoutes } from './admin-cleanup.js';
 import { registerAdminExecutionRoutes } from './admin-execution.js';
 import { registerAdminRegistrationRoutes } from './admin-registrations.js';
@@ -89,6 +90,7 @@ export async function registerBrowserRoutes(
   registerAuthRoutes(api, dependencies);
   registerPublicCatalogRoutes(api, dependencies);
   registerAdminCatalogRoutes(api, dependencies, hub);
+  registerAdminTagRoutes(api, dependencies);
   registerAgentMediaRoutes(api, dependencies, authenticateAgent);
   registerAgentOvaImportRoutes(
     api,

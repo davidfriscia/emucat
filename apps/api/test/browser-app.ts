@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { FastifyInstance, InjectOptions, LightMyRequestResponse } from 'fastify';
-import type { Pool } from 'mysql2/promise';
+import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { AgentHub, type AgentHubOptions } from '../src/agents/hub.js';
 import { DEFAULT_PAIRING_POLICY } from '../src/agents/pairing.js';
 import { databaseAgentPresence } from '../src/agents/repository.js';
@@ -212,16 +212,22 @@ export async function insertMedia(
     writeFiles?: boolean;
     jpegKey?: string;
     thumbnailKey?: string;
+    /** The gallery position. Last, after what the VM already has, as for an upload. */
+    sortOrder?: number;
   } = {},
 ): Promise<MediaFixture> {
   const id = randomUUID();
   const emulatorType = vm.emulatorType ?? 'qemu';
   const jpegKey = options.jpegKey ?? `media/${id}/full.jpg`;
   const thumbnailKey = options.thumbnailKey ?? `media/${id}/thumb.jpg`;
+  const [last] = await context.pool.execute<RowDataPacket[]>(
+    'SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM vm_media WHERE emulator_type = ? AND vm_name = ?',
+    [emulatorType, vm.vmName],
+  );
   await context.pool.execute(
     `INSERT INTO vm_media (id, emulator_type, vm_name, visibility, is_main, original_filename,
-       original_sha256, original_size_bytes, jpeg_key, thumbnail_key, width_px, height_px)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 2048, ?, ?, 640, 480)`,
+       original_sha256, original_size_bytes, jpeg_key, thumbnail_key, width_px, height_px, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 2048, ?, ?, 640, 480, ?)`,
     [
       id,
       emulatorType,
@@ -232,6 +238,7 @@ export async function insertMedia(
       createHash('sha256').update(id).digest('hex'),
       jpegKey,
       thumbnailKey,
+      options.sortOrder ?? Number(last[0]?.next ?? 1),
     ],
   );
   if (options.writeFiles !== false) {

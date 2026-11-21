@@ -5,6 +5,7 @@ import {
   localRemasterRequestSchema,
   promoteSnapshotRequestSchema,
   remasterPathParamsSchema,
+  setEntityTagsRequestSchema,
   updateVersionDetailsRequestSchema,
   versionPathParamsSchema,
   type LocalRemasterRequest,
@@ -13,6 +14,8 @@ import {
   type RemasterOperation,
   type RemasterPreview,
   type VersionDetails,
+  type EntityTagsResponse,
+  type SetEntityTagsRequest,
   discardWorkspaceRequestSchema,
   launchWorkspaceRequestSchema,
   preserveWorkspaceRequestSchema,
@@ -43,6 +46,7 @@ import {
   sessionOf,
 } from '../auth/guards.js';
 import { vmExists } from '../catalog/repository.js';
+import { getVersionTags, setVersionTags } from '../catalog/tags.js';
 import { ApiError } from '../errors.js';
 import type { VersionDeletionCoordinator } from '../cleanup/version-deletions.js';
 import type { RegistrationCoordinator } from '../registration/coordinator.js';
@@ -122,6 +126,27 @@ export function registerAdminVersionRoutes(
           const details = await updateVersionDetails(pool, vm, versionId, body);
           request.log.info({ versionId, vmName: vm.vmName }, 'Version details edited');
           return details;
+        },
+      );
+
+      // A master's or snapshot's own tags (decision 0050). Never its parent's, children's or VM's.
+      api.get(
+        '/vms/:emulatorType/:vmName/versions/:versionId/tags',
+        { schema: { params: versionPathParamsSchema } },
+        async (request): Promise<EntityTagsResponse> => {
+          const { versionId, ...vm } = request.params as z.infer<typeof versionPathParamsSchema>;
+          return { tags: await getVersionTags(pool, vm, versionId) };
+        },
+      );
+
+      api.put(
+        '/vms/:emulatorType/:vmName/versions/:versionId/tags',
+        { schema: { params: versionPathParamsSchema, body: setEntityTagsRequestSchema } },
+        async (request): Promise<EntityTagsResponse> => {
+          const { versionId, ...vm } = request.params as z.infer<typeof versionPathParamsSchema>;
+          await requireVm(vm);
+          const { tagIds } = request.body as SetEntityTagsRequest;
+          return { tags: await setVersionTags(pool, vm, versionId, tagIds) };
         },
       );
 

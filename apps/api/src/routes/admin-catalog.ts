@@ -1,7 +1,9 @@
 import {
   adminCatalogQuerySchema,
   adminMediaVariantSchema,
+  reorderMediaRequestSchema,
   selectMainMediaRequestSchema,
+  setEntityTagsRequestSchema,
   updateVmMetadataRequestSchema,
   updateVmVisibilityRequestSchema,
   vmPathParamsSchema,
@@ -12,13 +14,22 @@ import {
   type AdminMediaSyncResponse,
   type AdminSummaryResponse,
   type AdminVmDetail,
+  type EntityTagsResponse,
+  type ReorderMediaRequest,
+  type SetEntityTagsRequest,
   type VmIdentity,
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'mysql2/promise';
 import { z } from 'zod';
 import type { AgentHub } from '../agents/hub.js';
-import { noStore, requireAdmin, requireSameOrigin, requireSession } from '../auth/guards.js';
+import {
+  noStore,
+  requireAdmin,
+  requireSameOrigin,
+  requireSession,
+  sessionOf,
+} from '../auth/guards.js';
 import {
   adminMediaFile,
   adminSummary,
@@ -30,11 +41,13 @@ import {
   getAdminVm,
   listAdminMedia,
   listAdminVms,
+  reorderMedia,
   selectMainMedia,
   setVmVisibility,
   updateVmMetadata,
   vmExists,
 } from '../catalog/repository.js';
+import { getMediaTags, getVmTags, setMediaTags, setVmTags } from '../catalog/tags.js';
 import { ApiError } from '../errors.js';
 import type { BrowserDependencies } from './browser.js';
 import { sendMediaFile } from './media-file.js';
@@ -187,8 +200,65 @@ export function registerAdminCatalogRoutes(
         { schema: { params: mediaParams } },
         async (request): Promise<AdminMediaListResponse> => {
           const { mediaId, ...vm } = request.params as z.infer<typeof mediaParams>;
-          await mapNotFound(deleteMedia(pool, vm, mediaId, (key) => storage.remove(key)));
+          await mapNotFound(
+            deleteMedia(
+              pool,
+              vm,
+              mediaId,
+              (key) => storage.remove(key),
+              sessionOf(request).user.id,
+            ),
+          );
+          request.log.info({ mediaId, vmName: vm.vmName }, 'Screenshot deleted from the catalog');
           return mediaListOr404(pool, vm);
+        },
+      );
+
+      // The gallery's order, all at once (decision 0050). Static, so it never matches a media ID.
+      api.put(
+        '/vms/:emulatorType/:vmName/media-order',
+        { schema: { params: vmPathParamsSchema, body: reorderMediaRequestSchema } },
+        async (request): Promise<AdminMediaListResponse> => {
+          const vm = request.params as VmIdentity;
+          await mapNotFound(reorderMedia(pool, vm, request.body as ReorderMediaRequest));
+          request.log.info({ vmName: vm.vmName }, 'Screenshots reordered');
+          return mediaListOr404(pool, vm);
+        },
+      );
+
+      api.get(
+        '/vms/:emulatorType/:vmName/tags',
+        { schema: { params: vmPathParamsSchema } },
+        async (request): Promise<EntityTagsResponse> => ({
+          tags: await getVmTags(pool, request.params as VmIdentity),
+        }),
+      );
+
+      api.put(
+        '/vms/:emulatorType/:vmName/tags',
+        { schema: { params: vmPathParamsSchema, body: setEntityTagsRequestSchema } },
+        async (request): Promise<EntityTagsResponse> => {
+          const { tagIds } = request.body as SetEntityTagsRequest;
+          return { tags: await setVmTags(pool, request.params as VmIdentity, tagIds) };
+        },
+      );
+
+      api.get(
+        '/vms/:emulatorType/:vmName/media/:mediaId/tags',
+        { schema: { params: mediaParams } },
+        async (request): Promise<EntityTagsResponse> => {
+          const { mediaId, ...vm } = request.params as z.infer<typeof mediaParams>;
+          return { tags: await getMediaTags(pool, vm, mediaId) };
+        },
+      );
+
+      api.put(
+        '/vms/:emulatorType/:vmName/media/:mediaId/tags',
+        { schema: { params: mediaParams, body: setEntityTagsRequestSchema } },
+        async (request): Promise<EntityTagsResponse> => {
+          const { mediaId, ...vm } = request.params as z.infer<typeof mediaParams>;
+          const { tagIds } = request.body as SetEntityTagsRequest;
+          return { tags: await setMediaTags(pool, vm, mediaId, tagIds) };
         },
       );
 

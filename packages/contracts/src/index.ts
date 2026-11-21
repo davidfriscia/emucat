@@ -17,6 +17,7 @@ export * from './remaster.js';
 export * from './remote-sessions.js';
 export * from './restore.js';
 export * from './snapshot-name.js';
+export * from './tags.js';
 export * from './version.js';
 export * from './version-details.js';
 export * from './versions.js';

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { versionDeletabilitySchema } from './cleanup.js';
 import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js';
 import { versionDescriptionSchema, versionTitleSchema } from './version-details.js';
+import { tagSchema } from './tags.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
 import { vmNameSchema } from './vm-name.js';
 
@@ -48,6 +49,8 @@ export const versionNodeSchema = z.object({
   /** An administrator's title and description, plain text. Never generated. */
   title: z.string().nullable().default(null),
   description: z.string().nullable().default(null),
+  /** This version's own tags. A master's and a snapshot's are independent of each other and of the VM's. */
+  tags: z.array(tagSchema).default([]),
   /** When the archive was made. A promotion never changes it. */
   createdAt: timestampSchema,
   /** When this version, then a snapshot, became the master (decision 0048). */

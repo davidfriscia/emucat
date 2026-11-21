@@ -179,7 +179,11 @@ export function registerAgentMediaRoutes(
               {
                 ...context,
                 mediaId: outcome.mediaId,
-                result: outcome.created ? 'created' : 'duplicate',
+                result: outcome.created
+                  ? 'created'
+                  : outcome.suppressed
+                    ? 'suppressed'
+                    : 'duplicate',
                 bytes: outcome.sizeBytes,
                 durationMs: Date.now() - started,
               },
@@ -190,6 +194,7 @@ export function registerAgentMediaRoutes(
               mediaId: outcome.mediaId,
               sha256: outcome.sha256,
               created: outcome.created,
+              ...(outcome.suppressed ? { suppressed: true } : {}),
             };
           } catch (error) {
             const code = error instanceof ApiError ? error.code : 'internal_error';

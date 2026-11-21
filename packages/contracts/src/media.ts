@@ -110,6 +110,11 @@ export const mediaUploadResponseSchema = z.strictObject({
   sha256: sha256HexSchema,
   /** False when these bytes were already stored for this VM. */
   created: z.boolean(),
+  /**
+   * True when an administrator deleted these bytes from this VM's catalog: nothing was stored, and the agent
+   * should treat the file as done. `mediaId` is then the deleted item's.
+   */
+  suppressed: z.boolean().optional(),
 });
 export type MediaUploadResponse = z.infer<typeof mediaUploadResponseSchema>;
 

@@ -19,6 +19,11 @@ const REQUIRED_TABLES = [
   'vm_sessions',
   'vm_media',
   'repositories',
+  'vm_media_suppressions',
+  'tags',
+  'vm_tags',
+  'vm_version_tags',
+  'vm_media_tags',
 ];
 
 let database: TestDatabase;
@@ -676,6 +681,85 @@ describe('upgrading to VM-level publication (0008)', () => {
     expect(columns[0]?.comment).toMatch(/Legacy, ignored/);
 
     // And it runs once.
+    await expect(migrate(scratch.options)).resolves.toMatchObject({ applied: [] });
+  });
+});
+
+describe('upgrading to screenshot order and tags (0019)', () => {
+  let scratch: TestDatabase;
+  let directory: string;
+  let upgradePool: Pool;
+
+  beforeAll(async () => {
+    scratch = await createTestDatabase();
+    directory = await mkdtemp(join(tmpdir(), 'emucat-migrations-'));
+    const all = await loadMigrations();
+    for (const migration of all.filter((item) => item.version < '0019')) {
+      await writeFile(join(directory, `${migration.version}.sql`), migration.sql);
+    }
+    await migrate(scratch.options, directory);
+    upgradePool = mysql.createPool(scratch.options);
+  });
+
+  afterAll(async () => {
+    await upgradePool?.end();
+    await scratch?.drop();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('gives existing screenshots the order galleries already showed, and changes nothing else', async () => {
+    await upgradePool.execute(
+      "INSERT INTO virtual_machines (emulator_type, vm_name) VALUES ('qemu', 'Old'), ('qemu', 'Other')",
+    );
+    const insertMedia = async (
+      vmName: string,
+      isMain: boolean,
+      capturedAt: string | null,
+      createdAt: string,
+    ) => {
+      const id = randomUUID();
+      await upgradePool.execute(
+        `INSERT INTO vm_media (id, emulator_type, vm_name, is_main, original_filename, original_sha256,
+           original_size_bytes, jpeg_key, thumbnail_key, width_px, height_px, captured_at, created_at,
+           updated_at)
+         VALUES (?, 'qemu', ?, ?, 'a.ppm', ?, 1, 'j', 't', 1, 1, ?, ?, '2026-01-01 00:00:00.000')`,
+        [id, vmName, isMain, createHash('sha256').update(id).digest('hex'), capturedAt, createdAt],
+      );
+      return id;
+    };
+    const late = await insertMedia('Old', false, null, '2026-03-01 00:00:00');
+    const early = await insertMedia('Old', false, '2026-01-01 00:00:00', '2026-04-01 00:00:00');
+    const main = await insertMedia('Old', true, null, '2026-05-01 00:00:00');
+    const alone = await insertMedia('Other', false, null, '2026-02-01 00:00:00');
+
+    const result = await migrate(scratch.options);
+    expect(result.applied).toEqual(['0019_media_order_and_tags']);
+
+    const [rows] = await upgradePool.query<RowDataPacket[]>(
+      `SELECT id, vm_name, sort_order, updated_at FROM vm_media ORDER BY vm_name, sort_order, id`,
+    );
+    expect(rows.map((row) => [row.vm_name, row.id, row.sort_order])).toEqual([
+      ['Old', main, 1],
+      ['Old', early, 2],
+      ['Old', late, 3],
+      ['Other', alone, 1],
+    ]);
+    // The backfill is not an edit.
+    for (const row of rows) {
+      expect((row.updated_at as Date).toISOString()).toBe('2026-01-01T00:00:00.000Z');
+    }
+    for (const table of [
+      'tags',
+      'vm_tags',
+      'vm_version_tags',
+      'vm_media_tags',
+      'vm_media_suppressions',
+    ]) {
+      const [found] = await upgradePool.query<RowDataPacket[]>(
+        `SELECT COUNT(*) AS n FROM ${table}`,
+      );
+      expect(Number(found[0]?.n), table).toBe(0);
+    }
     await expect(migrate(scratch.options)).resolves.toMatchObject({ applied: [] });
   });
 });

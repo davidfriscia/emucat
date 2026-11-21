@@ -321,7 +321,7 @@ describe('card image rules', () => {
     ]);
   });
 
-  it('lists every screenshot of a public VM in the gallery, the main image first', async () => {
+  it('lists every screenshot of a public VM in the gallery, in the administrator’s order', async () => {
     const gallery = (await detail('qemu/PublicWithMain')).gallery.map((item) => item.id);
     expect(gallery[0]).toBe(media.shown?.id);
     expect([...gallery].sort()).toEqual(
