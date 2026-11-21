@@ -138,8 +138,9 @@ const RECOVERY: Partial<Record<string, string>> = {
   transfer_blocked_running:
     'The VM was running, or may have been, so the local VM was kept. Stop it, then choose Retry removal.',
   vm_running: 'The VM is running. Stop it before registering it.',
+  // Only agents from before decision 0051 report this. Screenshots no longer block a transfer.
   transfer_blocked_media:
-    'Screenshots are not in the archive, and the server could not confirm that it holds all of them, so the local VM was kept. Check the VM’s Media page, and choose Retry removal once it is synchronized. A file that is not a supported image has to be moved out of the screenshots directory first. Copy never removes anything.',
+    'An older agent kept the local VM because of its screenshots. Update the agent, then choose Retry removal: screenshots no longer stop a transfer, and any still waiting are uploaded afterwards.',
   repository_not_configured:
     'Add this repository’s UUID to the agent’s configuration, and restart the agent.',
   repository_unreachable: 'Check that the SSH server is running and reachable, and try again.',

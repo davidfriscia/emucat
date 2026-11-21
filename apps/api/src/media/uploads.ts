@@ -65,19 +65,44 @@ export async function requireCaptureUpload(
     );
 }
 
+/**
+ * How long after removing its local copy an agent may still deliver that copy's screenshots. A removal hands
+ * screenshots that had not reached the server to the agent's media spool (decision 0051), and they are uploaded
+ * afterwards; the removal deletes the agent's `agent_vm_state` row, so this is what still lets them in.
+ */
+export const REMOVED_COPY_MEDIA_GRACE_DAYS = 30;
+
+/**
+ * Whether this agent may upload screenshots of this VM: it holds a copy (or had one, until a transfer), or it
+ * removed its copy within the grace period. Never for a revoked agent.
+ */
+const AGENT_MAY_UPLOAD = `
+  EXISTS (SELECT 1 FROM agents AS a WHERE a.id = ? AND a.revoked_at IS NULL)
+  AND (
+    EXISTS (SELECT 1 FROM agent_vm_state AS state
+      WHERE state.agent_id = ? AND state.emulator_type = ? AND state.vm_name = ?)
+    OR EXISTS (SELECT 1 FROM local_copy_removals AS removal
+      WHERE removal.agent_id = ? AND removal.emulator_type = ? AND removal.vm_name = ?
+        AND removal.state = 'succeeded'
+        AND removal.finished_at >= UTC_TIMESTAMP(3) - INTERVAL ${REMOVED_COPY_MEDIA_GRACE_DAYS} DAY)
+  )`;
+
+function mayUploadValues(agentId: string, vm: VmIdentity): string[] {
+  return [agentId, agentId, vm.emulatorType, vm.vmName, agentId, vm.emulatorType, vm.vmName];
+}
+
 export async function requireAgentVm(pool: Pool, agentId: string, vm: VmIdentity): Promise<void> {
   const [rows] = await pool.execute<RowDataPacket[]>(
-    `SELECT state.agent_id
+    `SELECT ${AGENT_MAY_UPLOAD} AS allowed
      FROM virtual_machines AS vm
-     LEFT JOIN agent_vm_state AS state
-       ON state.emulator_type = vm.emulator_type AND state.vm_name = vm.vm_name
-      AND state.agent_id = ?
      WHERE vm.emulator_type = ? AND vm.vm_name = ?`,
-    [agentId, vm.emulatorType, vm.vmName],
+    [...mayUploadValues(agentId, vm), vm.emulatorType, vm.vmName],
   );
   const row = rows[0];
   if (!row) throw new ApiError(404, 'vm_not_registered', 'This VM is not registered');
-  if (!row.agent_id) throw new ApiError(403, 'vm_not_assigned', 'This VM is not this agent’s');
+  if (!Number(row.allowed)) {
+    throw new ApiError(403, 'vm_not_assigned', 'This VM is not this agent’s');
+  }
 }
 
 /** The VMs an agent should watch. One whose local copy it has removed is not among them. */
@@ -318,11 +343,8 @@ export async function storeUpload(
           [vm.emulatorType, vm.vmName],
         );
         const [allowed] = await connection.execute<RowDataPacket[]>(
-          `SELECT 1 FROM agent_vm_state AS state
-           JOIN agents AS a ON a.id = state.agent_id
-           WHERE state.emulator_type = ? AND state.vm_name = ? AND state.agent_id = ?
-             AND a.revoked_at IS NULL`,
-          [vm.emulatorType, vm.vmName, agentId],
+          `SELECT 1 FROM DUAL WHERE ${AGENT_MAY_UPLOAD}`,
+          mayUploadValues(agentId, vm),
         );
         // A revocation can arrive while the bytes are still on their way.
         if (captureId) await requireCaptureUpload(connection, agentId, vm, captureId, sha256);

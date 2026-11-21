@@ -278,7 +278,8 @@ describe('removing a persistent local copy', () => {
       state: 'failed',
       error: { code: 'local_copy_unsynced_media' },
     });
-    expect(failed.recovery).toMatch(/synchronize/);
+    // Only an agent older than decision 0051 reports this, and the advice is to update it.
+    expect(failed.recovery).toMatch(/Update the agent/);
     expect((await stateRow(w))?.local_source_version_id).toBe(w.masterId);
     // The agent is free again.
     await requestRemoval(w);

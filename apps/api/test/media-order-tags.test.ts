@@ -333,6 +333,49 @@ describe('deleting a screenshot from the catalog', () => {
   });
 });
 
+describe('screenshots of a removed local copy (decision 0051)', () => {
+  async function removeCopy(vm: TestVm, finishedDaysAgo: number) {
+    await context.pool.execute(
+      'DELETE FROM agent_vm_state WHERE agent_id = ? AND emulator_type = ? AND vm_name = ?',
+      [agent.agentId, vm.emulatorType, vm.vmName],
+    );
+    await context.pool.execute(
+      `INSERT INTO local_copy_removals
+         (id, agent_id, request_id, emulator_type, vm_name, state, finished_at)
+       VALUES (?, ?, ?, ?, ?, 'succeeded', UTC_TIMESTAMP(3) - INTERVAL ? DAY)`,
+      [randomUUID(), agent.agentId, randomUUID(), vm.emulatorType, vm.vmName, finishedDaysAgo],
+    );
+  }
+
+  it('accepts the spooled screenshots of a copy this agent removed recently', async () => {
+    const vm = await newVm();
+    await removeCopy(vm, 1);
+    const response = await upload(vm, await png(90, 20));
+    expect(response.statusCode).toBe(201);
+    expect(await mediaIds(vm)).toHaveLength(1);
+  });
+
+  it('refuses them once the grace period is over, as for any VM that is not this agent’s', async () => {
+    const vm = await newVm();
+    await removeCopy(vm, 31);
+    const response = await upload(vm, await png(91, 20));
+    expect(response.statusCode).toBe(403);
+    expect(response.json<{ error: { code: string } }>().error.code).toBe('vm_not_assigned');
+  });
+
+  it('keeps a deleted screenshot deleted when its spooled copy arrives', async () => {
+    const vm = await newVm();
+    const bytes = await png(92, 20);
+    const { mediaId } = mediaUploadResponseSchema.parse((await upload(vm, bytes)).json());
+    expect((await send('DELETE', `${vm.admin}/media/${mediaId}`)).statusCode).toBe(200);
+    await removeCopy(vm, 0);
+    const again = await upload(vm, bytes);
+    expect(again.statusCode).toBe(200);
+    expect(mediaUploadResponseSchema.parse(again.json()).suppressed).toBe(true);
+    expect(await mediaIds(vm)).toEqual([]);
+  });
+});
+
 describe('the order of a VM’s screenshots', () => {
   async function threeScreenshots(vm: TestVm): Promise<string[]> {
     const ids: string[] = [];

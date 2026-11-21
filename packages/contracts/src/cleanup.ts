@@ -65,8 +65,9 @@ const REMOVAL_RECOVERY: Partial<Record<string, string>> = {
     'The local copy differs from its version. Snapshot it first, or confirm that its changes may be discarded. Nothing was removed.',
   local_copy_unverified:
     'The agent cannot prove which version the local copy comes from, so changes cannot be ruled out. Verify it, or confirm that its changes may be discarded. Nothing was removed.',
+  // Only agents from before decision 0051 report this: screenshots no longer stop a removal.
   local_copy_unsynced_media:
-    'Screenshots in the local copy have not reached the server yet, and would be lost. Wait for them to synchronize, or confirm that local changes may be discarded. Nothing was removed.',
+    'An older agent kept the local copy because of its screenshots. Update the agent and try again: screenshots no longer stop a removal. Nothing was removed.',
   local_copy_in_use:
     'A file of the local copy is open in another program, so it could not be moved aside. Close it, and try again. Nothing was removed.',
   local_copy_unsafe:
@@ -97,7 +98,10 @@ export const localCopyRemovePayloadSchema = z.strictObject({
   vmName: vmNameSchema,
   /** The version the page showed as installed. A copy recorded as another is never removed. */
   expectedVersionId: z.uuid().nullable(),
-  /** The administrator acknowledged that changes in no version, screenshots included, are lost. */
+  /**
+   * The administrator acknowledged that changes in no version are lost. Screenshots are never such changes
+   * (decision 0051): pending ones are handed to the agent's media spool whatever this says.
+   */
   discardLocalChanges: z.boolean(),
 });
 export type LocalCopyRemovePayload = z.infer<typeof localCopyRemovePayloadSchema>;
