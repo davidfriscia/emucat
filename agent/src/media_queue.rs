@@ -24,6 +24,10 @@ use crate::media::MediaStamp;
 use crate::protocol::{MediaSyncError, MediaSyncVmStatus};
 
 const QUEUE_FILE: &str = "queue.json";
+const SPOOL_DIRECTORY: &str = "spool";
+/// Starts the key of a spooled entry. Real source paths never hold a control character, so the two kinds of
+/// key cannot collide, and a VM directory restored later under the same name keeps its own entries.
+const SPOOL_KEY_PREFIX: &str = "\u{1}spool/";
 const QUEUE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +57,10 @@ pub struct QueueEntry {
     pub source_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_id: Option<Uuid>,
+    /// The name of a copy in the agent's media spool, made because the VM directory holding the file was
+    /// about to be removed (decision 0051). The upload reads the copy, and still names `source_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spool: Option<String>,
     pub sha256: String,
     pub stamp: MediaStamp,
     pub state: EntryState,
@@ -67,6 +75,23 @@ impl QueueEntry {
     pub fn short_hash(&self) -> &str {
         self.sha256.get(..12).unwrap_or(&self.sha256)
     }
+
+    /// What identifies this entry within its VM: the source path, or for a spooled copy its spool name.
+    pub fn key_path(&self) -> String {
+        match &self.spool {
+            Some(name) => spool_key(name),
+            None => self.source_path.clone(),
+        }
+    }
+}
+
+fn spool_key(name: &str) -> String {
+    format!("{SPOOL_KEY_PREFIX}{name}")
+}
+
+/// Where spooled copies live: next to the queue, in the agent's state directory, never in a VM directory.
+pub fn spool_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("media").join(SPOOL_DIRECTORY)
 }
 
 /// A stable name for a VM, ignoring case like VM identity itself.
@@ -237,6 +262,7 @@ impl MediaQueue {
                 vm_name: vm_name.clone(),
                 source_path: source_path.to_owned(),
                 capture_id: None,
+                spool: None,
                 sha256: sha256.to_owned(),
                 stamp,
                 state: EntryState::Pending,
@@ -247,6 +273,46 @@ impl MediaQueue {
         );
         self.dirty = true;
         true
+    }
+
+    /// Records a copy taken into the spool, as new work that no longer depends on the VM directory. It is
+    /// uploaded under its original source path, so the server sees the screenshot it always was.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_spooled(
+        &mut self,
+        emulator: EmulatorType,
+        vm_name: &VmName,
+        source_path: &str,
+        spool: &str,
+        sha256: &str,
+        stamp: MediaStamp,
+    ) {
+        self.entries.insert(
+            entry_key(emulator, vm_name, &spool_key(spool)),
+            QueueEntry {
+                emulator_type: emulator,
+                vm_name: vm_name.clone(),
+                source_path: source_path.to_owned(),
+                capture_id: None,
+                spool: Some(spool.to_owned()),
+                sha256: sha256.to_owned(),
+                stamp,
+                state: EntryState::Pending,
+                attempts: 0,
+                next_attempt_ms: 0,
+                last_error: None,
+            },
+        );
+        self.dirty = true;
+    }
+
+    /// The spool names every entry refers to, so that anything else in the spool can be recognized as left
+    /// over from a crash.
+    pub fn spool_names(&self) -> BTreeSet<String> {
+        self.entries
+            .values()
+            .filter_map(|entry| entry.spool.clone())
+            .collect()
     }
 
     /// Records a file that will never be uploaded as it is, for example because of its size.
@@ -282,6 +348,7 @@ impl MediaQueue {
             .iter()
             .filter(|(key, entry)| {
                 entry.capture_id.is_none()
+                    && entry.spool.is_none()
                     && key.starts_with(&prefix)
                     && entry.state != EntryState::Uploading
                     && !present.contains(&entry.source_path)
@@ -301,8 +368,11 @@ impl MediaQueue {
     /// Forgets everything about VMs this agent is no longer responsible for.
     pub fn retain_vms(&mut self, registered: &BTreeSet<String>) {
         let before = self.entries.len();
+        // A spooled copy no longer depends on the VM being this agent's: it is delivered or given up on
+        // its own terms (decision 0051).
         self.entries.retain(|_, entry| {
             entry.capture_id.is_some()
+                || entry.spool.is_some()
                 || registered.contains(&vm_key(entry.emulator_type, &entry.vm_name))
         });
         if self.entries.len() != before {

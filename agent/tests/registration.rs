@@ -4,7 +4,7 @@
 //! The rule under test throughout: nothing but an explicit, matching acknowledgement of a transfer can
 //! ever remove a local file. Every destructive test uses a disposable temporary directory.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,8 +13,7 @@ use std::time::Duration;
 use emucat_agent::archives::VersionId;
 use emucat_agent::config::EmulatorConfig;
 use emucat_agent::emulators::{EmulatorType, VmIdentity, VmName};
-use emucat_agent::media_queue::EntryError;
-use emucat_agent::media_sync::{ApiFailure, MediaPreservation};
+use emucat_agent::media_sync::{DetachReport, MediaPreservation};
 use emucat_agent::packaging::{MANIFEST_ENTRY_NAME, hex, read_manifest};
 use emucat_agent::protocol::{
     AckOutcome, LocalCopyStatus, Message, RegistrationAck, RegistrationCancel, RegistrationMode,
@@ -564,44 +563,60 @@ async fn a_server_saying_remove_cannot_turn_a_copy_into_a_deletion() {
 }
 
 #[tokio::test]
-async fn a_transfer_with_screenshots_is_blocked_before_anything_is_uploaded() {
+async fn screenshots_never_block_a_transfer_even_without_synchronization() {
+    // Screenshots are volatile media, not VM state (decision 0051). With nowhere to send them, they go
+    // with the directory, and the cleanup says so.
     let world = World::new();
     let root = world.box86.join("Box");
-    fs::create_dir_all(root.join("screenshots")).unwrap();
+    fs::create_dir_all(root.join("screenshots/nested")).unwrap();
     fs::write(root.join("86box.cfg"), b"x").unwrap();
-    fs::write(root.join("screenshots/one.png"), b"keep me").unwrap();
+    fs::write(root.join("screenshots/one.png"), b"a screenshot").unwrap();
+    fs::write(
+        root.join("screenshots/nested/notes.txt"),
+        b"not even an image",
+    )
+    .unwrap();
     let operations = world.start();
-    let vm_name = VmName::new("Box").unwrap();
+    let transfer = box86_request("Box", RegistrationMode::Transfer);
+    start(&operations, &transfer);
+    result_of(&operations).await;
+    assert_eq!(world.repository.store.lock().unwrap().uploads, 1);
+    let archived = archived_paths(&world, &transfer.archive_key);
+    assert!(archived.contains(&"86box.cfg".to_owned()), "{archived:?}");
+    assert!(
+        !archived
+            .iter()
+            .any(|path| path.to_ascii_lowercase().starts_with("screenshots")),
+        "{archived:?}"
+    );
+    operations.handle(committed(&transfer, true));
+    let cleanup = cleanup_of(&operations).await;
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
+    assert!(!root.exists());
+    let message = cleanup.message.expect("the lost screenshot is reported");
+    assert!(message.contains("screenshots/one.png"), "{message}");
+}
+
+fn box86_request(name: &str, mode: RegistrationMode) -> RegistrationRequest {
+    let vm_name = VmName::new(name).unwrap();
     let version_id = Uuid::new_v4();
-    let transfer = RegistrationRequest {
-        operation_id: Uuid::new_v4(),
+    let identity = VmIdentity {
         emulator_type: EmulatorType::Box86,
         vm_name: vm_name.clone(),
-        mode: RegistrationMode::Transfer,
+    };
+    RegistrationRequest {
+        operation_id: Uuid::new_v4(),
+        emulator_type: EmulatorType::Box86,
+        vm_name,
+        mode,
         repository_id: REPOSITORY,
         version_id,
-        archive_key: RepositoryKey::for_version(
-            &VmIdentity {
-                emulator_type: EmulatorType::Box86,
-                vm_name,
-            },
-            VersionId(version_id),
-        )
-        .as_str()
-        .to_owned(),
+        archive_key: RepositoryKey::for_version(&identity, VersionId(version_id))
+            .as_str()
+            .to_owned(),
         parent_version_id: None,
         workspace_id: None,
-    };
-    start(&operations, &transfer);
-    let (code, message) = failure_of(&operations).await;
-    assert_eq!(code, "transfer_blocked_media");
-    assert!(message.contains("screenshot"), "{message}");
-    assert!(world.repository.keys().is_empty());
-    assert_eq!(world.repository.store.lock().unwrap().uploads, 0);
-    assert_eq!(
-        fs::read(root.join("screenshots/one.png")).unwrap(),
-        b"keep me"
-    );
+    }
 }
 
 /// Everything that must stop a commit from deleting the source, applied just after publication.
@@ -645,22 +660,13 @@ async fn a_new_file_that_is_not_in_the_archive_is_kept() {
 }
 
 #[tokio::test]
-async fn a_screenshot_taken_after_archiving_is_never_deleted() {
-    let world = World::new();
-    let root = world.qemu_vm("Disposable");
-    let operations = world.start();
-    let transfer = request("Disposable", RegistrationMode::Transfer);
-    start(&operations, &transfer);
-    result_of(&operations).await;
-    fs::write(root.join("capture.ppm"), b"P6 taken later").unwrap();
-    operations.handle(committed(&transfer, true));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-    assert_eq!(
-        fs::read(root.join("capture.ppm")).unwrap(),
-        b"P6 taken later"
-    );
-    assert!(root.join("disk.qcow2").exists());
+async fn a_screenshot_taken_after_archiving_does_not_stop_the_removal() {
+    let (_world, root, cleanup) = transfer_and_change(|root| {
+        fs::write(root.join("capture.ppm"), b"P6 taken later").unwrap();
+    })
+    .await;
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
+    assert!(!root.exists());
 }
 
 #[tokio::test]
@@ -1209,91 +1215,64 @@ fn repository_keys_are_conservative_and_relative() {
     assert!(RepositoryKey::staging(Uuid::new_v4()).is_staging());
 }
 
-// A transfer of a VM with screenshots: only the server's acknowledgement of the exact content counts.
+// A transfer of a VM with screenshots. Screenshots decide nothing about the transfer (decision 0051): the
+// archive and the directory are checked as if they were not there, and whatever is still pending is handed to
+// the media spool at the last moment, from the directory that is about to be deleted.
 
 #[derive(Default)]
 struct PreservationState {
-    held: BTreeSet<String>,
-    unavailable: bool,
-    failures: HashMap<String, EntryError>,
-    /// Runs once, right after the next answer: this is how something changes at the worst moment.
-    after_answer: Option<Box<dyn FnOnce() + Send>>,
-    /// Hashes that become acknowledged when the agent asks for them to be uploaded.
-    upload_on_request: bool,
     sync_requests: u32,
     holds: Vec<bool>,
+    /// For each detach, the screenshots present in the directory handed over, and its name.
+    detached: Vec<(String, Vec<String>)>,
+    /// Screenshots the next detach reports as lost.
+    lose: Vec<String>,
 }
 
 #[derive(Clone)]
 struct FakePreservation {
     state: Arc<Mutex<PreservationState>>,
-    wait: Duration,
 }
 
 impl FakePreservation {
     fn new() -> Self {
         Self {
             state: Arc::default(),
-            wait: Duration::from_millis(600),
         }
     }
-
-    fn hold_bytes(&self, bytes: &[u8]) {
-        self.state.lock().unwrap().held.insert(hash(bytes));
-    }
-}
-
-fn hash(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
 }
 
 impl MediaPreservation for FakePreservation {
-    fn acknowledged<'a>(
-        &'a self,
-        _vm: &'a VmIdentity,
-        hashes: &'a [String],
-    ) -> futures_util::future::BoxFuture<'a, Result<BTreeSet<String>, ApiFailure>> {
-        Box::pin(async move {
-            let mut state = self.state.lock().unwrap();
-            if state.unavailable {
-                return Err(ApiFailure::Transient {
-                    code: "server_unreachable".to_owned(),
-                    message: "Cannot connect to the server".to_owned(),
-                });
-            }
-            let answer = hashes
-                .iter()
-                .filter(|hash| state.held.contains(*hash))
-                .cloned()
-                .collect();
-            if let Some(action) = state.after_answer.take() {
-                action();
-            }
-            Ok(answer)
-        })
-    }
-
     fn request_sync(&self, _vm: &VmIdentity) {
         self.state.lock().unwrap().sync_requests += 1;
-    }
-
-    fn requeue(&self, _vm: &VmIdentity, hashes: &BTreeSet<String>) {
-        let mut state = self.state.lock().unwrap();
-        if state.upload_on_request {
-            state.held.extend(hashes.iter().cloned());
-        }
-    }
-
-    fn failure_of(&self, _vm: &VmIdentity, sha256: &str) -> Option<EntryError> {
-        self.state.lock().unwrap().failures.get(sha256).cloned()
     }
 
     fn hold(&self, _vm: &VmIdentity, held: bool) {
         self.state.lock().unwrap().holds.push(held);
     }
 
-    fn transfer_wait(&self) -> Duration {
-        self.wait
+    fn detach_pending(&self, vm: &VmIdentity, root: &Path) -> DetachReport {
+        let scan = emucat_agent::media::scan_vm_media(
+            root,
+            vm.emulator_type,
+            &emucat_agent::media::MediaScanLimits::default(),
+        )
+        .unwrap();
+        let mut state = self.state.lock().unwrap();
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        let files: Vec<String> = scan
+            .files
+            .into_iter()
+            .map(|file| file.source_path)
+            .collect();
+        let lost = std::mem::take(&mut state.lose);
+        let spooled = files.len().saturating_sub(lost.len());
+        state.detached.push((name, files));
+        DetachReport {
+            spooled,
+            settled: 0,
+            lost,
+        }
     }
 }
 
@@ -1319,30 +1298,28 @@ async fn transfer_with_screenshot() -> (
     (world, fake, root, operations, transfer)
 }
 
-fn retry(request: &RegistrationRequest) -> Message {
-    Message::ServerRegistrationRetryCleanup(RegistrationRetryCleanup {
-        operation_id: request.operation_id,
-        version_id: request.version_id,
-    })
-}
-
 #[tokio::test]
-async fn a_transfer_removes_the_vm_when_the_server_holds_every_screenshot() {
+async fn a_pending_screenshot_never_blocks_a_transfer_and_is_handed_to_the_spool() {
     let (world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.hold_bytes(SHOT);
     operations.handle(committed(&transfer, true));
     let cleanup = cleanup_of(&operations).await;
     assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
+    assert_eq!(cleanup.message, None, "every screenshot was accounted for");
     assert!(!root.exists());
     assert!(!quarantine_path(&world.qemu, transfer.operation_id).exists());
+    let state = fake.state.lock().unwrap();
+    // Handed over once, from the directory set aside for deletion, while it still held the screenshot.
+    assert_eq!(state.detached.len(), 1);
+    let (directory, files) = &state.detached[0];
+    assert!(directory.starts_with(".emucat-removing-"), "{directory}");
+    assert_eq!(files, &["capture.ppm".to_owned()]);
     // It kept its hands off the VM's files while it was moving them.
-    assert_eq!(fake.state.lock().unwrap().holds, [true, false]);
+    assert_eq!(state.holds, [true, false]);
 }
 
 #[tokio::test]
 async fn a_screenshot_is_never_in_the_archive_of_a_transfer() {
-    let (world, fake, _root, operations, transfer) = transfer_with_screenshot().await;
-    fake.hold_bytes(SHOT);
+    let (world, _fake, _root, operations, transfer) = transfer_with_screenshot().await;
     operations.handle(committed(&transfer, true));
     cleanup_of(&operations).await;
     let store = world.repository.store.lock().unwrap();
@@ -1363,130 +1340,62 @@ async fn a_screenshot_is_never_in_the_archive_of_a_transfer() {
 }
 
 #[tokio::test]
-async fn a_pending_screenshot_blocks_removal_and_keeps_everything() {
-    let (_world, _fake, root, operations, transfer) = transfer_with_screenshot().await;
+async fn screenshots_added_changed_or_deleted_after_archiving_do_not_stop_the_removal() {
+    let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
+    fs::write(root.join("later.ppm"), b"P6 taken later").unwrap();
+    fs::write(root.join("capture.ppm"), b"P6 different now").unwrap();
     operations.handle(committed(&transfer, true));
     let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.local_copy, LocalCopyStatus::CleanupFailed);
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-    let message = cleanup.message.unwrap();
-    assert!(message.contains("capture.ppm"), "{message}");
-    assert_eq!(fs::read(root.join("capture.ppm")).unwrap(), SHOT);
-    assert!(root.join("disk.qcow2").exists());
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
+    let state = fake.state.lock().unwrap();
+    assert_eq!(
+        state.detached[0].1,
+        ["capture.ppm".to_owned(), "later.ppm".to_owned()]
+    );
 }
 
 #[tokio::test]
-async fn a_screenshot_uploaded_during_the_wait_lets_the_removal_proceed() {
+async fn a_screenshot_deleted_before_the_removal_does_not_matter() {
     let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.state.lock().unwrap().upload_on_request = true;
+    fs::remove_file(root.join("capture.ppm")).unwrap();
+    operations.handle(committed(&transfer, true));
+    let cleanup = cleanup_of(&operations).await;
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
+    assert!(fake.state.lock().unwrap().detached[0].1.is_empty());
+}
+
+#[tokio::test]
+async fn screenshots_that_cannot_be_kept_are_reported_and_never_claimed_uploaded() {
+    let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
+    fake.state.lock().unwrap().lose = vec!["capture.ppm did not fit in the media spool".to_owned()];
     operations.handle(committed(&transfer, true));
     let cleanup = cleanup_of(&operations).await;
     assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
     assert!(!root.exists());
-}
-
-#[tokio::test]
-async fn a_failed_screenshot_blocks_at_once_and_says_why() {
-    let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.state.lock().unwrap().failures.insert(
-        hash(SHOT),
-        EntryError {
-            code: "invalid_image".to_owned(),
-            message: "The image could not be decoded".to_owned(),
-        },
-    );
-    let started = std::time::Instant::now();
-    operations.handle(committed(&transfer, true));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
     let message = cleanup.message.unwrap();
     assert!(
-        message.contains("capture.ppm") && message.contains("invalid_image"),
+        message.contains("1 screenshot(s) that had not reached the server")
+            && message.contains("capture.ppm"),
         "{message}"
     );
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "it should not wait"
-    );
-    assert!(root.join("capture.ppm").exists());
 }
 
 #[tokio::test]
-async fn a_screenshot_created_after_the_archive_blocks_removal() {
+async fn real_vm_files_are_still_checked_exactly_when_screenshots_are_present() {
     let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.hold_bytes(SHOT);
-    fs::write(root.join("later.ppm"), b"P6 taken later").unwrap();
+    fs::write(root.join("disk.qcow2"), b"changed by using the VM").unwrap();
     operations.handle(committed(&transfer, true));
     let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-    assert!(cleanup.message.unwrap().contains("later.ppm"));
-    assert_eq!(fs::read(root.join("later.ppm")).unwrap(), b"P6 taken later");
+    assert_eq!(cleanup.code.as_deref(), Some("cleanup_content_changed"));
     assert!(root.join("disk.qcow2").exists());
-}
-
-#[tokio::test]
-async fn a_screenshot_modified_after_it_was_uploaded_blocks_removal() {
-    let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.hold_bytes(SHOT);
-    fs::write(root.join("capture.ppm"), b"P6 different now").unwrap();
-    operations.handle(committed(&transfer, true));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-    assert_eq!(
-        fs::read(root.join("capture.ppm")).unwrap(),
-        b"P6 different now"
-    );
-}
-
-#[tokio::test]
-async fn a_screenshot_deleted_and_recreated_with_the_same_content_is_still_preserved() {
-    let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.hold_bytes(SHOT);
-    fs::remove_file(root.join("capture.ppm")).unwrap();
-    fs::write(root.join("capture.ppm"), SHOT).unwrap();
-    operations.handle(committed(&transfer, true));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
-}
-
-#[tokio::test]
-async fn a_screenshot_taken_right_after_the_answer_is_caught_by_the_last_look() {
-    let (world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.hold_bytes(SHOT);
-    let late = root.join("at-the-last-moment.ppm");
-    let write_late = late.clone();
-    fake.state.lock().unwrap().after_answer = Some(Box::new(move || {
-        fs::write(&write_late, b"P6 at the worst moment").unwrap();
-    }));
-    operations.handle(committed(&transfer, true));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.local_copy, LocalCopyStatus::CleanupFailed);
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-    // Everything is back where it was, under its own name.
-    assert_eq!(fs::read(&late).unwrap(), b"P6 at the worst moment");
     assert_eq!(fs::read(root.join("capture.ppm")).unwrap(), SHOT);
-    assert!(root.join("disk.qcow2").exists());
-    assert!(!quarantine_path(&world.qemu, transfer.operation_id).exists());
-}
-
-#[tokio::test]
-async fn an_unavailable_server_keeps_the_local_vm() {
-    let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    // The local queue may well believe this was uploaded. Only the server's answer counts.
-    fake.hold_bytes(SHOT);
-    fake.state.lock().unwrap().unavailable = true;
-    operations.handle(committed(&transfer, true));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-    assert!(cleanup.message.unwrap().contains("could not confirm"));
-    assert!(root.join("capture.ppm").exists());
-    assert!(root.join("disk.qcow2").exists());
+    // Nothing was handed over, since nothing is deleted.
+    assert!(fake.state.lock().unwrap().detached.is_empty());
 }
 
 #[tokio::test]
 async fn a_substituted_directory_with_the_same_screenshot_is_refused() {
     let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    fake.hold_bytes(SHOT);
     let disk = fs::read(root.join("disk.qcow2")).unwrap();
     fs::remove_dir_all(&root).unwrap();
     fs::create_dir(&root).unwrap();
@@ -1498,10 +1407,11 @@ async fn a_substituted_directory_with_the_same_screenshot_is_refused() {
     let cleanup = cleanup_of(&operations).await;
     assert_eq!(cleanup.code.as_deref(), Some("cleanup_identity_mismatch"));
     assert!(root.join("capture.ppm").exists());
+    assert!(fake.state.lock().unwrap().detached.is_empty());
 }
 
 #[tokio::test]
-async fn an_unsupported_file_among_the_screenshots_blocks_removal() {
+async fn files_among_the_screenshots_that_are_not_images_do_not_block_removal() {
     let mut world = World::new();
     let fake = FakePreservation::new();
     world.media = Some(Arc::new(fake.clone()));
@@ -1509,95 +1419,26 @@ async fn an_unsupported_file_among_the_screenshots_blocks_removal() {
     fs::create_dir_all(root.join("screenshots/nested")).unwrap();
     fs::write(root.join("86box.cfg"), b"machine = x\n").unwrap();
     fs::write(root.join("screenshots/nested/notes.txt"), b"not an image").unwrap();
+    fs::write(root.join("screenshots/shot.png"), b"an image").unwrap();
     let operations = world.start();
-    let vm_name = VmName::new("Disposable").unwrap();
-    let version_id = Uuid::new_v4();
-    let identity = VmIdentity {
-        emulator_type: EmulatorType::Box86,
-        vm_name: vm_name.clone(),
-    };
-    let transfer = RegistrationRequest {
-        operation_id: Uuid::new_v4(),
-        emulator_type: EmulatorType::Box86,
-        vm_name,
-        mode: RegistrationMode::Transfer,
-        repository_id: REPOSITORY,
-        version_id,
-        archive_key: RepositoryKey::for_version(&identity, VersionId(version_id))
-            .as_str()
-            .to_owned(),
-        parent_version_id: None,
-        workspace_id: None,
-    };
+    let transfer = box86_request("Disposable", RegistrationMode::Transfer);
     start(&operations, &transfer);
     result_of(&operations).await;
-    // Even a server that says yes to everything cannot help: this file can never be uploaded.
-    fake.hold_bytes(b"not an image");
     operations.handle(committed(&transfer, true));
     let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-    assert!(cleanup.message.unwrap().contains("notes.txt"));
+    assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
+    assert!(!root.exists());
     assert_eq!(
-        fs::read(root.join("screenshots/nested/notes.txt")).unwrap(),
-        b"not an image"
+        fake.state.lock().unwrap().detached[0].1,
+        ["screenshots/shot.png".to_owned()]
     );
 }
 
-#[tokio::test]
-async fn a_blocked_removal_can_be_retried_after_synchronization() {
-    let (world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    operations.handle(committed(&transfer, true));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("transfer_blocked_media"));
-
-    // The server records the partial success and closes the report. The agent keeps what a retry needs.
-    operations.handle(closed(&transfer));
-    assert_eq!(operations.open_operations(), [transfer.operation_id]);
-    let Message::AgentRegistrationSync(sync) = operations.sync_messages().remove(0) else {
-        panic!("a sync comes first");
-    };
-    assert_eq!(sync.operations[0].phase, RegistrationPhase::MediaBlocked);
-    assert!(operations.pending_reports().is_empty(), "nothing to repeat");
-
-    // It survives a restart too, and nothing is removed by that alone.
-    drop(operations);
-    let operations = world.start();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(root.join("disk.qcow2").exists());
-    assert_eq!(operations.open_operations(), [transfer.operation_id]);
-
-    // Still not there: another refusal, and still nothing lost.
-    operations.handle(retry(&transfer));
-    let again = cleanup_of(&operations).await;
-    assert_eq!(again.code.as_deref(), Some("transfer_blocked_media"));
-    operations.handle(closed(&transfer));
-    assert!(root.join("capture.ppm").exists());
-
-    fake.hold_bytes(SHOT);
-    operations.handle(retry(&transfer));
-    let done = cleanup_of(&operations).await;
-    assert_eq!(done.local_copy, LocalCopyStatus::Removed, "{done:?}");
-    assert!(!root.exists());
-    operations.handle(closed(&transfer));
-    assert!(operations.open_operations().is_empty());
-}
-
-#[tokio::test]
-async fn a_retry_refuses_a_vm_that_was_used_in_the_meantime() {
-    let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
-    operations.handle(committed(&transfer, true));
-    cleanup_of(&operations).await;
-    operations.handle(closed(&transfer));
-
-    fake.hold_bytes(SHOT);
-    fs::write(root.join("disk.qcow2"), b"changed by using the VM").unwrap();
-    operations.handle(retry(&transfer));
-    let cleanup = cleanup_of(&operations).await;
-    assert_eq!(cleanup.code.as_deref(), Some("cleanup_content_changed"));
-    assert!(root.join("disk.qcow2").exists());
-    // That is not a screenshot problem, so this one is over.
-    operations.handle(closed(&transfer));
-    assert!(operations.open_operations().is_empty());
+fn retry(request: &RegistrationRequest) -> Message {
+    Message::ServerRegistrationRetryCleanup(RegistrationRetryCleanup {
+        operation_id: request.operation_id,
+        version_id: request.version_id,
+    })
 }
 
 #[tokio::test]
@@ -1615,14 +1456,13 @@ async fn a_retry_for_an_unknown_operation_removes_nothing_and_says_so() {
 
 #[tokio::test]
 async fn a_restart_during_cleanup_needs_a_fresh_acknowledgement_and_checks_again() {
-    let (world, fake, root, operations, transfer) = transfer_with_screenshot().await;
+    let (world, _fake, root, operations, transfer) = transfer_with_screenshot().await;
     drop(operations);
     let operations = world.start();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(root.exists(), "a restart by itself deletes nothing");
     // The report is repeated, and the answer to it is what starts the removal.
     assert!(!operations.pending_reports().is_empty());
-    fake.hold_bytes(SHOT);
     operations.handle(committed(&transfer, true));
     let cleanup = cleanup_of(&operations).await;
     assert_eq!(cleanup.local_copy, LocalCopyStatus::Removed, "{cleanup:?}");
@@ -1644,6 +1484,10 @@ async fn a_copy_starts_synchronization_and_never_waits_for_it() {
     assert_eq!(cleanup.local_copy, LocalCopyStatus::Preserved);
     assert!(fake.state.lock().unwrap().sync_requests >= 1);
     assert!(root.join("capture.ppm").exists());
+    assert!(
+        fake.state.lock().unwrap().detached.is_empty(),
+        "a copy deletes nothing"
+    );
 }
 
 /// A session an earlier run left without a process: whether its emulator runs cannot be told, so the
@@ -1824,6 +1668,36 @@ fn working_copy(world: &World, name: &str, source: Uuid) -> (Uuid, PathBuf) {
     )
     .unwrap();
     (workspace, root)
+}
+
+#[tokio::test]
+async fn a_snapshot_never_archives_screenshots_and_they_do_not_affect_it() {
+    let world = World::new();
+    let root = world.qemu_vm("Win98");
+    fs::write(root.join("capture.ppm"), b"P6 one").unwrap();
+    fs::write(root.join("SHOT2.PPM"), b"P6 two").unwrap();
+    let master = Uuid::new_v4();
+    record_source(&world, "Win98", master);
+    let operations = world.start();
+    let request = snapshot("Win98", master, None);
+    start(&operations, &request);
+    let result = result_of(&operations).await;
+    assert_eq!(result.version_id, request.version_id);
+    let archived = archived_paths(&world, &request.archive_key);
+    assert!(archived.contains(&"disk.qcow2".to_owned()), "{archived:?}");
+    assert!(
+        !archived
+            .iter()
+            .any(|path| path.to_ascii_lowercase().ends_with(".ppm")),
+        "{archived:?}"
+    );
+    operations.handle(committed(&request, false));
+    assert_eq!(
+        cleanup_of(&operations).await.local_copy,
+        LocalCopyStatus::Preserved
+    );
+    // Screenshots are left exactly where they were.
+    assert_eq!(fs::read(root.join("capture.ppm")).unwrap(), b"P6 one");
 }
 
 #[tokio::test]

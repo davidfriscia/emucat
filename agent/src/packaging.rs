@@ -357,7 +357,8 @@ pub enum TreeEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeSnapshot {
     pub archived: BTreeMap<String, TreeEntry>,
-    /// Media files that are excluded from archives, and would be lost if the directory were deleted.
+    /// Files in the media area, which no archive holds. For information only: they decide nothing about
+    /// archiving, verification or removal (decision 0051).
     pub excluded_files: Vec<String>,
 }
 
@@ -370,6 +371,32 @@ impl TreeSnapshot {
                 TreeEntry::Directory => 0,
             })
             .sum()
+    }
+}
+
+/// Whether a directory, given by its VM-relative path, is inside an 86Box `screenshots` tree or is its root.
+fn is_in_screenshots_tree(prefix: &str) -> bool {
+    prefix
+        .split('/')
+        .next()
+        .is_some_and(|first| !first.is_empty() && first.eq_ignore_ascii_case("screenshots"))
+}
+
+/// Records a regular file in the media area, for information only. Names that could not be archived, links
+/// and special files are simply not listed: they are not VM state either.
+fn note_media_entry(snapshot: &mut TreeSnapshot, prefix: &str, entry: &fs::DirEntry) {
+    let Ok(name) = entry.file_name().into_string() else {
+        return;
+    };
+    let is_file = fs::symlink_metadata(entry.path())
+        .is_ok_and(|metadata| metadata.is_file() && !is_link_like(&metadata));
+    if is_file && snapshot.excluded_files.len() < MAX_TREE_ENTRIES {
+        let relative = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        snapshot.excluded_files.push(relative);
     }
 }
 
@@ -387,6 +414,33 @@ pub fn scan_tree(root: &Path, emulator: EmulatorType) -> Result<TreeSnapshot, So
             fs::read_dir(&directory).map_err(|error| unreadable(&display(&prefix), &error))?
         {
             let entry = entry.map_err(|error| unreadable(&display(&prefix), &error))?;
+            // Screenshots are volatile media, never VM state (decision 0051). Anything in the media area
+            // (an 86Box `screenshots` tree, `.ppm` files in a QEMU root) is left out before any rule for
+            // archived files applies, so that nothing there can fail, limit or change an archive, a
+            // verification or a removal. It is listed, never followed, and never archived.
+            if emulator == EmulatorType::Box86 && is_in_screenshots_tree(&prefix) {
+                note_media_entry(&mut snapshot, &prefix, &entry);
+                let path = entry.path();
+                if fs::symlink_metadata(&path)
+                    .is_ok_and(|metadata| metadata.is_dir() && !is_link_like(&metadata))
+                {
+                    let child = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+                    pending.push((path, child));
+                }
+                continue;
+            }
+            if emulator == EmulatorType::Qemu
+                && prefix.is_empty()
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .ends_with(".ppm")
+                && fs::symlink_metadata(entry.path()).is_ok_and(|metadata| !metadata.is_dir())
+            {
+                note_media_entry(&mut snapshot, &prefix, &entry);
+                continue;
+            }
             let name = entry.file_name().into_string().map_err(|raw| {
                 SourceError::new(
                     SourceErrorKind::Invalid,
@@ -420,7 +474,7 @@ pub fn scan_tree(root: &Path, emulator: EmulatorType) -> Result<TreeSnapshot, So
                     format!("{relative} differs from another name only by capitalization"),
                 ));
             }
-            if snapshot.archived.len() + snapshot.excluded_files.len() >= MAX_TREE_ENTRIES {
+            if snapshot.archived.len() >= MAX_TREE_ENTRIES {
                 return Err(SourceError::new(
                     SourceErrorKind::Invalid,
                     "This VM holds too many files",
@@ -430,17 +484,21 @@ pub fn scan_tree(root: &Path, emulator: EmulatorType) -> Result<TreeSnapshot, So
             let path = entry.path();
             let metadata =
                 fs::symlink_metadata(&path).map_err(|error| unreadable(&relative, &error))?;
+            let in_screenshots = emulator == EmulatorType::Box86
+                && relative
+                    .split('/')
+                    .next()
+                    .is_some_and(|first| first.eq_ignore_ascii_case("screenshots"));
+            // The media area's own root: a link there is not followed, and is not VM state either.
+            if in_screenshots && is_link_like(&metadata) {
+                continue;
+            }
             if is_link_like(&metadata) {
                 return Err(SourceError::new(
                     SourceErrorKind::Unsafe,
                     format!("{relative} is a symbolic link, junction or other reparse point"),
                 ));
             }
-            let in_screenshots = emulator == EmulatorType::Box86
-                && relative
-                    .split('/')
-                    .next()
-                    .is_some_and(|first| first.eq_ignore_ascii_case("screenshots"));
             if metadata.is_dir() {
                 if !in_screenshots {
                     snapshot

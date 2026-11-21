@@ -198,3 +198,36 @@ fn a_link_inside_the_vm_fails_the_check_instead_of_being_followed() {
     assert!(outcome.message.unwrap().contains("verified safely"));
     fs::remove_dir(fixture.root.join("linked")).unwrap();
 }
+
+// Screenshots never change a VM's synchronization status (decision 0051).
+
+#[test]
+fn screenshots_added_changed_or_deleted_never_change_the_verification() {
+    let fixture = fixture();
+    assert_eq!(verify(&fixture).status, VerifyStatus::Verified);
+    fs::create_dir_all(fixture.root.join("screenshots/nested")).unwrap();
+    fs::write(fixture.root.join("screenshots/one.png"), b"new").unwrap();
+    fs::write(
+        fixture.root.join("screenshots/nested/notes.txt"),
+        b"not an image",
+    )
+    .unwrap();
+    assert_eq!(verify(&fixture).status, VerifyStatus::Verified);
+    fs::write(
+        fixture.root.join("screenshots/one.png"),
+        b"changed and longer",
+    )
+    .unwrap();
+    assert_eq!(verify(&fixture).status, VerifyStatus::Verified);
+    fs::remove_dir_all(fixture.root.join("screenshots")).unwrap();
+    assert_eq!(verify(&fixture).status, VerifyStatus::Verified);
+}
+
+#[test]
+fn a_change_to_a_real_file_is_still_found_beside_screenshots() {
+    let fixture = fixture();
+    fs::create_dir_all(fixture.root.join("screenshots")).unwrap();
+    fs::write(fixture.root.join("screenshots/one.png"), b"new").unwrap();
+    fs::write(fixture.root.join("nvr.bin"), [9, 9, 9]).unwrap();
+    assert_eq!(verify(&fixture).status, VerifyStatus::Modified);
+}

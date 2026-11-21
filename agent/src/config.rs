@@ -69,6 +69,8 @@ pub struct MediaSettings {
     /// How long a file must look the same before it counts as finished.
     pub stability_window: Duration,
     /// How long a transfer waits for its screenshots to reach the server before keeping the local VM.
+    /// Ignored since decision 0051, when screenshots stopped holding up transfers. Kept so that existing
+    /// configuration files still load.
     pub transfer_wait: Duration,
 }
 

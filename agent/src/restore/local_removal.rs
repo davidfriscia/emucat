@@ -25,7 +25,7 @@ use crate::protocol::{
     LocalCopyRemove, LocalCopyRemoveAck, LocalCopyRemoveResult, LocalRemovalPhase,
     LocalRemovalSyncEntry,
 };
-use crate::removal::{RemovalRefusal, hash_excluded_files, quarantine_path};
+use crate::removal::quarantine_path;
 
 /// Deleting what was moved aside is tried this many times before leftovers are reported.
 const DELETE_ATTEMPTS: u32 = 3;
@@ -419,11 +419,6 @@ impl RestoreManager {
         .await
         .map_err(|_| refused("internal_error", "The check stopped unexpectedly"))??;
 
-        // Screenshots are not in any archive, so removing the directory would lose any the server does not
-        // hold. They are changes like any other: kept unless the administrator agreed to discard them.
-        if !request.discard_local_changes {
-            self.check_media_preserved(&vm, &found.path).await?;
-        }
         if cancel.is_cancelled() {
             return Err(refused(
                 "agent_restarted",
@@ -474,59 +469,6 @@ impl RestoreManager {
         Ok(())
     }
 
-    async fn check_media_preserved(
-        &self,
-        vm: &VmIdentity,
-        root: &Path,
-    ) -> Result<(), RemovalFailure> {
-        let (scan_root, emulator) = (root.to_path_buf(), vm.emulator_type);
-        let excluded =
-            tokio::task::spawn_blocking(move || hash_excluded_files(&scan_root, emulator))
-                .await
-                .map_err(|_| refused("internal_error", "The check stopped unexpectedly"))?
-                .map_err(|error| {
-                    let code = match error.refusal {
-                        RemovalRefusal::InUse => "local_copy_in_use",
-                        RemovalRefusal::Unsafe => "local_copy_unsafe",
-                        _ => "local_copy_unsynced_media",
-                    };
-                    refused(code, format!("{}. Nothing was removed", error.message))
-                })?;
-        let Some(first) = excluded.first() else {
-            return Ok(());
-        };
-        let Some(media) = &self.config.media else {
-            return Err(refused(
-                "local_copy_unsynced_media",
-                format!(
-                    "{} is a screenshot that is in no archive, and this agent cannot synchronize \
-                     screenshots. Nothing was removed",
-                    first.path
-                ),
-            ));
-        };
-        let hashes: Vec<String> = excluded.iter().map(|file| file.sha256.clone()).collect();
-        let held = media.acknowledged(vm, &hashes).await.map_err(|_| {
-            refused(
-                "local_copy_unsynced_media",
-                "The server could not confirm that it holds this copy's screenshots. Nothing was \
-                 removed",
-            )
-        })?;
-        if let Some(missing) = excluded.iter().find(|file| !held.contains(&file.sha256)) {
-            media.request_sync(vm);
-            return Err(refused(
-                "local_copy_unsynced_media",
-                format!(
-                    "{} has not reached the server yet ({} screenshot(s) in total). Nothing was removed",
-                    missing.path,
-                    excluded.len()
-                ),
-            ));
-        }
-        Ok(())
-    }
-
     /// From `moving`, once the rename has happened, or `removing`: forgets the copy, deletes what was moved
     /// aside, and records the answer. Blocking. Safe to repeat.
     fn finish_removal(&self, mut journal: RemovalJournal, attempts: u32) {
@@ -567,6 +509,19 @@ impl RestoreManager {
         ));
 
         let aside = quarantine_path(&base, operation_id);
+        // Screenshots are not part of the copy (decision 0051): any still waiting for upload are taken into
+        // the media spool before the directory goes, and never stop the removal.
+        let media_note = (directory_identity(&aside).ok() == Some(identity))
+            .then(|| {
+                let vm = journal.vm();
+                match &self.config.media {
+                    Some(media) => media.detach_pending(&vm, &aside),
+                    None => {
+                        crate::media_sync::detach_without_synchronization(&aside, vm.emulator_type)
+                    }
+                }
+            })
+            .and_then(|report| report.summary());
         let (cleanup_pending, message) = match delete_moved_aside(&aside, identity, attempts) {
             Deleted::Gone => (false, None),
             Deleted::Leftovers(reason) => {
@@ -584,6 +539,10 @@ impl RestoreManager {
                 tracing::error!(%operation_id, %reason, "Left alone what is not the moved-aside copy");
                 (false, Some(reason))
             }
+        };
+        let message = match (message, media_note) {
+            (Some(message), Some(note)) => Some(format!("{message}. {note}")),
+            (message, note) => message.or(note),
         };
         tracing::info!(%operation_id, cleanup_pending, "Local copy removed");
         let report = LocalCopyRemoveResult {

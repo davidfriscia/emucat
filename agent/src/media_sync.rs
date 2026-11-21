@@ -34,7 +34,9 @@ use crate::media::{
     MediaFileProblem, MediaScan, MediaScanLimits, MediaStamp, hash_media_file, open_media_file,
     scan_vm_media,
 };
-use crate::media_queue::{EntryError, EntryState, MediaQueue, QueueEntry, RetryPolicy, vm_key};
+use crate::media_queue::{
+    EntryError, EntryState, MediaQueue, QueueEntry, RetryPolicy, spool_dir, vm_key,
+};
 use crate::packaging::resolve_vm_root;
 use crate::protocol::{
     AGENT_MAX_MESSAGE_BYTES, MEDIA_STATUS_MAX_VMS, MediaSyncStatus, MediaSyncVmStatus, Message,
@@ -48,6 +50,9 @@ const EVENT_CAPACITY: usize = 256;
 const DEBOUNCE: Duration = Duration::from_millis(250);
 const API_RETRY_INITIAL: Duration = Duration::from_secs(1);
 const API_RETRY_CEILING: Duration = Duration::from_secs(60);
+/// The most the media spool holds at once. Screenshots are volatile: past this, copies of a removed VM's
+/// pending screenshots are not made, and the removal says how many were lost (decision 0051).
+pub const SPOOL_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -447,33 +452,55 @@ pub trait MediaPreservation: Send + Sync {
     fn retry_capture(&self, _id: Uuid, _vm: &VmIdentity) {}
     fn forget_capture(&self, _id: Uuid, _vm: &VmIdentity) {}
 
-    /// The server's answer about these hashes. This is the only proof a transfer accepts.
-    fn acknowledged<'a>(
-        &'a self,
-        vm: &'a VmIdentity,
-        hashes: &'a [String],
-    ) -> BoxFuture<'a, Result<BTreeSet<String>, ApiFailure>>;
-
     /// Looks at this VM now, rather than at the next reconciliation.
     fn request_sync(&self, vm: &VmIdentity);
 
-    /// The server does not have these, whatever the local queue thinks, so they should be uploaded.
-    fn requeue(&self, vm: &VmIdentity, hashes: &BTreeSet<String>);
-
-    /// Why this content will not be uploaded, if that is already known.
-    fn failure_of(&self, vm: &VmIdentity, sha256: &str) -> Option<EntryError>;
-
-    /// Stops or resumes touching this VM's files, so that a transfer can move the directory.
+    /// Stops or resumes touching this VM's files, so that a removal can move the directory.
     fn hold(&self, vm: &VmIdentity, held: bool);
 
-    /// How long a transfer waits for the upload of its screenshots before keeping the local VM.
-    fn transfer_wait(&self) -> Duration;
+    /// Called with the directory that is about to be deleted, once nothing can reach it any more. Every
+    /// screenshot in it that is not already known to be on the server (or refused by it) is copied into the
+    /// agent's media spool and queued, so that it is still uploaded after the directory is gone. Nothing is
+    /// claimed to be uploaded, and nothing here can stop the removal: what cannot be copied is reported as
+    /// lost. Blocking. See decision 0051.
+    fn detach_pending(&self, _vm: &VmIdentity, _root: &Path) -> DetachReport {
+        DetachReport::default()
+    }
+}
+
+/// What became of a removed directory's screenshots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DetachReport {
+    /// Copied into the spool, and queued for upload.
+    pub spooled: usize,
+    /// Already on the server, or deleted there on purpose, or refused by it: nothing to keep.
+    pub settled: usize,
+    /// Screenshots that will not be uploaded, with the reason. They go with the directory.
+    pub lost: Vec<String>,
+}
+
+impl DetachReport {
+    /// One sentence for an operation's result, or nothing when every screenshot was accounted for.
+    pub fn summary(&self) -> Option<String> {
+        if self.lost.is_empty() {
+            return None;
+        }
+        let shown: Vec<&str> = self.lost.iter().take(3).map(String::as_str).collect();
+        Some(format!(
+            "{} screenshot(s) that had not reached the server were deleted with the directory: {}",
+            self.lost.len(),
+            shown.join("; ")
+        ))
+    }
 }
 
 struct UploadDone {
     emulator: EmulatorType,
     vm_name: VmName,
     source_path: String,
+    /// The entry's key within its VM: the source path, or the spool name of a spooled copy.
+    key_path: String,
+    spool: Option<String>,
     sha256: String,
     short_hash: String,
     attempt: u32,
@@ -588,6 +615,7 @@ impl MediaSync {
     pub fn new(config: MediaSyncConfig) -> Result<Arc<Self>, String> {
         let queue = MediaQueue::load(&config.state_dir, config.agent_id)
             .map_err(|error| format!("Cannot open the media queue: {error}"))?;
+        remove_orphaned_spool(&config.state_dir, &queue.spool_names());
         let max_upload_bytes = config.settings.max_upload_bytes;
         Ok(Arc::new(Self {
             capture_reporter: Mutex::default(),
@@ -811,8 +839,8 @@ impl MediaSync {
                 .filter(|entry| {
                     let key = vm_key(entry.emulator_type, &entry.vm_name);
                     entry.state == EntryState::RetryWait
-                        && (entry.capture_id.is_some() || state.registered.contains_key(&key))
-                        && !state.held.contains(&key)
+                        && (is_detached(entry)
+                            || (state.registered.contains_key(&key) && !state.held.contains(&key)))
                 })
                 .map(|entry| entry.next_attempt_ms)
                 .min();
@@ -1116,10 +1144,11 @@ impl MediaSync {
         {
             let mut state = self.lock();
             for entry in state.queue.due(u64::MAX) {
-                if entry.capture_id.is_some() {
+                // A capture or a spooled copy is sent as it is: the server deduplicates and suppresses.
+                if is_detached(&entry) {
                     state.asked.insert((
                         vm_key(entry.emulator_type, &entry.vm_name),
-                        entry.source_path.clone(),
+                        entry.key_path(),
                     ));
                     continue;
                 }
@@ -1213,11 +1242,9 @@ impl MediaSync {
             .into_iter()
             .filter(|entry| {
                 let key = vm_key(entry.emulator_type, &entry.vm_name);
-                state
-                    .asked
-                    .contains(&(key.clone(), entry.source_path.clone()))
-                    && (entry.capture_id.is_some() || !state.held.contains(&key))
-                    && (entry.capture_id.is_some() || state.registered.contains_key(&key))
+                state.asked.contains(&(key.clone(), entry.key_path()))
+                    && (is_detached(entry)
+                        || (!state.held.contains(&key) && state.registered.contains_key(&key)))
             })
             .take(slots)
             .collect();
@@ -1226,7 +1253,7 @@ impl MediaSync {
             state.queue.set_state(
                 entry.emulator_type,
                 &entry.vm_name,
-                &entry.source_path,
+                &entry.key_path(),
                 EntryState::Uploading,
             );
             state.status_version += 1;
@@ -1242,6 +1269,8 @@ impl MediaSync {
                         emulator: entry.emulator_type,
                         vm_name: entry.vm_name.clone(),
                         source_path: entry.source_path.clone(),
+                        key_path: entry.key_path(),
+                        spool: entry.spool.clone(),
                         sha256: entry.sha256.clone(),
                         short_hash: entry.short_hash().to_owned(),
                         attempt: entry.attempts + 1,
@@ -1268,7 +1297,14 @@ impl MediaSync {
         );
         // Everything is checked again here, since time has passed since the scan.
         let capture_id = entry.capture_id;
+        let spool = entry
+            .spool
+            .clone()
+            .map(|name| (spool_dir(&self.config.state_dir), name));
         let opened = tokio::task::spawn_blocking(move || {
+            if let Some((directory, name)) = spool {
+                return open_media_file(&directory, &name, stamp).map(|file| (file, None));
+            }
             if let Some(id) = capture_id {
                 let pinned =
                     crate::capture::pin_directory(&base, id).map_err(MediaFileProblem::Unsafe)?;
@@ -1320,6 +1356,8 @@ impl MediaSync {
             emulator,
             vm_name,
             source_path,
+            key_path,
+            spool,
             sha256,
             short_hash,
             attempt,
@@ -1328,11 +1366,44 @@ impl MediaSync {
         // The entry may have been replaced by newer content while this was running.
         let current = state
             .queue
-            .get(emulator, &vm_name, &source_path)
+            .get(emulator, &vm_name, &key_path)
             .is_some_and(|entry| entry.sha256 == sha256);
         if !current {
             return;
         }
+        // A spooled copy ends here whatever happens, except a passing failure: delivered, refused, or no
+        // longer accepted for this VM. The copy goes, and so does its entry (decision 0051).
+        if let Some(name) = spool {
+            let finished = match &outcome {
+                UploadOutcome::Uploaded => Some("completed"),
+                UploadOutcome::Failed(failure) if failure.is_permanent() => Some("refused"),
+                UploadOutcome::Failed(failure)
+                    if failure.block_reason() == Some(BlockReason::Vm) =>
+                {
+                    Some("not_accepted")
+                }
+                UploadOutcome::FileChanged => Some("copy_lost"),
+                _ => None,
+            };
+            if let Some(result) = finished {
+                if result == "completed" {
+                    tracing::info!(vm = %vm_name, source_path = %source_path, sha256 = %short_hash, attempt, "A spooled screenshot was uploaded");
+                } else {
+                    let error = match &outcome {
+                        UploadOutcome::Failed(failure) => failure.entry_error(),
+                        _ => EntryError {
+                            code: "copy_lost".to_owned(),
+                            message: "The spooled copy is gone".to_owned(),
+                        },
+                    };
+                    tracing::warn!(vm = %vm_name, source_path = %source_path, sha256 = %short_hash, attempt, result, code = %error.code, message = %error.message, "A spooled screenshot will not be uploaded; its copy was removed");
+                }
+                state.queue.remove(emulator, &vm_name, &key_path);
+                remove_spooled(&self.config.state_dir, &name);
+                return;
+            }
+        }
+        let source_path = key_path;
         let is_capture = state
             .queue
             .get(emulator, &vm_name, &source_path)
@@ -1509,14 +1580,6 @@ impl MediaPreservation for MediaSync {
         );
     }
 
-    fn acknowledged<'a>(
-        &'a self,
-        vm: &'a VmIdentity,
-        hashes: &'a [String],
-    ) -> BoxFuture<'a, Result<BTreeSet<String>, ApiFailure>> {
-        self.config.api.acknowledged(vm, hashes)
-    }
-
     fn request_sync(&self, vm: &VmIdentity) {
         {
             let mut state = self.lock();
@@ -1529,25 +1592,6 @@ impl MediaPreservation for MediaSync {
             state.dirty.entry(key).or_insert_with(Instant::now);
         }
         self.wake.notify_one();
-    }
-
-    fn requeue(&self, vm: &VmIdentity, hashes: &BTreeSet<String>) {
-        {
-            let mut state = self.lock();
-            state
-                .queue
-                .requeue_hashes(vm.emulator_type, &vm.vm_name, hashes);
-            let key = vm_key(vm.emulator_type, &vm.vm_name);
-            state.asked.retain(|(entry_vm, _)| entry_vm != &key);
-        }
-        self.wake.notify_one();
-    }
-
-    fn failure_of(&self, vm: &VmIdentity, sha256: &str) -> Option<EntryError> {
-        self.lock()
-            .queue
-            .failure_of(vm.emulator_type, &vm.vm_name, sha256)
-            .cloned()
     }
 
     fn hold(&self, vm: &VmIdentity, held: bool) {
@@ -1564,7 +1608,247 @@ impl MediaPreservation for MediaSync {
         self.wake.notify_one();
     }
 
-    fn transfer_wait(&self) -> Duration {
-        self.config.settings.transfer_wait
+    fn detach_pending(&self, vm: &VmIdentity, root: &Path) -> DetachReport {
+        let mut report = DetachReport::default();
+        let scan = match scan_vm_media(root, vm.emulator_type, &self.config.scan_limits) {
+            Ok(scan) => scan,
+            Err(error) => {
+                report
+                    .lost
+                    .push(format!("the screenshots could not be listed ({error})"));
+                return report;
+            }
+        };
+        if scan.truncated {
+            report.lost.push(
+                "more screenshots than one scan covers; those not listed were not kept".to_owned(),
+            );
+        }
+        // What the queue already settled for exactly this file needs nothing more.
+        let candidates: Vec<crate::media::MediaFile> = {
+            let state = self.lock();
+            scan.files
+                .into_iter()
+                .filter(|file| {
+                    let settled = state
+                        .queue
+                        .get(vm.emulator_type, &vm.vm_name, &file.source_path)
+                        .is_some_and(|entry| {
+                            entry.stamp == file.stamp
+                                && matches!(entry.state, EntryState::Completed | EntryState::Failed)
+                        })
+                        // A removal that is repeated, after a crash, does not copy the same file twice.
+                        || state.queue.entries().any(|entry| {
+                            entry.spool.is_some()
+                                && entry.emulator_type == vm.emulator_type
+                                && entry.vm_name.key() == vm.vm_name.key()
+                                && entry.source_path == file.source_path
+                                && entry.stamp.size_bytes == file.stamp.size_bytes
+                        });
+                    if settled {
+                        report.settled += 1;
+                    }
+                    !settled
+                })
+                .collect()
+        };
+        let (limit, mut used) = {
+            let state = self.lock();
+            let limit = state
+                .max_upload_bytes
+                .min(self.config.settings.max_upload_bytes);
+            (limit, spool_bytes(&self.config.state_dir))
+        };
+        for file in candidates {
+            if file.stamp.size_bytes > limit {
+                report.lost.push(format!(
+                    "{} is over the upload size limit",
+                    file.source_path
+                ));
+                continue;
+            }
+            if used.saturating_add(file.stamp.size_bytes) > SPOOL_MAX_BYTES {
+                report.lost.push(format!(
+                    "{} did not fit in the media spool",
+                    file.source_path
+                ));
+                continue;
+            }
+            match copy_to_spool(&self.config.state_dir, root, &file) {
+                Ok(copy) => {
+                    used = used.saturating_add(copy.stamp.size_bytes);
+                    let mut state = self.lock();
+                    let known = state.queue.entries().any(|entry| {
+                        entry.emulator_type == vm.emulator_type
+                            && entry.vm_name.key() == vm.vm_name.key()
+                            && entry.state == EntryState::Completed
+                            && entry.sha256 == copy.sha256
+                    });
+                    // The original entry describes a file that is about to be deleted.
+                    state
+                        .queue
+                        .remove(vm.emulator_type, &vm.vm_name, &file.source_path);
+                    if known {
+                        drop(state);
+                        remove_spooled(&self.config.state_dir, &copy.name);
+                        report.settled += 1;
+                        continue;
+                    }
+                    state.queue.record_spooled(
+                        vm.emulator_type,
+                        &vm.vm_name,
+                        &file.source_path,
+                        &copy.name,
+                        &copy.sha256,
+                        copy.stamp,
+                    );
+                    state.status_version += 1;
+                    report.spooled += 1;
+                }
+                Err(reason) => report.lost.push(format!(
+                    "{} could not be copied ({reason})",
+                    file.source_path
+                )),
+            }
+        }
+        {
+            // Durable before the directory goes: the copies are useless without their entries.
+            let mut state = self.lock();
+            if let Err(error) = state.queue.save() {
+                tracing::warn!(%error, "Cannot save the media queue after spooling screenshots");
+            }
+        }
+        if report.spooled > 0 || !report.lost.is_empty() {
+            tracing::info!(
+                vm = %vm.vm_name,
+                spooled = report.spooled,
+                settled = report.settled,
+                lost = report.lost.len(),
+                "Screenshots of a directory being removed were taken into the media spool"
+            );
+        }
+        for lost in &report.lost {
+            tracing::warn!(vm = %vm.vm_name, %lost, "A screenshot will not be uploaded");
+        }
+        self.wake.notify_one();
+        report
     }
+}
+
+/// Entries that are sent without the VM being listed or scannable: requested captures, and copies in the
+/// spool. Both live in the agent's state directory, not in a VM directory.
+fn is_detached(entry: &QueueEntry) -> bool {
+    entry.capture_id.is_some() || entry.spool.is_some()
+}
+
+struct SpooledCopy {
+    name: String,
+    sha256: String,
+    stamp: MediaStamp,
+}
+
+/// Copies one screenshot into the spool through the same safe walk every upload uses, hashing what is
+/// written, and publishes it under a new name only once it is complete and on disk.
+fn copy_to_spool(
+    state_dir: &Path,
+    root: &Path,
+    file: &crate::media::MediaFile,
+) -> Result<SpooledCopy, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    let mut source =
+        open_media_file(root, &file.source_path, file.stamp).map_err(|problem| match problem {
+            MediaFileProblem::InUse => "it is in use".to_owned(),
+            MediaFileProblem::Changed => "it changed".to_owned(),
+            MediaFileProblem::Unsafe(reason) | MediaFileProblem::Unreadable(reason) => reason,
+        })?;
+    let directory = spool_dir(state_dir);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let name = format!("{}.img", Uuid::new_v4());
+    let partial = directory.join(format!("{name}.partial"));
+    let mut finish = || -> std::io::Result<String> {
+        let mut target = std::fs::File::create_new(&partial)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+            target.write_all(&buffer[..count])?;
+        }
+        target.sync_all()?;
+        drop(target);
+        std::fs::rename(&partial, directory.join(&name))?;
+        Ok(crate::packaging::hex(&hasher.finalize()))
+    };
+    let sha256 = finish().map_err(|error| {
+        let _ = std::fs::remove_file(&partial);
+        error.to_string()
+    })?;
+    let stamp = std::fs::symlink_metadata(directory.join(&name))
+        .map(|metadata| MediaStamp::of(&metadata))
+        .map_err(|error| error.to_string())?;
+    Ok(SpooledCopy {
+        name,
+        sha256,
+        stamp,
+    })
+}
+
+fn remove_spooled(state_dir: &Path, name: &str) {
+    let path = spool_dir(state_dir).join(name);
+    if let Err(error) = std::fs::remove_file(&path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, path = %path.display(), "Cannot remove a spooled screenshot");
+    }
+}
+
+fn spool_bytes(state_dir: &Path) -> u64 {
+    std::fs::read_dir(spool_dir(state_dir))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.metadata().ok())
+                .filter(std::fs::Metadata::is_file)
+                .map(|metadata| metadata.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Copies no entry refers to were made just before a crash, or outlived their entry. They are only
+/// screenshots, and their entry is what would have uploaded them.
+fn remove_orphaned_spool(state_dir: &Path, referenced: &BTreeSet<String>) {
+    let Ok(entries) = std::fs::read_dir(spool_dir(state_dir)) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !referenced.contains(&name) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// For an agent that does not synchronize screenshots: nothing can keep them, so they are counted as lost
+/// with the directory. Screenshots are volatile, and never a reason to keep a VM (decision 0051).
+pub fn detach_without_synchronization(root: &Path, emulator: EmulatorType) -> DetachReport {
+    let limits = MediaScanLimits::default();
+    let mut report = DetachReport::default();
+    if let Ok(scan) = scan_vm_media(root, emulator, &limits) {
+        report.lost = scan
+            .files
+            .into_iter()
+            .map(|file| {
+                format!(
+                    "{} (this agent does not synchronize screenshots)",
+                    file.source_path
+                )
+            })
+            .collect();
+    }
+    report
 }

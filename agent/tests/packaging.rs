@@ -695,3 +695,86 @@ mod links {
         assert_eq!(fixture.build().unwrap_err().kind, SourceErrorKind::Unsafe);
     }
 }
+
+// Screenshots are volatile media, never VM state (decision 0051): nothing in the media area may fail, limit
+// or change an archive.
+
+#[cfg(unix)]
+#[test]
+fn links_and_odd_names_among_the_screenshots_do_not_stop_an_archive() {
+    use std::os::unix::ffi::OsStrExt;
+    let fixture = Fixture::new(
+        EmulatorType::Box86,
+        "Box",
+        &[
+            ("86box.cfg", b"x"),
+            ("screenshots/one.png", b"a screenshot"),
+        ],
+    );
+    let outside = fixture.root.parent().unwrap().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.root.join("screenshots/link")).unwrap();
+    fs::write(fixture.root.join("screenshots/Two.png"), b"x").unwrap();
+    fs::write(fixture.root.join("screenshots/two.png"), b"y").unwrap();
+    let odd = std::ffi::OsStr::from_bytes(b"bad\xffname.png");
+    fs::write(fixture.root.join("screenshots").join(odd), b"z").unwrap();
+    let built = fixture.build().unwrap();
+    let names = zip_names(&built.path);
+    assert!(names.contains(&"86box.cfg".to_owned()), "{names:?}");
+    assert!(
+        !names.iter().any(|name| name.starts_with("screenshots")),
+        "{names:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_qemu_screenshot_that_is_a_link_is_neither_followed_nor_a_reason_to_refuse() {
+    let fixture = Fixture::new(
+        EmulatorType::Qemu,
+        "Win98",
+        &[("run.bat", b"@echo\n"), ("disk.qcow2", b"disk")],
+    );
+    std::os::unix::fs::symlink("/etc/hostname", fixture.root.join("stolen.ppm")).unwrap();
+    let built = fixture.build().unwrap();
+    let names = zip_names(&built.path);
+    assert!(
+        !names.iter().any(|name| name.ends_with(".ppm")),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn the_number_of_screenshots_does_not_count_towards_the_limit_of_files() {
+    let fixture = Fixture::new(EmulatorType::Box86, "Box", &[("86box.cfg", b"x")]);
+    for index in 0..50 {
+        write(
+            &fixture.root.join(format!("screenshots/s{index}.png")),
+            b"x",
+        );
+    }
+    let tree = scan_tree(&fixture.root, EmulatorType::Box86).unwrap();
+    assert_eq!(tree.archived.len(), 1, "{:?}", tree.archived);
+    assert_eq!(tree.excluded_files.len(), 50);
+}
+
+#[test]
+fn adding_changing_or_deleting_screenshots_never_changes_what_would_be_archived() {
+    for (emulator, shot) in [
+        (EmulatorType::Box86, "screenshots/one.png"),
+        (EmulatorType::Qemu, "capture.ppm"),
+    ] {
+        let fixture = Fixture::new(emulator, "Vm", &[("config.cfg", b"x"), (shot, b"before")]);
+        let before = scan_tree(&fixture.root, emulator).unwrap().archived;
+        write(&fixture.root.join(shot), b"changed, and longer");
+        assert_eq!(scan_tree(&fixture.root, emulator).unwrap().archived, before);
+        fs::remove_file(fixture.root.join(shot)).unwrap();
+        assert_eq!(scan_tree(&fixture.root, emulator).unwrap().archived, before);
+        let other = match emulator {
+            EmulatorType::Box86 => "screenshots/nested/new.bmp",
+            EmulatorType::Qemu => "NEW.PPM",
+        };
+        write(&fixture.root.join(other), b"new");
+        assert_eq!(scan_tree(&fixture.root, emulator).unwrap().archived, before);
+    }
+}

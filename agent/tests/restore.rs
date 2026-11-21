@@ -1144,6 +1144,7 @@ struct Harness {
     manifest_sha256: String,
     version: Uuid,
     vm_name: VmName,
+    media: Option<Arc<dyn emucat_agent::media_sync::MediaPreservation>>,
 }
 
 impl Harness {
@@ -1205,6 +1206,7 @@ impl Harness {
             manifest_sha256: built.manifest_sha256,
             version,
             vm_name,
+            media: None,
         }
     }
 
@@ -1229,7 +1231,7 @@ impl Harness {
             retry_delay: Duration::from_millis(1),
             execution: emucat_agent::execution::ExecutionSettings::default(),
             virtualbox: None,
-            media: None,
+            media: self.media.clone(),
             restore: RestoreSettings {
                 cache_dir: self.cache.clone(),
                 cache_max_bytes: self.cache_max_bytes,
@@ -3852,4 +3854,81 @@ async fn repository_failures_while_deleting_keep_their_codes() {
     // Once the repository answers again, the retry succeeds.
     let result = archive_deleted(&operations, &harness.archive_request()).await;
     assert_eq!(result.outcome, ArchiveDeleteOutcome::Deleted);
+}
+
+// Screenshots are volatile media, never part of a local copy (decision 0051): they never stop a removal or
+// count as changes, and pending ones are handed to the media spool before the directory goes.
+
+#[derive(Default)]
+struct RecordingMedia {
+    detached: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl emucat_agent::media_sync::MediaPreservation for RecordingMedia {
+    fn request_sync(&self, _vm: &emucat_agent::emulators::VmIdentity) {}
+    fn hold(&self, _vm: &emucat_agent::emulators::VmIdentity, _held: bool) {}
+    fn detach_pending(
+        &self,
+        vm: &emucat_agent::emulators::VmIdentity,
+        root: &Path,
+    ) -> emucat_agent::media_sync::DetachReport {
+        let scan = emucat_agent::media::scan_vm_media(
+            root,
+            vm.emulator_type,
+            &emucat_agent::media::MediaScanLimits::default(),
+        )
+        .unwrap();
+        let files: Vec<String> = scan
+            .files
+            .into_iter()
+            .map(|file| file.source_path)
+            .collect();
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        let spooled = files.len();
+        self.detached.lock().unwrap().push((name, files));
+        emucat_agent::media_sync::DetachReport {
+            spooled,
+            ..Default::default()
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_screenshot_never_makes_a_copy_modified_or_blocks_its_removal() {
+    let mut harness = Harness::new();
+    let media = Arc::new(RecordingMedia::default());
+    harness.media = Some(media.clone());
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    // Taken in the VM, never uploaded: not a change, and not a reason to keep the copy.
+    fs::write(harness.destination().join("shot.ppm"), b"P6 pending").unwrap();
+    let request = harness.remove_request(Some(harness.version), false);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert!(result.removed, "{result:?}");
+    assert_eq!(result.message, None);
+    assert!(!harness.destination().exists());
+    let detached = media.detached.lock().unwrap();
+    assert_eq!(detached.len(), 1);
+    assert!(
+        detached[0].0.starts_with(".emucat-removing-"),
+        "{:?}",
+        detached[0]
+    );
+    assert_eq!(detached[0].1, ["shot.ppm".to_owned()]);
+}
+
+#[tokio::test]
+async fn without_synchronization_a_removal_still_proceeds_and_says_what_was_lost() {
+    let harness = Harness::new();
+    let operations = harness.operations();
+    harness.restored(&operations).await;
+    fs::write(harness.destination().join("shot.ppm"), b"P6 pending").unwrap();
+    let request = harness.remove_request(Some(harness.version), false);
+    remove(&operations, &request);
+    let result = removal(&operations, request.operation_id).await;
+    assert!(result.removed, "{result:?}");
+    let message = result.message.unwrap();
+    assert!(message.contains("shot.ppm"), "{message}");
+    assert!(!harness.destination().exists());
 }

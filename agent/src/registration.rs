@@ -10,7 +10,7 @@
 //! for this exact operation and version. Even then, only a transfer deletes anything, and only after
 //! [`crate::removal`] has re-checked everything against the local disk and the repository.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -24,8 +24,7 @@ use crate::archives::VersionId;
 use crate::config::EmulatorConfig;
 use crate::emulators::{EmulatorType, VmIdentity};
 use crate::execution::{ActivityProbe, ExecutionConfig, ExecutionManager, ExecutionSettings};
-use crate::media::is_watched_media_path;
-use crate::media_sync::MediaPreservation;
+use crate::media_sync::{DetachReport, MediaPreservation, detach_without_synchronization};
 use crate::packaging::{
     BuildRequest, DirectoryIdentity, MANIFEST_VERSION, Manifest, SourceError, build_archive,
     directory_identity, remove_staging_files, resolve_vm_root,
@@ -37,10 +36,7 @@ use crate::protocol::{
     RegistrationSync, RegistrationSyncEntry, RepositoryConfigSummary, RepositoryHealthRequest,
     RepositoryHealthResult, WorkspaceDiscard, WorkspaceDiscardResult,
 };
-use crate::removal::{
-    RemovalRefusal, RemovalRequest, blocking_media, hash_excluded_files, quarantine_path,
-    remove_vm_directory,
-};
+use crate::removal::{RemovalRequest, remove_vm_directory};
 use crate::repository::{
     ArchiveRepository, CancelFlag, ProgressFn, RepositoryError, RepositoryErrorKind, RepositoryKey,
     RepositoryResult,
@@ -54,9 +50,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a health check may take in total, whatever the repository does.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 const REMOTE_CLEANUP_ATTEMPTS: u32 = 6;
-/// How often a transfer looks again while it waits for its screenshots to reach the server.
-const MEDIA_POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// The code a removal blocked by a screenshot reports, which also keeps its journal for a retry.
+/// The code a removal blocked by a screenshot reported before decision 0051. Nothing reports it now, but a
+/// journal kept from before an upgrade can still be retried, and then simply succeeds.
 const MEDIA_BLOCKED_CODE: &str = "transfer_blocked_media";
 /// The code a removal refused because the VM is running reports. It is kept for a retry too.
 const RUNNING_BLOCKED_CODE: &str = "transfer_blocked_running";
@@ -1083,25 +1078,8 @@ impl Inner {
         if request.mode == RegistrationMode::Snapshot && request.workspace_id.is_none() {
             self.check_snapshot_lineage(&request, directory)?;
         }
-        // With synchronization, screenshots are dealt with after the commit, since an unregistered VM
-        // cannot upload anything. Without it, nothing could prove them safe, so this stops here.
-        if request.mode == RegistrationMode::Transfer && self.config.media.is_none() {
-            let (scan_root, emulator) = (root.clone(), request.emulator_type);
-            let media = blocking(move || blocking_media(&scan_root, emulator))
-                .await?
-                .map_err(|error| failure(error.refusal.code(), error.message))?;
-            if let Some(first) = media.first() {
-                return Err(failure(
-                    "transfer_blocked_media",
-                    format!(
-                        "This VM has {} screenshot(s), such as {first}. Screenshots are not in the \
-                         archive and this agent cannot upload them, so a transfer would lose them. \
-                         Move them elsewhere, or use Copy",
-                        media.len()
-                    ),
-                ));
-            }
-        }
+        // Screenshots play no part in whether a VM can be transferred (decision 0051): they are not in the
+        // archive, and pending ones are handed to the media spool just before the directory is deleted.
         if repository.stat(&final_key).await?.is_some() {
             return Err(failure(
                 "archive_exists",
@@ -1539,126 +1517,6 @@ impl Inner {
         }
     }
 
-    /// Proves that nothing excluded from the archive would be lost: every such file is enumerated and
-    /// hashed, and the server is asked about exactly those hashes. Only its answer counts, whatever the
-    /// local queue says. Waits a bounded time for uploads, and fails closed if it cannot be proved.
-    ///
-    /// Returns the acknowledged hashes, which the removal checks once more after the last rename.
-    async fn prove_media_preserved(
-        self: &Arc<Self>,
-        journal: &Journal,
-        media: &Arc<dyn MediaPreservation>,
-        base_path: &Path,
-    ) -> Result<BTreeSet<String>, (String, String)> {
-        let request = &journal.request;
-        let vm = VmIdentity {
-            emulator_type: request.emulator_type,
-            vm_name: request.vm_name.clone(),
-        };
-        let blocked = |message: String| (MEDIA_BLOCKED_CODE.to_owned(), message);
-        let deadline = Instant::now() + media.transfer_wait();
-        loop {
-            if self.stopping.is_cancelled() {
-                return Err(blocked(
-                    "Stopped before the screenshots were confirmed".to_owned(),
-                ));
-            }
-            let last_problem;
-            // A removal that crashed after its rename left the files under the other name.
-            let quarantine = quarantine_path(base_path, request.operation_id);
-            let root = if quarantine.exists() {
-                quarantine
-            } else {
-                let (base, name, emulator) = (
-                    base_path.to_path_buf(),
-                    request.vm_name.clone(),
-                    request.emulator_type,
-                );
-                match blocking(move || resolve_vm_root(&base, &name, emulator)).await {
-                    Ok(Ok(root)) => root,
-                    // The removal's own checks say what is wrong with the directory.
-                    Ok(Err(_)) | Err(_) => return Ok(BTreeSet::new()),
-                }
-            };
-            let emulator = request.emulator_type;
-            let hashed = blocking(move || hash_excluded_files(&root, emulator))
-                .await
-                .map_err(|error| (error.code, error.message))?;
-            match hashed {
-                // Still being written, perhaps, so this gets the rest of the wait.
-                Err(error) if error.refusal == RemovalRefusal::InUse => {
-                    last_problem = error.message;
-                }
-                Err(error) if error.refusal == RemovalRefusal::UnarchivedMedia => {
-                    last_problem = error.message;
-                }
-                Err(error) => return Err((error.refusal.code().to_owned(), error.message)),
-                Ok(files) => {
-                    if let Some(file) = files
-                        .iter()
-                        .find(|file| !is_watched_media_path(emulator, &file.path))
-                    {
-                        return Err(blocked(format!(
-                            "{} is in the screenshots directory, is not in the archive, and is not an \
-                             image EmuCat can store, so the local VM was kept. Move it elsewhere",
-                            file.path
-                        )));
-                    }
-                    if files.is_empty() {
-                        return Ok(BTreeSet::new());
-                    }
-                    media.request_sync(&vm);
-                    let hashes: Vec<String> =
-                        files.iter().map(|file| file.sha256.clone()).collect();
-                    match media.acknowledged(&vm, &hashes).await {
-                        Ok(held) => {
-                            let missing: Vec<_> = files
-                                .iter()
-                                .filter(|file| !held.contains(&file.sha256))
-                                .collect();
-                            let Some(first) = missing.first() else {
-                                return Ok(held);
-                            };
-                            let wanted: BTreeSet<String> =
-                                missing.iter().map(|file| file.sha256.clone()).collect();
-                            media.requeue(&vm, &wanted);
-                            for file in &missing {
-                                if let Some(failure) = media.failure_of(&vm, &file.sha256) {
-                                    return Err(blocked(format!(
-                                        "{} could not be uploaded ({}: {}), and is not in the \
-                                         archive, so the local VM was kept",
-                                        file.path, failure.code, failure.message
-                                    )));
-                                }
-                            }
-                            last_problem = format!(
-                                "{} screenshot(s), such as {}, have not reached the server, and are \
-                                 not in the archive, so the local VM was kept",
-                                missing.len(),
-                                first.path
-                            );
-                        }
-                        Err(failure) => {
-                            let error = failure.entry_error();
-                            last_problem = format!(
-                                "The server could not confirm that it holds this VM's screenshots \
-                                 ({}: {}), so the local VM was kept",
-                                error.code, error.message
-                            );
-                        }
-                    }
-                }
-            }
-            if Instant::now() >= deadline {
-                return Err(blocked(last_problem));
-            }
-            tokio::select! {
-                () = tokio::time::sleep(MEDIA_POLL_INTERVAL) => {}
-                () = self.stopping.cancelled() => {}
-            }
-        }
-    }
-
     fn keep_local(&self, journal: &Journal) -> RegistrationCleanup {
         let request = &journal.request;
         // A working copy is now a copy of the new snapshot. The persistent copy is not this one's business.
@@ -1819,18 +1677,6 @@ impl Inner {
             );
         }
 
-        // Screenshots are not in the archive, so the server is their only other copy. Only its answer,
-        // for exactly the content that is on the disk right now, makes removal possible.
-        let preserved = match &self.config.media {
-            Some(media) => match self.prove_media_preserved(journal, media, &base_path).await {
-                Ok(held) => Some(held),
-                Err((code, message)) => {
-                    tracing::warn!(%operation_id, %code, %message, "Local VM kept");
-                    return refused(&code, message);
-                }
-            },
-            None => None,
-        };
         let held_vm = VmIdentity {
             emulator_type: request.emulator_type,
             vm_name: request.vm_name.clone(),
@@ -1858,7 +1704,21 @@ impl Inner {
                 format!("{reason}, so the local VM was kept. Stop it, then retry the removal"),
             );
         }
+        // Screenshots are volatile media, not VM state (decision 0051). Whatever is still waiting for upload
+        // is copied into the media spool at the last moment, and keeps going without the directory. Without
+        // synchronization there is nowhere for them to go, and they are deleted with it, as said.
+        let media = self.config.media.clone();
+        let detached = Arc::new(std::sync::Mutex::new(None::<DetachReport>));
+        let report_slot = Arc::clone(&detached);
+        let detach_vm = held_vm.clone();
         let removed = blocking(move || {
+            let before_delete = move |root: &Path| {
+                let report = match &media {
+                    Some(media) => media.detach_pending(&detach_vm, root),
+                    None => detach_without_synchronization(root, detach_vm.emulator_type),
+                };
+                *report_slot.lock().expect("poisoned") = Some(report);
+            };
             remove_vm_directory(
                 &RemovalRequest {
                     base_path: &base_path,
@@ -1867,13 +1727,18 @@ impl Inner {
                     operation_id,
                     identity,
                     manifest: &manifest,
-                    preserved: preserved.as_ref(),
+                    before_delete: &before_delete,
                 },
                 &progress,
                 &cancel,
             )
         })
         .await;
+        let media_note = detached
+            .lock()
+            .expect("poisoned")
+            .as_ref()
+            .and_then(DetachReport::summary);
         if let Some(media) = &self.config.media {
             media.hold(&held_vm, false);
         }
@@ -1885,7 +1750,7 @@ impl Inner {
                     version_id,
                     local_copy: LocalCopyStatus::Removed,
                     code: None,
-                    message: None,
+                    message: media_note,
                 }
             }
             Ok(Err(error)) => {

@@ -99,7 +99,7 @@ executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
 # retry_ceiling_seconds = 900
 # # How long a file must stay the same before it counts as finished being written.
 # stability_seconds = 2
-# # How long a transfer waits for its screenshots to reach the server before keeping the local VM.
+# # Ignored since decision 0051: screenshots never hold up a transfer. Accepted so that old files still load.
 # transfer_wait_seconds = 120
 
 # Running VMs. These are the defaults. See docs/launcher.md. The agent builds every command line itself,

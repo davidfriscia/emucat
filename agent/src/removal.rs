@@ -3,13 +3,17 @@
 //!
 //! Callers must already have the server's confirmation that the master is committed. What this module
 //! adds is everything only the local disk can answer: that the directory is the same one that was
-//! archived, that it still holds exactly what the manifest says, and that nothing would be lost.
+//! archived, and that it still holds exactly what the manifest says.
+//!
+//! Screenshots are not VM state (decision 0051). They are never in an archive, never compared with the
+//! manifest, and never a reason to keep a directory: right before deletion the caller's hook hands any that
+//! are still pending to the media spool, and the rest go with the directory.
 //!
 //! The directory is first renamed to a name only this operation uses, inside the same base path. On
 //! Windows that rename fails if any file inside is open, and after it no emulator can find the VM, so
 //! nothing can change between the last check and the deletion.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -27,8 +31,6 @@ use crate::repository::{CancelFlag, ProgressFn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemovalRefusal {
-    /// A screenshot would be lost: it is not in the archive, and the server does not have it.
-    UnarchivedMedia,
     /// The directory is not the one that was archived.
     IdentityMismatch,
     /// A file differs from the archive, or a file exists that is not in it.
@@ -47,7 +49,6 @@ impl RemovalRefusal {
     /// Stable code, shared with `REGISTRATION_ERROR_CODES` in the contracts.
     pub const fn code(self) -> &'static str {
         match self {
-            Self::UnarchivedMedia => "transfer_blocked_media",
             Self::IdentityMismatch => "cleanup_identity_mismatch",
             Self::ContentChanged => "cleanup_content_changed",
             Self::Unsafe => "cleanup_unsafe",
@@ -72,7 +73,6 @@ fn refuse(refusal: RemovalRefusal, message: impl Into<String>) -> RemovalError {
     }
 }
 
-#[derive(Debug)]
 pub struct RemovalRequest<'a> {
     pub base_path: &'a Path,
     pub emulator: EmulatorType,
@@ -80,22 +80,15 @@ pub struct RemovalRequest<'a> {
     pub operation_id: Uuid,
     pub identity: DirectoryIdentity,
     pub manifest: &'a Manifest,
-    /// The hashes the server has acknowledged for this VM. Without this, any excluded file refuses.
-    pub preserved: Option<&'a BTreeSet<String>>,
+    /// Runs once with the directory that is about to be deleted, after it has been set aside and checked,
+    /// so that pending screenshots can be taken into the media spool. It cannot refuse the removal.
+    pub before_delete: &'a (dyn Fn(&Path) + Sync),
 }
 
 /// The name a directory has while it is being removed. A leading dot is not a valid VM name, so
 /// discovery reports it as skipped and it can never be registered.
 pub fn quarantine_path(base_path: &Path, operation_id: Uuid) -> PathBuf {
     base_path.join(format!(".emucat-removing-{operation_id}"))
-}
-
-/// Whether a transfer can even start on an agent that cannot upload screenshots. They are excluded from
-/// archives, so deleting the directory would destroy them.
-pub fn blocking_media(root: &Path, emulator: EmulatorType) -> Result<Vec<String>, RemovalError> {
-    let tree = scan_tree(root, emulator)
-        .map_err(|error| refuse(RemovalRefusal::Unreadable, error.message))?;
-    Ok(tree.excluded_files)
 }
 
 fn refusal_from_scan(error: crate::packaging::SourceError) -> RemovalError {
@@ -108,83 +101,6 @@ fn refusal_from_scan(error: crate::packaging::SourceError) -> RemovalError {
     refuse(refusal, error.message)
 }
 
-/// One file a transfer would delete that is not in the archive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExcludedFile {
-    pub path: String,
-    pub sha256: String,
-}
-
-/// Lists and hashes everything excluded from the archive, and fails if any of it is still changing.
-/// Hashing is the point: a file with the same name can have different content.
-pub fn hash_excluded_files(
-    root: &Path,
-    emulator: EmulatorType,
-) -> Result<Vec<ExcludedFile>, RemovalError> {
-    let tree = scan_tree(root, emulator).map_err(refusal_from_scan)?;
-    let mut files = Vec::with_capacity(tree.excluded_files.len());
-    for path in tree.excluded_files {
-        let hashed = crate::media::hash_media_file(root, &path).map_err(|problem| {
-            use crate::media::MediaFileProblem as Problem;
-            match problem {
-                Problem::InUse => refuse(
-                    RemovalRefusal::InUse,
-                    format!("{path} is in use by another program"),
-                ),
-                Problem::Changed => refuse(
-                    RemovalRefusal::UnarchivedMedia,
-                    format!("{path} changed while it was being read"),
-                ),
-                Problem::Unsafe(reason) => refuse(RemovalRefusal::Unsafe, reason),
-                Problem::Unreadable(reason) => refuse(
-                    RemovalRefusal::Unreadable,
-                    format!("Cannot read {path}: {reason}"),
-                ),
-            }
-        })?;
-        files.push(ExcludedFile {
-            path,
-            sha256: hashed.sha256,
-        });
-    }
-    Ok(files)
-}
-
-/// Whether deleting this directory would lose anything that is not in the archive. Every excluded file
-/// must hold content the server has acknowledged. New, changed and unsupported files all fail this.
-fn check_excluded_files(
-    root: &Path,
-    emulator: EmulatorType,
-    preserved: Option<&BTreeSet<String>>,
-) -> Result<(), RemovalError> {
-    let Some(preserved) = preserved else {
-        let tree = scan_tree(root, emulator).map_err(refusal_from_scan)?;
-        return match tree.excluded_files.first() {
-            Some(first) => Err(refuse(
-                RemovalRefusal::UnarchivedMedia,
-                format!(
-                    "{first} is a screenshot that is not in the archive, and would be lost. Move the \
-                     screenshots away, then remove the directory by hand"
-                ),
-            )),
-            None => Ok(()),
-        };
-    };
-    for file in hash_excluded_files(root, emulator)? {
-        if !preserved.contains(&file.sha256) {
-            return Err(refuse(
-                RemovalRefusal::UnarchivedMedia,
-                format!(
-                    "{} is not in the archive, and the server has not confirmed that it holds this \
-                     content, so the local VM was kept",
-                    file.path
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Everything short of deleting: the checks a transfer must pass. Hashes every file, so this takes
 /// about as long as reading the VM.
 fn verify_matches_manifest(
@@ -193,8 +109,8 @@ fn verify_matches_manifest(
     progress: &ProgressFn,
     cancel: &CancelFlag,
 ) -> Result<(), RemovalError> {
+    // Only what an archive holds is compared. Screenshots, present, missing or changed, mean nothing here.
     let tree = scan_tree(root, request.emulator).map_err(refusal_from_scan)?;
-    check_excluded_files(root, request.emulator, request.preserved)?;
 
     let expected: BTreeMap<&str, ManifestEntryType> = request
         .manifest
@@ -320,12 +236,6 @@ pub fn remove_vm_directory(
         })?;
     }
 
-    // Nothing can reach it under this name, so this is the true last look at what would be deleted, and
-    // it holds for a resumed removal too. A screenshot that slipped in before the rename is caught here.
-    if let Err(refused) = check_excluded_files(&quarantine, request.emulator, request.preserved) {
-        return Err(put_back(&quarantine, request, refused));
-    }
-
     // Whether this is the first pass or a resumed one, what is about to be deleted must be the right
     // directory, and must not be a link to somewhere else.
     let metadata = fs::symlink_metadata(&quarantine).map_err(|error| {
@@ -353,6 +263,10 @@ pub fn remove_vm_directory(
         ));
     }
 
+    // Nothing can reach it under this name, so this is the true last look, for a resumed removal too: any
+    // screenshot still waiting for upload, including one that slipped in before the rename, is spooled now.
+    (request.before_delete)(&quarantine);
+
     // Links are removed rather than followed, and none should exist at this point anyway.
     fs::remove_dir_all(&quarantine).map_err(|error| {
         refuse(
@@ -364,24 +278,4 @@ pub fn remove_vm_directory(
             ),
         )
     })
-}
-
-/// Undoes the rename, so that the VM is usable again and its screenshots can be synchronized.
-fn put_back(
-    quarantine: &Path,
-    request: &RemovalRequest<'_>,
-    refused: RemovalError,
-) -> RemovalError {
-    let root = crate::filesystem::vm_directory(request.base_path, request.vm_name);
-    match fs::rename(quarantine, &root) {
-        Ok(()) => refused,
-        Err(error) => refuse(
-            refused.refusal,
-            format!(
-                "{} It could not be moved back ({error}): nothing was deleted, and it is in {}",
-                refused.message,
-                quarantine.display()
-            ),
-        ),
-    }
 }

@@ -188,6 +188,13 @@ impl World {
     }
 
     fn start(&self) -> Running {
+        let sync = self.sync();
+        let task = tokio::spawn(Arc::clone(&sync).run());
+        Running { sync, task }
+    }
+
+    /// The synchronizer, not yet running: what a removal can call while nothing else happens.
+    fn sync(&self) -> Arc<MediaSync> {
         let emulators: BTreeMap<EmulatorType, EmulatorConfig> = [
             (
                 EmulatorType::Box86,
@@ -205,7 +212,7 @@ impl World {
             ),
         ]
         .into();
-        let sync = MediaSync::new(MediaSyncConfig {
+        MediaSync::new(MediaSyncConfig {
             agent_id: AGENT,
             state_dir: self.state_dir.clone(),
             emulators: Arc::new(emulators),
@@ -213,9 +220,7 @@ impl World {
             api: Arc::new(self.server.clone()),
             scan_limits: MediaScanLimits::default(),
         })
-        .unwrap();
-        let task = tokio::spawn(Arc::clone(&sync).run());
-        Running { sync, task }
+        .unwrap()
     }
 
     fn uploads(&self) -> Vec<(String, String, Vec<u8>)> {
@@ -1264,4 +1269,188 @@ async fn capture_failures_retain_output_and_allow_explicit_retry() {
         assert!(root.join("ready.ppm").exists());
         running.stop().await;
     }
+}
+
+// Removing a VM directory hands its pending screenshots to the media spool (decision 0051). The spool lives in
+// the agent's state directory, survives restarts, and is uploaded whether or not the VM is still listed.
+
+fn spool_files(world: &World) -> Vec<String> {
+    let mut names: Vec<String> =
+        fs::read_dir(emucat_agent::media_queue::spool_dir(&world.state_dir))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn identity(emulator_type: EmulatorType, name: &str) -> VmIdentity {
+    VmIdentity {
+        emulator_type,
+        vm_name: VmName::new(name).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn pending_screenshots_are_spooled_and_uploaded_after_the_directory_is_gone() {
+    let world = World::new();
+    let root = world.qemu_vm("Gone");
+    fs::write(root.join("capture.ppm"), b"P6 pending").unwrap();
+    let vm = identity(EmulatorType::Qemu, "Gone");
+
+    let sync = world.sync();
+    let report = sync.detach_pending(&vm, &root);
+    assert_eq!((report.spooled, report.settled), (1, 0));
+    assert!(report.lost.is_empty() && report.summary().is_none());
+    assert_eq!(spool_files(&world).len(), 1);
+    // The directory goes, and the server no longer lists the VM for this agent.
+    fs::remove_dir_all(&root).unwrap();
+    world.server.state.lock().unwrap().vms.clear();
+    drop(sync);
+
+    // A restart in between loses nothing: the copy and its entry are durable.
+    let running = world.start();
+    world.until_uploaded(1).await;
+    assert_eq!(
+        world.uploads()[0].1,
+        "capture.ppm",
+        "uploaded under its own name"
+    );
+    assert_eq!(world.uploads()[0].2, b"P6 pending");
+    world
+        .until("the copy to go", |world| spool_files(world).is_empty())
+        .await;
+    running.settled().await;
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_screenshot_already_on_the_server_is_not_copied() {
+    let world = World::new();
+    let root = world.box86_vm("Synced");
+    fs::write(root.join("screenshots/one.png"), b"already uploaded").unwrap();
+    let running = world.start();
+    world.until_uploaded(1).await;
+    running.settled().await;
+    let report = running
+        .sync
+        .detach_pending(&identity(EmulatorType::Box86, "Synced"), &root);
+    assert_eq!((report.spooled, report.settled), (1 - 1, 1));
+    assert!(spool_files(&world).is_empty());
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_spooled_screenshot_refused_by_the_server_is_given_up_with_its_copy() {
+    let world = World::new();
+    let root = world.qemu_vm("Refused");
+    fs::write(root.join("bad.ppm"), b"not really an image").unwrap();
+    let sync = world.sync();
+    sync.detach_pending(&identity(EmulatorType::Qemu, "Refused"), &root);
+    drop(sync);
+    fs::remove_dir_all(&root).unwrap();
+    world
+        .server
+        .state
+        .lock()
+        .unwrap()
+        .upload_failures
+        .push_back(ApiFailure::Permanent {
+            code: "invalid_image".to_owned(),
+            message: "The image could not be decoded".to_owned(),
+        });
+    let running = world.start();
+    world
+        .until("the copy to go", |world| spool_files(world).is_empty())
+        .await;
+    quiet_period().await;
+    assert!(world.uploads().is_empty(), "never sent again");
+    assert_eq!(running.sync.counts(), (0, 0, 0, 0));
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_spooled_screenshot_the_server_no_longer_accepts_is_given_up() {
+    let world = World::new();
+    let root = world.qemu_vm("Reassigned");
+    fs::write(root.join("shot.ppm"), b"P6 x").unwrap();
+    let sync = world.sync();
+    sync.detach_pending(&identity(EmulatorType::Qemu, "Reassigned"), &root);
+    drop(sync);
+    world
+        .server
+        .state
+        .lock()
+        .unwrap()
+        .upload_failures
+        .push_back(ApiFailure::Blocked {
+            code: "vm_not_assigned".to_owned(),
+            message: "This VM is not this agent's".to_owned(),
+            reason: BlockReason::Vm,
+        });
+    let running = world.start();
+    world
+        .until("the copy to go", |world| spool_files(world).is_empty())
+        .await;
+    assert_eq!(running.sync.counts(), (0, 0, 0, 0));
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn a_passing_failure_keeps_the_spooled_copy_and_tries_again() {
+    let world = World::new();
+    let root = world.qemu_vm("Flaky");
+    fs::write(root.join("shot.ppm"), b"P6 y").unwrap();
+    let sync = world.sync();
+    sync.detach_pending(&identity(EmulatorType::Qemu, "Flaky"), &root);
+    drop(sync);
+    fs::remove_dir_all(&root).unwrap();
+    world
+        .server
+        .state
+        .lock()
+        .unwrap()
+        .upload_failures
+        .push_back(transient("server_busy"));
+    let running = world.start();
+    world.until_uploaded(1).await;
+    world
+        .until("the copy to go", |world| spool_files(world).is_empty())
+        .await;
+    running.stop().await;
+}
+
+#[tokio::test]
+async fn copies_nothing_refers_to_are_removed_at_startup_and_a_repeated_detach_copies_once() {
+    let world = World::new();
+    let root = world.qemu_vm("Twice");
+    fs::write(root.join("shot.ppm"), b"P6 z").unwrap();
+    let spool = emucat_agent::media_queue::spool_dir(&world.state_dir);
+    fs::create_dir_all(&spool).unwrap();
+    fs::write(spool.join("left-over.img.partial"), b"from a crash").unwrap();
+    let sync = world.sync();
+    assert!(!spool.join("left-over.img.partial").exists());
+    let vm = identity(EmulatorType::Qemu, "Twice");
+    assert_eq!(sync.detach_pending(&vm, &root).spooled, 1);
+    // A removal resumed after a crash hands the same directory over again.
+    assert_eq!(sync.detach_pending(&vm, &root).spooled, 0);
+    assert_eq!(spool_files(&world).len(), 1);
+}
+
+#[tokio::test]
+async fn a_screenshot_too_large_to_upload_is_reported_lost_not_copied() {
+    let mut world = World::new();
+    world.settings.max_upload_bytes = 8;
+    let root = world.qemu_vm("Large");
+    fs::write(root.join("big.ppm"), b"P6 much more than eight bytes").unwrap();
+    let report = world
+        .sync()
+        .detach_pending(&identity(EmulatorType::Qemu, "Large"), &root);
+    assert_eq!(report.spooled, 0);
+    assert!(report.summary().unwrap().contains("big.ppm"));
+    assert!(spool_files(&world).is_empty());
 }

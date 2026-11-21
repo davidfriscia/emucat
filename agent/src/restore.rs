@@ -736,6 +736,21 @@ impl RestoreManager {
             return;
         };
         let aside = replaced_directory(&base, journal.request.operation_id);
+        // Screenshots are not part of a copy (decision 0051): those of the replaced copy that are still
+        // waiting for upload go to the media spool first, and the replacement never waits for them.
+        if directory_identity(&aside).ok() == Some(replaced.identity) {
+            let vm = VmIdentity {
+                emulator_type: journal.request.emulator_type,
+                vm_name: journal.request.vm_name.clone(),
+            };
+            let report = match &self.config.media {
+                Some(media) => media.detach_pending(&vm, &aside),
+                None => crate::media_sync::detach_without_synchronization(&aside, vm.emulator_type),
+            };
+            if let Some(note) = report.summary() {
+                tracing::warn!(vm = %vm.vm_name, %note, "Replaced a local copy");
+            }
+        }
         if remove_replaced_directory(&aside, replaced.identity) {
             journal.replaced = Some(ReplacedCopy {
                 removed: true,
