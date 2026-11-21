@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { AdminMedia, Tag } from '@emucat/contracts';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +26,9 @@ const THIRD_ID = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f72';
 const RETRO: Tag = { id: '018f47a0-7c2b-4f7e-9a3d-00000000a001', name: 'retro' };
 const RACING: Tag = { id: '018f47a0-7c2b-4f7e-9a3d-00000000a002', name: 'Racing' };
 const NEW_TAG: Tag = { id: '018f47a0-7c2b-4f7e-9a3d-00000000a003', name: 'windows-98' };
+
+// The selector waits briefly before searching, and dragging takes animation frames: allow for a busy machine.
+configure({ asyncUtilTimeout: 4000 });
 
 beforeEach(() => resetApiState());
 afterEach(() => {

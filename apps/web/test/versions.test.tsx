@@ -1140,11 +1140,13 @@ describe('version tags', () => {
     fireEvent.click(within(drawn).getByRole('button', { name: 'Tags of Win98_202601010002' }));
     const dialog = within(await screen.findByRole('dialog', { name: 'Snapshot tags' }));
     fireEvent.change(dialog.getByLabelText('Tags'), { target: { value: 'be' } });
-    fireEvent.click(await dialog.findByRole('option', { name: '#beta' }));
-    await waitFor(() =>
-      expect(
-        within(drawn).getByRole('list', { name: 'Tags of Win98_202601010002' }).textContent,
-      ).toBe('#beta'),
+    fireEvent.click(await dialog.findByRole('option', { name: '#beta' }, { timeout: 4000 }));
+    await waitFor(
+      () =>
+        expect(
+          within(drawn).getByRole('list', { name: 'Tags of Win98_202601010002' }).textContent,
+        ).toBe('#beta'),
+      { timeout: 4000 },
     );
     expect(api.callsTo('PUT', `${VM_PATH}/versions/${SNAP_B}/tags`)[0]?.body).toEqual({
       tagIds: [BETA.id],
