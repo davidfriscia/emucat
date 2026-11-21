@@ -9,7 +9,9 @@ while their VM is. The reasoning is in decisions [0016](decisions/0016-screensho
  VM directory ─► agent (watcher, queue) ─► authenticated HTTP(S) ─► API ─► media storage, MariaDB
 ```
 
-Screenshots never go through the archive repository, and archives never go through the API.
+Screenshots never go through the archive repository, and archives never go through the API. **Local screenshots are volatile media,
+not VM state** ([decision 0051](decisions/0051-screenshots-are-not-vm-state.md)): they are never archived, never compared with a
+manifest, and never decide whether a VM is synchronized, modified, transferable or removable.
 
 ## What counts as a screenshot
 
@@ -22,8 +24,9 @@ Extensions and the name `screenshots` match ignoring case. Only regular files co
 reported in the log and never followed, and neither is anything else that could lead outside the VM. A server never names a local
 path: everything starts from a VM root the agent has validated itself.
 
-Everything in an 86Box `screenshots` tree is left out of archives, including files that are not images. Those are never uploaded,
-which matters for a [transfer](#transfers).
+Everything in an 86Box `screenshots` tree is left out of archives, including files that are not images, and so are `.ppm` files in a
+QEMU VM's root. Nothing there is followed, counted or checked when a VM is archived, verified or removed. Files that are not images are
+never uploaded, and go with the directory when a VM is [transferred or removed](#transfers-and-removals).
 
 **Only registered VMs synchronize.** The server's list decides, and the presence of a directory means nothing. A discovered VM
 uploads nothing until an administrator has registered it, and no upload can create a VM.
@@ -67,7 +70,7 @@ reconcile_interval_seconds = 300
 retry_initial_seconds = 5
 retry_ceiling_seconds = 900
 stability_seconds = 2
-transfer_wait_seconds = 120
+transfer_wait_seconds = 120  # ignored since decision 0051
 ```
 
 `emucat-agent media-status` prints what the queue holds, without connecting to anything.
@@ -163,17 +166,17 @@ placeholder. The other screenshots keep their order.
 It does **not** delete anything on the agent's computer, and EmuCat has no way to. Instead the server remembers the deleted
 bytes for that VM (`vm_media_suppressions`, [decision 0050](decisions/0050-media-order-deletion-and-tags.md)):
 
-| What happens afterwards                                              | Result                                                                  |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| The agent scans again, restarts, or loses or rebuilds its queue      | It may upload the same bytes once; the server stores nothing, says done |
-| The same file is copied or renamed in the VM's screenshots directory | The same: identical bytes stay deleted                                  |
-| The file is edited, or a new screenshot is taken                     | Different bytes: a new screenshot, imported as usual                    |
-| The same bytes appear in another VM                                  | That VM's screenshot, imported as usual                                 |
-| An administrator requests a capture that yields identical bytes      | Imported again, and no longer suppressed                                |
-| A transfer of this VM finds the file still in the directory          | Blocked, as for any file the server does not hold. Move the file away   |
+| What happens afterwards                                                | Result                                                                  |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| The agent scans again, restarts, or loses or rebuilds its queue        | It may upload the same bytes once; the server stores nothing, says done |
+| The same file is copied or renamed in the VM's screenshots directory   | The same: identical bytes stay deleted                                  |
+| The file is edited, or a new screenshot is taken                       | Different bytes: a new screenshot, imported as usual                    |
+| The same bytes appear in another VM                                    | That VM's screenshot, imported as usual                                 |
+| An administrator requests a capture that yields identical bytes        | Imported again, and no longer suppressed                                |
+| A transfer or removal of this VM finds the file still in the directory | Nothing special: the VM is removed, and the spooled copy stays deleted  |
 
-The last row is deliberate: acknowledgements, which a transfer relies on before deleting a local directory, only ever name what
-the server really holds. To allow identical bytes back otherwise, remove the row from `vm_media_suppressions` with the API stopped.
+Acknowledgements only ever name what the server really holds, but nothing in a VM's lifecycle asks for them any more. To allow
+identical bytes back otherwise, remove the row from `vm_media_suppressions` with the API stopped.
 
 ## Order
 
@@ -214,25 +217,29 @@ unavailable. Publication stays the VM's alone: the page offers no per-screenshot
 PNG and JPEG go through `sharp`, and PPM and BMP through two small decoders in the API. Both have limits on size, dimensions and pixels, checked before any pixel is decoded or any large buffer allocated, and a deadline, `MEDIA_PROCESSING_TIMEOUT_SECONDS`. Decoding yields regularly, so a large image does not hold up other
 requests. See [decision 0025](decisions/0025-bounded-image-decoders.md).
 
-## Transfers
+## Transfers and removals
 
-Screenshots are not in the archive, so before a transfer deletes a VM, the server must hold every file that would be lost. In order:
+A transfer, a local copy removal, and the removal of a copy that a restore replaced never look at screenshots to decide anything.
+Only real VM files are checked: the directory's identity, every archived file against the manifest, links and special files among
+them, files in use and a running VM ([decision 0051](decisions/0051-screenshots-are-not-vm-state.md)). A screenshot that is pending,
+failed, changed, deleted from the catalog, or not an image at all never blocks or delays them.
 
-1. The master is committed. This has to come first, since an unregistered VM cannot upload anything.
-2. The agent lists everything left out of the archive, and hashes it.
-3. It asks the server about exactly those hashes, and waits up to `transfer_wait_seconds` for uploads to finish. **Only the server's
-   answer counts,** and never the local queue's opinion.
-4. It runs every check a transfer always had: the archive, the directory's identity, and each file against the manifest.
-5. It renames the directory, so that nothing can reach it, and hashes the excluded files again under the new name. Anything new or
-   different moves the directory back and stops here.
-6. It deletes.
+Pending screenshots are not thrown away either. Once the directory has been set aside and checked, right before it is deleted, the
+agent copies every screenshot in it that the queue does not already record as uploaded (or refused) into its **media spool**,
+`media/spool/` in the state directory, and queues each copy under its original name. The queue is saved first; then the directory
+goes. Spooled copies upload like any other screenshot, whether or not the VM is still this agent's, survive restarts, and are
+removed once uploaded, refused, or no longer accepted. The server accepts them for 30 days after the agent removed its copy.
 
-If any of that cannot be proved, the operation ends as a **partial success** with the code `transfer_blocked_media`. The master stays,
-the local VM stays untouched, and the message names the file. That covers a pending or failed upload, a new or changed screenshot, a
-file that is not an image, and a server that cannot be reached.
+| Situation                                                    | What happens                                                      |
+| ------------------------------------------------------------ | ----------------------------------------------------------------- |
+| Already uploaded, or deleted from the catalog and suppressed | Nothing to keep. A suppressed copy is answered 200, stays deleted |
+| Pending, new, or changed since the last upload               | Copied to the spool, uploaded later                               |
+| Over the upload size limit, or the spool holds 1 GiB already | Deleted with the directory; logged and named in the result        |
+| Not a supported image (86Box `screenshots` tree)             | Deleted with the directory: it is not a screenshot                |
+| The agent does not synchronize screenshots                   | Deleted with the directory; named in the result                   |
 
-**To recover,** look at the VM's Media page. Once it says everything is synchronized, or the file that blocked it has been moved away,
-choose **Retry removal** on the registration. Every check runs again, so a VM that has been used since then is refused and kept.
+The VM's Media page counts spooled copies as pending until they arrive. `transfer_blocked_media` and `local_copy_unsynced_media`
+come only from agents older than decision 0051; update the agent and retry.
 
 ## Operations
 

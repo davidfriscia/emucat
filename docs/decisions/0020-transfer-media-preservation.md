@@ -1,6 +1,7 @@
 # 0020: A transfer deletes a screenshot only if the server holds exactly that content
 
-**Status:** Accepted. Supersedes step 4 of the transfer checks in [0015](0015-registration-state-machine.md#transfer), and the refusal up
+**Status:** Superseded by [0051](0051-screenshots-are-not-vm-state.md): screenshots no longer decide whether a VM can be removed.
+It superseded step 4 of the transfer checks in [0015](0015-registration-state-machine.md#transfer), and the refusal up
 front that went with it. Everything else in 0015 stands.
 
 Screenshots are excluded from archives, so a transfer's master does not protect them. Milestone 3 refused any transfer of a VM that had

@@ -160,7 +160,9 @@ agent holds can be used.
 An upload also takes `X-EmuCat-Source-Path`, percent-encoded, and optionally `X-EmuCat-Captured-At`. The answer is `{ mediaId, sha256,
 created }`, with 201 for a new item and 200 for bytes already stored for this VM. Bytes an administrator deleted from this
 VM's catalog also answer 200, with `suppressed: true` and the deleted item's ID, and nothing is stored, unless the upload is
-a requested capture. Acknowledgements never include such a hash: it is not stored.
+a requested capture. Acknowledgements never include such a hash: it is not stored. An agent may upload screenshots of a VM it holds, or had until a
+transfer, and for 30 days after it removed its local copy of that VM, so that screenshots spooled by the removal still arrive
+([decision 0051](decisions/0051-screenshots-are-not-vm-state.md)).
 
 | Status | Code                                                                         | Meaning, and what an agent does                         |
 | ------ | ---------------------------------------------------------------------------- | ------------------------------------------------------- |
@@ -278,8 +280,9 @@ private key: archives go directly between agent and repository. See the [protoco
 | 409    | `registration_committed`, `registration_finished`, `registration_not_reconcilable` |                                                                          |
 | 404    | `registration_not_found`, `repository_not_found`                                   |                                                                          |
 
-`POST /admin/registrations/:operationId/retry-cleanup` tries again to remove a local VM, after a screenshot blocked it. It only applies to
-a transfer in `partial_success` with the code `transfer_blocked_media`, with the agent online, and the agent checks everything again.
+`POST /admin/registrations/:operationId/retry-cleanup` tries again to remove a local VM. It only applies to a transfer in
+`partial_success` with the code `transfer_blocked_running`, or `transfer_blocked_media` from an agent older than
+[decision 0051](decisions/0051-screenshots-are-not-vm-state.md), with the agent online, and the agent checks everything again.
 
 `POST /admin/registrations/:operationId/acknowledge` records that an administrator has dealt with a `partial_success`, so that it leaves
 the operations needing attention. It changes nothing else, and repeating it changes nothing. Anything but a partial success is refused

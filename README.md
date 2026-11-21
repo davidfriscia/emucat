@@ -183,8 +183,9 @@ No server has been installed from it yet.
 - **Remote HTTPS uploads are not integration-tested.** Remote agents must use HTTPS, and the agent enforces that, but screenshot uploads have only been exercised end to end over loopback HTTP. This test is deferred by decision.
 - **An interrupted restore download starts over** rather than resuming. See [decision 0021](docs/decisions/0021-restore-lifecycle.md).
 - **"Modified" is only as good as names and sizes between verifications.** A same-size change is caught by "Verify local copy", which hashes every file, but not by the cheaper check on reconnection. See [decision 0032](docs/decisions/0032-local-verification.md).
-- **A transfer of a VM with screenshots can end as a partial success.** Screenshots are not in archives, so the VM is only removed once the
-  server holds every one of them. If that cannot be proved, the master and the local VM both stay, and the removal can be retried.
+- **Screenshots of a removed VM are uploaded best-effort.** Screenshots are not VM state and never block a transfer or removal; pending
+  ones are copied to the agent's media spool (up to 1 GiB) and uploaded afterwards. What does not fit is deleted with the directory, and
+  the result says so. See [decision 0051](docs/decisions/0051-screenshots-are-not-vm-state.md).
 - **Archiving is not a filesystem snapshot.** Changes during archiving are detected and fail the operation, and Windows also
   refuses files open for writing, but a VM should be stopped first. See
   [decision 0014](docs/decisions/0014-archive-and-manifest.md).

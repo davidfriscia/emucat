@@ -83,26 +83,26 @@ Rust tests read too.
 specifics are limited to `platform.rs`, `shutdown.rs` and default paths in `config.rs`, and CI also
 builds and tests on Linux so that portability stays honest.
 
-| Module         | Now                                                | Later                    |
-| -------------- | -------------------------------------------------- | ------------------------ |
-| `config`       | File, environment, validation                      |                          |
-| `protocol`     | Envelope and message types                         | More messages            |
-| `connectivity` | The WebSocket, heartbeats, reconnection            | More commands            |
-| `pairing`      | Device-style pairing                               | Credential rotation      |
-| `credentials`  | The credential store interface, and DPAPI          | Keychain, Secret Service |
-| `discovery`    | Read-only scanning of the base paths               |                          |
-| `emulators`    | Types, names, identity, root markers               | Launching                |
-| `filesystem`   | Safe paths                                         | Directory operations     |
-| `archives`     | Version rules, exclusions                          |                          |
-| `repository`   | Provider-independent store interface, safe keys    | HTTPS provider           |
-| `sftp`         | The SSH/SFTP provider, with host-key checks        |                          |
-| `packaging`    | Standalone ZIP, manifest, source consistency       | Extraction               |
-| `registration` | Durable operations, journals, recovery             | Snapshots                |
-| `removal`      | Conservative local removal after a transfer        |                          |
-| `media`        | Watched paths, safe scanning and reading           | The watcher              |
-| `media_queue`  | The durable record of what has to reach the server | Uploading                |
-| `media_sync`   | Watcher, reconciliation, upload to the API         | Archive transfers        |
-| `state`        | State types, local source version                  | Fuller persistence       |
+| Module         | Now                                                                     | Later                    |
+| -------------- | ----------------------------------------------------------------------- | ------------------------ |
+| `config`       | File, environment, validation                                           |                          |
+| `protocol`     | Envelope and message types                                              | More messages            |
+| `connectivity` | The WebSocket, heartbeats, reconnection                                 | More commands            |
+| `pairing`      | Device-style pairing                                                    | Credential rotation      |
+| `credentials`  | The credential store interface, and DPAPI                               | Keychain, Secret Service |
+| `discovery`    | Read-only scanning of the base paths                                    |                          |
+| `emulators`    | Types, names, identity, root markers                                    | Launching                |
+| `filesystem`   | Safe paths                                                              | Directory operations     |
+| `archives`     | Version rules, exclusions                                               |                          |
+| `repository`   | Provider-independent store interface, safe keys                         | HTTPS provider           |
+| `sftp`         | The SSH/SFTP provider, with host-key checks                             |                          |
+| `packaging`    | Standalone ZIP, manifest, source consistency                            | Extraction               |
+| `registration` | Durable operations, journals, recovery                                  | Snapshots                |
+| `removal`      | Conservative local removal after a transfer                             |                          |
+| `media`        | Watched paths, safe scanning and reading                                | The watcher              |
+| `media_queue`  | The durable record of what has to reach the server, and the media spool | Uploading                |
+| `media_sync`   | Watcher, reconciliation, upload to the API                              | Archive transfers        |
+| `state`        | State types, local source version                                       | Fuller persistence       |
 
 ## Principles
 
@@ -128,6 +128,10 @@ builds and tests on Linux so that portability stays honest.
   side. See [decision 0015](decisions/0015-registration-state-machine.md).
 - **Source preservation comes first.** Only a positive, matching confirmation of a verified master can lead to a deletion,
   and only for a confirmed transfer.
+- **Screenshots are media, not VM state.** VM lifecycle (archives, verification, transfers, removals) and the media lifecycle
+  (ingestion, reconciliation, deduplication, suppression, deletion) are independent. A directory being removed hands its pending
+  screenshots to the agent's media spool; screenshots never decide anything about the VM. See
+  [decision 0051](decisions/0051-screenshots-are-not-vm-state.md).
 - **No default credentials.** The first administrator comes from an explicit, one-time setup. See
   [decision 0007](decisions/0007-local-authentication.md).
 

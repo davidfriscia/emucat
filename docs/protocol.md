@@ -323,7 +323,7 @@ minutes old, spelled exactly as discovered.
 
 **The agent checks for itself** that the repository is in its own configuration, that the archive key is the one that follows
 from the VM and version, that the VM's directory is an exact immediate child of the base path, not a link, and has a marker, and
-that a transfer of a VM with screenshots is something it can prove safe. See [the media guide](media.md#transfers).
+that the VM is not running. Screenshots play no part ([decision 0051](decisions/0051-screenshots-are-not-vm-state.md)). See [the media guide](media.md#transfers-and-removals).
 
 **A report authorizes nothing.** It counts only from the operation's own agent, on its active connection, with the identities the
 server issued. Stages only move forward, and an agent's report can never set a state the server decides.
@@ -345,7 +345,8 @@ Progress reports are thinned out to one per two seconds, and carry only what was
 
 ### Retrying a blocked removal
 
-A transfer whose removal a screenshot blocked ends as `partial_success`. The agent keeps its journal, in the phase `media_blocked`, which
+A transfer whose removal was blocked ends as `partial_success`: today only because the VM was running, or, from agents older than
+decision 0051, because of a screenshot. The agent keeps its journal, in the phase `media_blocked` for the latter, which
 it lists in `agent.registration_sync`. If an administrator asks, the server moves the operation back to `cleaning_local` and sends
 `server.registration_retry_cleanup`, which holds the operation and version IDs. The agent then runs every check again, and reports as usual.
 If the message is lost, the next sync that lists the operation as blocked while the server has it in `cleaning_local` brings it again.

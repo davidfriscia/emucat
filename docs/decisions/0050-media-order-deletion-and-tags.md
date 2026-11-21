@@ -25,9 +25,8 @@ them, as before). While that row exists:
 - An agent upload of exactly those bytes to that VM answers **200** with `created: false, suppressed: true` and the
   deleted item's ID, and stores nothing. The agent treats any 2xx as done and marks the file completed, so it is not
   sent again unless it changes. No agent change was needed, so agents already in the field benefit at once.
-- Acknowledgements **do not** include the hash. A [transfer](../media.md#transfers) takes an acknowledgement as proof
-  that removing the local file loses nothing; a catalog deletion must never be what deletes a local file. A transfer
-  of a VM with a deleted-but-present screenshot is therefore blocked as before, until the file is moved away.
+- Acknowledgements **do not** include the hash: they name only what the server stores. (A transfer once relied on
+  them; since [0051](0051-screenshots-are-not-vm-state.md) nothing in a VM's lifecycle does.)
 - An **explicitly requested capture** (QEMU or VirtualBox) of identical bytes is an administrator asking for that image
   now: it lifts the suppression and creates the screenshot again.
 
@@ -84,8 +83,8 @@ only, since a tag's existence can say something about private VMs.
 
 ## Consequences
 
-- Deleted screenshots no longer come back, without an agent update, and transfers remain as safe as before.
-- Deleting a screenshot can block a later transfer of that VM until the local file is moved; this was already so.
+- Deleted screenshots no longer come back, without an agent update.
+- Since [0051](0051-screenshots-are-not-vm-state.md), screenshots, deleted or not, never block a transfer or removal at all.
 - Galleries everywhere follow one stored order. The main image may now appear anywhere in the gallery.
 - Tags add four tables and three indexed joins to searches with text; with the existing `LIKE` search on names and
   descriptions this stays a scan of the VM table, as before.

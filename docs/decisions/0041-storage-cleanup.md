@@ -83,8 +83,9 @@ A journal per operation under `local-removals/`, written before anything moves:
    a record naming another version is `local_copy_changed`. **Stricter than a replacement:** a record made for another
    directory is also `local_copy_changed`, even with `discardLocalChanges`, because nothing the administrator saw
    describes that directory. Without `discardLocalChanges`, an unproven lineage is `local_copy_unverified`, a full
-   verification that finds differences is `local_copy_modified`, and a screenshot that the server does not hold is
-   `local_copy_unsynced_media` (screenshots are not in archives, so removing the directory would lose them).
+   verification that finds differences is `local_copy_modified`. (A screenshot the server did not hold was once
+   `local_copy_unsynced_media`; since [0051](0051-screenshots-are-not-vm-state.md) screenshots never stop a removal, and pending
+   ones are copied to the media spool before the directory is deleted.)
 5. The directory is renamed, with a rename that refuses to replace anything, to `.emucat-removing-{operation}` in the
    same base path: one atomic step on one volume. On Windows it fails if a file inside is open (`local_copy_in_use`).
    A leading dot is not a valid VM name, so discovery never reports the quarantined directory.
