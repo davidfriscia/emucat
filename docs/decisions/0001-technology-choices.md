@@ -19,5 +19,10 @@ version below 6.1. Upgrade when that peer requirement allows it.
 exclusions, dependencies use a version old enough to pass, which is why `@fastify/websocket` was
 initially resolved to 11.3.6 rather than the newest 11.3.7.
 
+**Drag and drop and tag input.** `@dnd-kit/core`, `@dnd-kit/sortable` and `@dnd-kit/utilities` reorder screenshots, with
+pointer and keyboard sensors and screen reader announcements; `react-select` (its `creatable` entry) is the tag selector.
+Both are styled with Bootstrap's own CSS variables, so they follow the light and dark themes. See
+[0050](0050-media-order-deletion-and-tags.md). No other drag-and-drop or tag input library is used.
+
 **Local ports.** MariaDB publishes on host port 3307 and the API uses 4000, because 3306 and 3000 are
 commonly taken on developer machines. All of them are configurable.

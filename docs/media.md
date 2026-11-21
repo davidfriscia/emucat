@@ -38,7 +38,8 @@ completely and hashed, through a handle that keeps writers out on Windows, and i
 that was still changing waits another full period, so a partly written screenshot is not sent.
 
 A changed file is new content and becomes a new media item. The old version stays on the server. **Deleting a screenshot locally
-never deletes anything on the server:** the agent only stops tracking the file. Deleting on the server does not touch the local file.
+never deletes anything on the server:** the agent only stops tracking the file. Deleting on the server does not touch the local file,
+and the file is not imported again: see [deleting screenshots](#deleting-screenshots).
 
 ## The queue
 
@@ -152,6 +153,46 @@ nothing is promoted in its place.
 since migration 0008. Before upgrading, the query in [decision 0036](decisions/0036-vm-level-publication.md) lists the screenshots of
 public VMs that were hidden and become public.
 
+## Deleting screenshots
+
+An administrator deletes a screenshot from **Manage media** (or the VM's page): **Delete** opens a confirmation that names
+the file and shows its thumbnail. Deleting removes it **from EmuCat**: its row, its tags, and its three files unless
+another row uses the same storage key. If it was the main image there is none afterwards, and the public catalog shows the
+placeholder. The other screenshots keep their order.
+
+It does **not** delete anything on the agent's computer, and EmuCat has no way to. Instead the server remembers the deleted
+bytes for that VM (`vm_media_suppressions`, [decision 0050](decisions/0050-media-order-deletion-and-tags.md)):
+
+| What happens afterwards                                              | Result                                                                  |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| The agent scans again, restarts, or loses or rebuilds its queue      | It may upload the same bytes once; the server stores nothing, says done |
+| The same file is copied or renamed in the VM's screenshots directory | The same: identical bytes stay deleted                                  |
+| The file is edited, or a new screenshot is taken                     | Different bytes: a new screenshot, imported as usual                    |
+| The same bytes appear in another VM                                  | That VM's screenshot, imported as usual                                 |
+| An administrator requests a capture that yields identical bytes      | Imported again, and no longer suppressed                                |
+| A transfer of this VM finds the file still in the directory          | Blocked, as for any file the server does not hold. Move the file away   |
+
+The last row is deliberate: acknowledgements, which a transfer relies on before deleting a local directory, only ever name what
+the server really holds. To allow identical bytes back otherwise, remove the row from `vm_media_suppressions` with the API stopped.
+
+## Order
+
+Each VM's screenshots have one order, kept in `vm_media.sort_order` and shown everywhere: Manage media, the VM's page, the
+public gallery and the image viewer. New screenshots are added at the end. Upgrading keeps the order galleries showed before
+(the main image first, then by capture or upload time).
+
+**Reorder Screenshots** on Manage media opens a table of every screenshot with its thumbnail, name, position and a drag handle.
+Drag a row by its handle; or focus a handle, press Space, move with the arrow keys and press Space again (Escape cancels); or
+use the ↑ and ↓ buttons. Nothing is sent while arranging. **Save Order** saves the whole order at once and **Cancel** discards it;
+the dialog says when there are unsaved changes. If a screenshot arrived or was deleted meanwhile, saving is refused and nothing
+changes: close the dialog and reorder again. Reordering never changes the main image.
+
+## Tags
+
+Screenshots, VMs, masters and snapshots each have their own tags, chosen from one catalog and always shown as `#name`. A
+screenshot's are edited with **Tags…** on its card. They are public exactly when the screenshot is, and a VM can be found by
+its screenshots' tags without the VM having them. See [the domain model](domain-model.md#tags).
+
 ## The gallery
 
 A VM's page shows the main screenshot prominently, and thumbnails of every screenshot the viewer may see. The public sees every screenshot of a public VM, and administrators see everything, with the controls to set or clear the main image and to delete. Selecting a
@@ -164,7 +205,7 @@ gallery. Only what the public catalog already returns is shown; nothing is added
 administrators, and opens the same launcher as the management page in a dialog over the page. A visitor is offered to sign in,
 and a signed-in user who is not an administrator is told why the button is disabled.
 
-In the gallery the main cover is marked **Main cover**. Each viewer chooses small, medium or large cards; the choice is kept
+The gallery follows the [saved order](#order). The viewer shows a screenshot's tags. In the gallery the main cover is marked **Main cover**. Each viewer chooses small, medium or large cards; the choice is kept
 in that browser's local storage (`emucat.gallery.cardSize`), never on the server, and falls back to medium when storage is
 unavailable. Publication stays the VM's alone: the page offers no per-screenshot control.
 

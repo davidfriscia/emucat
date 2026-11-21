@@ -154,6 +154,35 @@ full-resolution JPEG and a thumbnail with its longest side at about 400 pixels. 
 filename, type, size, dimensions and the storage keys of all three, and is unique per VM and content hash. Files never live in the
 database, and a screenshot can never create a VM. See [the media guide](media.md).
 
+Each VM's screenshots have an administrator's order (`sort_order`), and a deleted screenshot's bytes are remembered per VM
+(`vm_media_suppressions`) so that the agent, which still has the file, cannot bring it back. See
+[decision 0050](decisions/0050-media-order-deletion-and-tags.md).
+
+## Tags
+
+A tag is a short label from one central catalog, reused by VMs, versions (masters and snapshots) and screenshots. It is
+stored without `#` and always shown with one: `#retro`, `#windows-95`.
+
+| Rule        | What it means                                                                                            |
+| ----------- | -------------------------------------------------------------------------------------------------------- |
+| Normalized  | NFKC; surrounding whitespace and leading `#` removed; inner whitespace becomes `-`                       |
+| Unique      | Ignoring case: `Retro`, `retro` and `#RETRO` are one tag, shown as first typed                           |
+| Shape       | 1 to 48 characters: a letter or digit, then letters, digits, marks, `.`, `_`, `+` or `-`                 |
+| Per entity  | At most 32 tags on one VM, version or screenshot                                                         |
+| Independent | Never inherited: a snapshot's tags are not its parent's or its VM's, and a screenshot's are not its VM's |
+
+`normalizeTagInput` in `@emucat/contracts` is the one implementation, used by the browser and the API.
+
+| Entity     | Table             | Public                                   | Goes away with                            |
+| ---------- | ----------------- | ---------------------------------------- | ----------------------------------------- |
+| VM         | `vm_tags`         | While the VM is public                   | Nothing (VMs are not removed)             |
+| Version    | `vm_version_tags` | Never: version history is administrative | Nothing; a deleted version stops counting |
+| Screenshot | `vm_media_tags`   | While its VM is public                   | The screenshot, when it is deleted        |
+
+A promoted snapshot is the same version, and keeps its tags. Search finds a VM through its own tags, its screenshots' tags
+and, for administrators, its live versions' tags, without giving the VM those tags. `#name` matches one tag exactly; plain
+text matches any tag that contains it.
+
 ## Repositories
 
 A repository stores version archives. Agents reach it directly. `ArchiveRepository`, in the agent, is the
@@ -207,25 +236,30 @@ A `vm_workspaces` row is a working copy of one VM on one agent, with a `purpose`
 
 ## Database tables
 
-| Table                     | Holds                                    | Key                                  |
-| ------------------------- | ---------------------------------------- | ------------------------------------ |
-| `users`                   | Accounts. None are seeded.               | `id`                                 |
-| `user_sessions`           | Browser sessions, as token digests       | `id`                                 |
-| `agents`                  | Paired agents, as credential digests     | `id`                                 |
-| `repositories`            | Archive storage locations                | `id`                                 |
-| `virtual_machines`        | Registered VMs                           | `(emulator_type, vm_name)`           |
-| `vm_versions`             | Masters and snapshots                    | `id`                                 |
-| `agent_vm_state`          | Each agent's view of its local copy      | `(agent_id, emulator_type, vm_name)` |
-| `vm_sessions`             | Runs of a VM on an agent                 | `id`                                 |
-| `vm_media`                | Media metadata                           | `id`                                 |
-| `agent_pairing_requests`  | Pairing requests, as digests             | `id`                                 |
-| `agent_repositories`      | Which agents may use which repository    | `(agent_id, repository_id)`          |
-| `registration_operations` | Registrations, kept after they end       | `id`                                 |
-| `restore_operations`      | Restores, kept after they end            | `id`                                 |
-| `vm_workspaces`           | Remote sessions and working copies       | `id`                                 |
-| `vm_version_deletions`    | Versions being deleted, and deleted      | `version_id`                         |
-| `vm_remaster_operations`  | Remasters, kept after they end           | `id`                                 |
-| `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                       |
-| `schema_migrations`       | Migration history, managed by the runner | `version`                            |
+| Table                     | Holds                                    | Key                                         |
+| ------------------------- | ---------------------------------------- | ------------------------------------------- |
+| `users`                   | Accounts. None are seeded.               | `id`                                        |
+| `user_sessions`           | Browser sessions, as token digests       | `id`                                        |
+| `agents`                  | Paired agents, as credential digests     | `id`                                        |
+| `repositories`            | Archive storage locations                | `id`                                        |
+| `virtual_machines`        | Registered VMs                           | `(emulator_type, vm_name)`                  |
+| `vm_versions`             | Masters and snapshots                    | `id`                                        |
+| `agent_vm_state`          | Each agent's view of its local copy      | `(agent_id, emulator_type, vm_name)`        |
+| `vm_sessions`             | Runs of a VM on an agent                 | `id`                                        |
+| `vm_media`                | Media metadata, and the gallery order    | `id`                                        |
+| `vm_media_suppressions`   | Deleted screenshots' bytes, per VM       | `(emulator_type, vm_name, original_sha256)` |
+| `tags`                    | The central tag catalog                  | `id`; unique `normalized_name`              |
+| `vm_tags`                 | VMs' tags                                | `(emulator_type, vm_name, tag_id)`          |
+| `vm_version_tags`         | Masters' and snapshots' tags             | `(version_id, tag_id)`                      |
+| `vm_media_tags`           | Screenshots' tags                        | `(media_id, tag_id)`                        |
+| `agent_pairing_requests`  | Pairing requests, as digests             | `id`                                        |
+| `agent_repositories`      | Which agents may use which repository    | `(agent_id, repository_id)`                 |
+| `registration_operations` | Registrations, kept after they end       | `id`                                        |
+| `restore_operations`      | Restores, kept after they end            | `id`                                        |
+| `vm_workspaces`           | Remote sessions and working copies       | `id`                                        |
+| `vm_version_deletions`    | Versions being deleted, and deleted      | `version_id`                                |
+| `vm_remaster_operations`  | Remasters, kept after they end           | `id`                                        |
+| `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                              |
+| `schema_migrations`       | Migration history, managed by the runner | `version`                                   |
 
 The view `public_catalog_card_media` is the public read path for card images.

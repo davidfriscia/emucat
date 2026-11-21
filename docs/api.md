@@ -68,13 +68,15 @@ No authentication. Only public VMs and their screenshots ever appear here, and r
 filenames, hashes, storage keys, attribution, agent state or repository details. Responses may be stored but
 must be revalidated (`Cache-Control: no-cache`), so making something private takes effect immediately.
 
-| Method and path                               | Returns                                                                |
-| --------------------------------------------- | ---------------------------------------------------------------------- |
-| `GET /catalog/vms`                            | `items` of `{ emulatorType, vmName, displayName, summary, mainImage }` |
-| `GET /catalog/vms/:emulatorType/:vmName`      | Adds `description` and `gallery`; `summary` goes                       |
-| `GET /catalog/media/:mediaId/thumbnail\|full` | The JPEG                                                               |
+| Method and path                               | Returns                                                                      |
+| --------------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET /catalog/vms`                            | `items` of `{ emulatorType, vmName, displayName, summary, mainImage, tags }` |
+| `GET /catalog/vms/:emulatorType/:vmName`      | Adds `description` and `gallery`; `summary` goes                             |
+| `GET /catalog/media/:mediaId/thumbnail\|full` | The JPEG                                                                     |
 
-`mainImage` is `{ id, widthPx, heightPx }`, or `null` meaning "show the placeholder". `gallery` lists every image of the VM, with the main one first, then by when it was captured, in a stable order. `/original` does not exist here, for anyone. `displayName` may be
+`mainImage` is `{ id, widthPx, heightPx }`, or `null` meaning "show the placeholder". `gallery` lists every image of the VM as `{ id, widthPx, heightPx, tags }`, in the order an administrator saved ([decision 0050](decisions/0050-media-order-deletion-and-tags.md)), which is stable; the main image is wherever that order puts it. `tags` are `{ id, name }`, the name without `#`: the VM's own on a VM, a screenshot's own on a screenshot. Versions' tags are never here.
+
+`q` searches names, descriptions and tags. `#name` matches that tag exactly and nothing else; plain text also matches any tag containing it, after the same normalization as tag names (so `windows 95` finds `#windows-95`). A public VM matches through its own tags and its screenshots' tags. `/original` does not exist here, for anyone. `displayName` may be
 `null`, in which case the title is the VM name (`vmTitle` in the contracts). `summary` is the first 240
 characters of the description.
 
@@ -82,23 +84,44 @@ characters of the description.
 
 Requires a session with the `admin` role. Responses are `Cache-Control: no-store`.
 
-| Method and path                                                       | Purpose                                              |
-| --------------------------------------------------------------------- | ---------------------------------------------------- |
-| `GET /admin/summary`                                                  | Counts of VMs, and of media by their VM's visibility |
-| `GET /admin/vms`                                                      | Every VM. Also filters by `visibility`               |
-| `GET /admin/vms/:emulatorType/:vmName`                                | One VM                                               |
-| `PATCH /admin/vms/:emulatorType/:vmName`                              | `{ displayName?, description? }`, or `null` to clear |
-| `PUT /admin/vms/:emulatorType/:vmName/visibility`                     | `{ visibility: "private" \| "public" }`              |
-| `GET /admin/vms/:emulatorType/:vmName/media`                          | Every media item of the VM                           |
-| `PUT /admin/vms/:emulatorType/:vmName/main-media`                     | `{ mediaId }`: selects the main image                |
-| `DELETE /admin/vms/:emulatorType/:vmName/main-media`                  | Clears the selection                                 |
-| `DELETE /admin/vms/:emulatorType/:vmName/media/:mediaId`              | Deletes the item and its files                       |
-| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId`                 | One item in full, with its hash, type and agent      |
-| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/thumbnail\|full` | The JPEG, whether the VM is public or not            |
-| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/original`        | The uploaded file, as a download                     |
-| `GET /admin/vms/:emulatorType/:vmName/media-sync`                     | What each agent holding the VM last reported         |
+| Method and path                                                       | Purpose                                                                     |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `GET /admin/summary`                                                  | Counts of VMs, and of media by their VM's visibility                        |
+| `GET /admin/vms`                                                      | Every VM. Also filters by `visibility`                                      |
+| `GET /admin/vms/:emulatorType/:vmName`                                | One VM                                                                      |
+| `PATCH /admin/vms/:emulatorType/:vmName`                              | `{ displayName?, description? }`, or `null` to clear                        |
+| `PUT /admin/vms/:emulatorType/:vmName/visibility`                     | `{ visibility: "private" \| "public" }`                                     |
+| `GET /admin/vms/:emulatorType/:vmName/media`                          | Every media item of the VM                                                  |
+| `PUT /admin/vms/:emulatorType/:vmName/main-media`                     | `{ mediaId }`: selects the main image                                       |
+| `DELETE /admin/vms/:emulatorType/:vmName/main-media`                  | Clears the selection                                                        |
+| `DELETE /admin/vms/:emulatorType/:vmName/media/:mediaId`              | Deletes the item and its files                                              |
+| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId`                 | One item in full, with its hash, type and agent                             |
+| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/thumbnail\|full` | The JPEG, whether the VM is public or not                                   |
+| `GET /admin/vms/:emulatorType/:vmName/media/:mediaId/original`        | The uploaded file, as a download                                            |
+| `GET /admin/vms/:emulatorType/:vmName/media-sync`                     | What each agent holding the VM last reported                                |
+| `PUT /admin/vms/:emulatorType/:vmName/media-order`                    | `{ mediaIds }`: every screenshot, once, first to last                       |
+| `GET\|PUT /admin/vms/:emulatorType/:vmName/tags`                      | The VM's tags. `PUT { tagIds }` replaces them                               |
+| `GET\|PUT /admin/vms/:emulatorType/:vmName/media/:mediaId/tags`       | A screenshot's tags                                                         |
+| `GET\|PUT /admin/vms/:emulatorType/:vmName/versions/:versionId/tags`  | A master's or snapshot's tags                                               |
+| `GET /admin/tags?q=&limit=`                                           | Tags whose name contains `q` (with or without `#`)                          |
+| `POST /admin/tags`                                                    | `{ name }`: 201 with `{ tag, created: true }`, or 200 with the existing tag |
 
-Media mutations return the VM's updated media list.
+Media mutations return the VM's updated media list, in the saved order. Each item has `tags`. `GET /admin/vms` matches
+`q` against tags as the public catalog does, and also against the VM's live versions' tags.
+
+**Deleting a screenshot** removes it from the catalog, with its tags and the files no other row uses, and remembers its
+bytes for that VM so that the agent cannot bring it back ([decision 0050](decisions/0050-media-order-deletion-and-tags.md)).
+A second delete of the same item, or of another VM's item, is `404 media_not_found`. If it was the main image, there
+is none afterwards.
+
+**Reordering** is refused with `409 media_order_conflict` when the list is not exactly the VM's current screenshots
+(one arrived or was deleted since), and `400` for a duplicate. Nothing changes on a refusal. The main image does not
+change with the order.
+
+**Tags.** `PUT …/tags` replaces the entity's tags with exactly `tagIds` (at most 32, no duplicates) in one transaction,
+and returns `{ tags }` as stored, by name. An unknown tag ID is `422 unknown_tag`, an entity of another VM `404`, and a
+version that is deleted or being deleted `409 version_deleted`. An invalid name on `POST /admin/tags` is
+`400 invalid_tag`. Tags are never inherited: a screenshot's tag is not its VM's.
 
 ### System and application updates
 
@@ -135,7 +158,9 @@ agent holds can be used.
 | `PUT /agent/media/vms/:emulatorType/:vmName/screenshots/:sha256` | The file, as `application/octet-stream`                   |
 
 An upload also takes `X-EmuCat-Source-Path`, percent-encoded, and optionally `X-EmuCat-Captured-At`. The answer is `{ mediaId, sha256,
-created }`, with 201 for a new item and 200 for bytes already stored for this VM.
+created }`, with 201 for a new item and 200 for bytes already stored for this VM. Bytes an administrator deleted from this
+VM's catalog also answer 200, with `suppressed: true` and the deleted item's ID, and nothing is stored, unless the upload is
+a requested capture. Acknowledgements never include such a hash: it is not stored.
 
 | Status | Code                                                                         | Meaning, and what an agent does                         |
 | ------ | ---------------------------------------------------------------------------- | ------------------------------------------------------- |
