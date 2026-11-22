@@ -72,8 +72,17 @@ executable = 'C:\Program Files\qemu\qemu-system-x86_64.exe'
 # This file names where the private key is, and never holds it. A passphrase, if the key has one, is
 # stored separately with `emucat-agent repository-passphrase`, protected with DPAPI.
 #
+# How the repository is reached (decision 0055):
+#   "auto"  (the default) this agent's own SFTP connection, and the EmuCat server's HTTPS relay only when
+#           the repository cannot be reached at all. An authentication, host-key, permission or integrity
+#           failure is reported as it is, and never sent around through the relay.
+#   "sftp"  this agent's own SFTP connection only.
+#   "relay" the server's relay only. Leave out host, username, remote_root, private_key_path and the host
+#           keys: the server connects with its own key, and checks the repository's host key itself.
+#
 # [repositories."018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f61"]
 # kind = "sftp"
+# transport = "auto"
 # host = "nas.example.lan"
 # port = 22
 # username = "emucat"

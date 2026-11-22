@@ -403,6 +403,10 @@ describe('layout', () => {
           `EMUCAT_MEDIA_DIR=${join(h.root, 'data/media')}`,
           `EMUCAT_NOTES_DIR=${join(h.root, 'data/notes')}`,
           `EMUCAT_SOCKET_DIR=${h.socketDir}`,
+          `EMUCAT_TRANSFERS_DIR=${join(h.root, 'data/transfers')}`,
+          `EMUCAT_REPOSITORY_SSH_DIR=${join(h.root, 'config/repository-ssh')}`,
+          // No key was put in place, so the server is given none.
+          'EMUCAT_REPOSITORY_SSH_KEY=',
         ].join(' '),
       );
     }

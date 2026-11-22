@@ -17,6 +17,7 @@ import { databaseReadiness } from './readiness.js';
 import { DEFAULT_PAIRING_RATE_LIMITS } from './routes/agent-pairing.js';
 import { announceSetupToken, DEFAULT_AUTH_RATE_LIMITS } from './routes/auth.js';
 import type { BrowserDependencies } from './routes/browser.js';
+import { NO_REPOSITORY_ACCESS, SshRepositoryAccess } from './repository-access/ssh.js';
 import { NotesStorage } from './notes/storage.js';
 import { fileMediaStorage } from './storage/media-storage.js';
 
@@ -52,6 +53,10 @@ async function main(): Promise<void> {
     publicOrigin: config.publicOrigin,
     pairing: DEFAULT_PAIRING_POLICY,
     pairingRateLimits: DEFAULT_PAIRING_RATE_LIMITS,
+    repositoryAccess: config.repositoryAccess
+      ? new SshRepositoryAccess(config.repositoryAccess)
+      : NO_REPOSITORY_ACCESS,
+    transfers: config.transfers,
     deployment: {
       client: config.deployer ? socketDeploymentClient(config.deployer) : null,
       environment: config.environment,

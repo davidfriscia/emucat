@@ -248,13 +248,19 @@ export function RegistrationCard({
           </span>
         </div>
         {terminal ? null : <RegistrationProgress operation={operation} />}
-        {!terminal && !operation.agentOnline ? (
+        {operation.performedBy === 'server' ? (
+          <p className="small text-body-secondary mb-2">
+            The EmuCat server does this itself, over its own connection to the repository. No agent
+            takes part.
+          </p>
+        ) : null}
+        {!terminal && operation.performedBy === 'agent' && !operation.agentOnline ? (
           <div className="alert alert-warning small mb-2" role="status">
             The agent is offline. This continues when it reconnects. Nothing is lost in the
             meantime.
           </div>
         ) : null}
-        {operation.state === 'committing' ? (
+        {operation.state === 'committing' && operation.performedBy === 'agent' ? (
           <p className="small text-body-secondary mb-2">
             The agent has verified the archive in the repository. The agent repeats its report until
             the server has recorded it.
@@ -413,7 +419,9 @@ export function RegistrationHistoryTable({
                     </span>
                   </td>
                   {showAgent ? (
-                    <td className="d-none d-sm-table-cell">{operation.agentName}</td>
+                    <td className="d-none d-sm-table-cell">
+                      {operation.agentName ?? 'EmuCat server'}
+                    </td>
                   ) : null}
                   <td>{REGISTRATION_MODE_TEXT[operation.mode]}</td>
                   <td>

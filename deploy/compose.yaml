@@ -11,7 +11,10 @@
 #   shares, plus a network used to reach MariaDB on the host.
 # - The web ingress is bound to one configurable address, loopback by default, for the external proxy.
 # - No container is privileged, none gets the Docker socket, and the only host paths mounted are the media
-#   directory, the VM notes directory, the deployment-service socket directory (read-only) and one token file.
+#   directory, the VM notes directory, the transfer staging directory, the deployment-service socket directory
+#   (read-only), the server's repository SSH directory (read-only) and one token file.
+# - The API reaches repositories over SSH through its own `repository` network (decision 0055). Firewall the host so
+#   that this subnet reaches the repositories' SSH ports only.
 
 name: ${EMUCAT_PROJECT:-emucat}
 
@@ -52,6 +55,13 @@ services:
       TRUST_PROXY: ${EMUCAT_INTERNAL_SUBNET:-172.31.254.0/24}
       DEPLOYER_SOCKET: /run/emucat-deployer/deployer.sock
       DEPLOYER_TOKEN_FILE: /run/secrets/deployer_token
+      # Repository transfers and server-side clones (decision 0055). Staging is on a persistent host disk.
+      TRANSFER_STAGING_PATH: /data/transfers
+      # The server's own repository key and known_hosts, from EMUCAT_ROOT/config/repository-ssh, mounted read-only.
+      # emucatctl sets these only when the files exist; empty means the server has no repository connection.
+      REPOSITORY_SSH_PRIVATE_KEY_PATH: ${EMUCAT_REPOSITORY_SSH_KEY:-}
+      REPOSITORY_SSH_KNOWN_HOSTS_PATH: ${EMUCAT_REPOSITORY_SSH_KNOWN_HOSTS:-}
+      REPOSITORY_SSH_PASSPHRASE_FILE: ${EMUCAT_REPOSITORY_SSH_PASSPHRASE:-}
     # host.docker.internal is how the API reaches MariaDB on the host. host-gateway is Docker's address
     # for the host on the default bridge; set EMUCAT_DB_HOST_GATEWAY to another host address if MariaDB
     # listens elsewhere.
@@ -74,6 +84,16 @@ services:
         source: ${EMUCAT_SOCKET_DIR:-/run/emucat-deployer}
         target: /run/emucat-deployer
         read_only: true
+      # Transfer and clone staging (decision 0055): EMUCAT_ROOT/data/transfers, owned by the application account.
+      # Only opaque per-transfer directories are created in it; it is never served.
+      - type: bind
+        source: ${EMUCAT_TRANSFERS_DIR:?set EMUCAT_TRANSFERS_DIR (EMUCAT_ROOT/data/transfers); run emucatctl install from this release}
+        target: /data/transfers
+      # The server's repository SSH key and known_hosts. Read-only; never part of an image or the database.
+      - type: bind
+        source: ${EMUCAT_REPOSITORY_SSH_DIR:?set EMUCAT_REPOSITORY_SSH_DIR (EMUCAT_ROOT/config/repository-ssh); run emucatctl install from this release}
+        target: /run/secrets/repository-ssh
+        read_only: true
     secrets:
       - deployer_token
     tmpfs:
@@ -81,6 +101,7 @@ services:
     networks:
       internal: {}
       database: {}
+      repository: {}
     stop_grace_period: 20s
     deploy:
       resources:
@@ -129,6 +150,12 @@ networks:
     ipam:
       config:
         - subnet: ${EMUCAT_DATABASE_SUBNET:-172.31.252.0/24}
+  # The API's way to repositories over SSH (decision 0055). Firewall the host so that this subnet reaches the
+  # repositories' SSH ports only.
+  repository:
+    ipam:
+      config:
+        - subnet: ${EMUCAT_REPOSITORY_SUBNET:-172.31.251.0/24}
 
 secrets:
   deployer_token:

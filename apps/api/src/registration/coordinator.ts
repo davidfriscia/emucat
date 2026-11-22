@@ -66,8 +66,9 @@ export const DEFAULT_REGISTRATION_POLICY: RegistrationPolicy = {
 
 interface OperationRow extends RowDataPacket {
   id: string;
-  agent_id: string;
-  agent_name: string;
+  /** Null for a clone the server performs itself (decision 0055). */
+  agent_id: string | null;
+  agent_name: string | null;
   agent_revoked_at: Date | null;
   repository_id: string;
   repository_name: string;
@@ -134,7 +135,7 @@ const OPERATION_QUERY = `
          op.acknowledged_at, ack.display_name AS acknowledged_by_display_name,
          parent.snapshot_name AS parent_snapshot_name, deletion.state AS version_deletion
   FROM registration_operations AS op
-  JOIN agents AS a ON a.id = op.agent_id
+  LEFT JOIN agents AS a ON a.id = op.agent_id
   JOIN repositories AS r ON r.id = op.repository_id
   LEFT JOIN users AS u ON u.id = op.requested_by_user_id
   LEFT JOIN users AS ack ON ack.id = op.acknowledged_by_user_id
@@ -173,11 +174,13 @@ function toOperation(row: OperationRow, online: boolean): RegistrationOperation 
   const hasArchive =
     row.archive_sha256 !== null && (format === 'ova' || row.manifest_sha256 !== null);
   const optional = (value: number | string | null) => (value === null ? null : Number(value));
+  const performedBy = row.agent_id === null ? 'server' : 'agent';
   return {
     id: row.id,
     agentId: row.agent_id,
     agentName: row.agent_name,
     agentOnline: online,
+    performedBy,
     repositoryId: row.repository_id,
     repositoryName: row.repository_name,
     emulatorType: row.emulator_type,
@@ -202,7 +205,7 @@ function toOperation(row: OperationRow, online: boolean): RegistrationOperation 
           manifestSha256: row.manifest_sha256,
           fileCount: optional(row.file_count),
           totalUncompressedBytes: optional(row.total_uncompressed_bytes),
-          verifiedBy: 'agent',
+          verifiedBy: performedBy,
         }
       : null,
     virtualboxUuid: row.virtualbox_uuid,
@@ -430,6 +433,67 @@ export class RegistrationCoordinator {
 
   /** Commits remasters (decision 0048). Without it, a remaster's registration is refused at its commit. */
   remasters: import('../versions/remaster.js').RemasterCommitter | null = null;
+
+  /** Stops a clone the server performs itself (decision 0055), once its cancellation is recorded. */
+  onServerCancel: ((operationId: string) => void) | null = null;
+
+  private onlineOf(row: Pick<OperationRow, 'agent_id'>): boolean {
+    return row.agent_id !== null && this.link.isOnline(row.agent_id);
+  }
+
+  /**
+   * Progress of an operation the server performs itself. Like an agent's report, it only moves forward from the
+   * states the stage allows, so a cancellation recorded meanwhile is never overwritten.
+   */
+  async serverProgress(
+    operationId: string,
+    stage: RegistrationProgressPayload['stage'],
+    doneBytes: number | null,
+    totalBytes: number | null,
+  ): Promise<boolean> {
+    const allowed = STAGE_ALLOWED_FROM[stage];
+    const placeholders = allowed.map(() => '?').join(', ');
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE registration_operations
+       SET state = ?, progress_done_bytes = ?, progress_total_bytes = ?
+       WHERE id = ? AND agent_id IS NULL AND cancel_requested_at IS NULL AND state IN (${placeholders})`,
+      [stage, doneBytes, totalBytes, operationId, ...allowed],
+    );
+    return result.affectedRows > 0;
+  }
+
+  /** Ends an operation the server performs itself with a failure. One already ended keeps its outcome. */
+  async serverFailed(operationId: string, code: string, message: string): Promise<void> {
+    await this.pool.execute<ResultSetHeader>(
+      `UPDATE registration_operations
+       SET state = IF(cancel_requested_at IS NULL, 'failed', 'cancelled'),
+           error_code = IF(cancel_requested_at IS NULL, ?, 'cancelled'),
+           error_message = IF(cancel_requested_at IS NULL, ?, 'Cancelled by an administrator.'),
+           finished_at = UTC_TIMESTAMP(3), progress_done_bytes = NULL, progress_total_bytes = NULL
+       WHERE id = ? AND agent_id IS NULL AND state NOT IN ('succeeded', 'failed', 'cancelled',
+         'partial_success', 'committing')`,
+      [code, message, operationId],
+    );
+  }
+
+  /**
+   * The server's own clone, published and verified: the same commit an agent's verified result gets, through the
+   * same checks of identities. `false` when it was refused (cancelled meanwhile, or the name was taken), in which
+   * case the caller removes the object it published.
+   */
+  async commitServerClone(payload: VerifiedArchive): Promise<RegistrationAckPayload> {
+    const [rows] = await this.pool.execute<OperationRow[]>(
+      `${OPERATION_QUERY} WHERE op.id = ? AND op.agent_id IS NULL AND op.mode = 'clone'`,
+      [payload.operationId],
+    );
+    const row = rows[0] ?? null;
+    if (!row) return { operationId: payload.operationId, outcome: 'rejected' };
+    if (row.cancel_requested_at && !isRegistrationTerminal(row.state)) {
+      await this.serverFailed(payload.operationId, 'cancelled', 'Cancelled by an administrator.');
+      return { operationId: payload.operationId, outcome: 'rejected', deletePublished: true };
+    }
+    return this.verifiedOutcome('server', payload, row);
+  }
 
   close(): void {
     for (const timer of this.healthTimers.values()) clearTimeout(timer);
@@ -829,7 +893,7 @@ export class RegistrationCoordinator {
     ) {
       throw new ApiError(409, 'request_id_reused', 'This request ID belongs to another operation.');
     }
-    return toOperation(row, this.link.isOnline(row.agent_id));
+    return toOperation(row, this.onlineOf(row));
   }
 
   private requireFreshDiscovery(input: CreateRegistrationRequest): void {
@@ -892,7 +956,7 @@ export class RegistrationCoordinator {
     const [rows] = await this.pool.execute<OperationRow[]>(`${OPERATION_QUERY} WHERE op.id = ?`, [
       operationId,
     ]);
-    return rows[0] ? toOperation(rows[0], this.link.isOnline(rows[0].agent_id)) : null;
+    return rows[0] ? toOperation(rows[0], this.onlineOf(rows[0])) : null;
   }
 
   private async require(operationId: string): Promise<RegistrationOperation> {
@@ -966,7 +1030,7 @@ export class RegistrationCoordinator {
         ? encodeRegistrationCursor({ createdAt: last.created_at.toISOString(), id: last.id })
         : null;
     const response: RegistrationListResponse = {
-      operations: page.map((row) => toOperation(row, this.link.isOnline(row.agent_id))),
+      operations: page.map((row) => toOperation(row, this.onlineOf(row))),
       nextCursor,
     };
     if (query.view === 'attention') {
@@ -1009,6 +1073,7 @@ export class RegistrationCoordinator {
   async cancel(operationId: string): Promise<RegistrationOperation> {
     const connection = await this.pool.getConnection();
     let tell: string | null;
+    let serverRun: boolean;
     try {
       await connection.beginTransaction();
       const [rows] = await connection.execute<RowDataPacket[]>(
@@ -1028,8 +1093,10 @@ export class RegistrationCoordinator {
       if (isRegistrationTerminal(state)) {
         throw new ApiError(409, 'registration_finished', 'This registration has already ended.');
       }
-      // An import's command line is not reachable from here: it finds out at its next report (decision 0049).
-      const online = row.mode !== 'import' && this.link.isOnline(row.agent_id as string);
+      // An import's command line is not reachable from here: it finds out at its next report (decision 0049). A
+      // clone the server performs is stopped in-process, below.
+      const agentId = (row.agent_id as string | null) ?? null;
+      const online = row.mode !== 'import' && agentId !== null && this.link.isOnline(agentId);
       // With no agent to wait for, or only a commit to stop, there is nothing to wait for.
       const immediate = state === 'queued' || state === 'committing' || !online;
       await connection.execute(
@@ -1044,7 +1111,8 @@ export class RegistrationCoordinator {
         [operationId],
       );
       await connection.commit();
-      tell = online ? (row.agent_id as string) : null;
+      tell = online ? agentId : null;
+      serverRun = agentId === null;
     } catch (error) {
       await connection.rollback();
       throw error;
@@ -1054,6 +1122,7 @@ export class RegistrationCoordinator {
     if (tell) {
       this.link.send(tell, { type: 'server.registration_cancel', payload: { operationId } });
     }
+    if (serverRun) this.onServerCancel?.(operationId);
     await this.notifyWorkspace(operationId);
     return this.require(operationId);
   }
@@ -1063,8 +1132,8 @@ export class RegistrationCoordinator {
     const before = await this.require(operationId);
     if (before.state === 'committing') {
       const ack = await this.commit(operationId);
-      // An import's command line asks for its outcome itself (decision 0049).
-      if (before.mode !== 'import') {
+      // An import's command line asks for its outcome itself (decision 0049); the server's own clone needs no answer.
+      if (before.mode !== 'import' && before.agentId !== null) {
         this.link.send(before.agentId, { type: 'server.registration_ack', payload: ack });
       }
     } else if (!isRegistrationCommitted(before.state)) {
@@ -1095,14 +1164,15 @@ export class RegistrationCoordinator {
         'Only a transfer whose removal was blocked by a screenshot or a running VM can be retried.',
       );
     }
-    if (!this.link.isOnline(before.agentId)) {
+    const agentId = before.agentId;
+    if (agentId === null || !this.link.isOnline(agentId)) {
       throw new ApiError(409, 'agent_offline', 'This agent is offline.');
     }
     // The agent checks again right before removing anything. This only spares it a request it refuses.
     const [sessions] = await this.pool.execute<RowDataPacket[]>(
       `SELECT 1 FROM vm_sessions
        WHERE agent_id = ? AND emulator_type = ? AND vm_name = ? AND active_marker = 1`,
-      [before.agentId, before.emulatorType, before.vmName],
+      [agentId, before.emulatorType, before.vmName],
     );
     if (sessions.length > 0) {
       throw new ApiError(409, 'vm_running', 'The VM is running on this agent. Stop it first.');
@@ -1131,7 +1201,7 @@ export class RegistrationCoordinator {
       throw error;
     }
     // If this is lost, the agent's next sync lists the operation as blocked, and it is sent again.
-    this.link.send(before.agentId, {
+    this.link.send(agentId, {
       type: 'server.registration_retry_cleanup',
       payload: { operationId, versionId: before.versionId },
     });
@@ -1386,7 +1456,7 @@ export class RegistrationCoordinator {
       `UPDATE registration_operations
        SET state = 'committing', archive_size_bytes = ?, archive_sha256 = ?, manifest_version = ?,
            manifest_sha256 = ?, file_count = ?, total_uncompressed_bytes = ?
-       WHERE id = ? AND agent_id = ? AND state NOT IN ('succeeded', 'failed', 'cancelled',
+       WHERE id = ? AND agent_id <=> ? AND state NOT IN ('succeeded', 'failed', 'cancelled',
          'partial_success', 'cleaning_local')`,
       [
         payload.archiveSizeBytes,
@@ -1396,7 +1466,7 @@ export class RegistrationCoordinator {
         payload.manifest?.fileCount ?? null,
         payload.manifest?.totalUncompressedBytes ?? null,
         operationId,
-        agentId,
+        row.agent_id,
       ],
     );
     // If this throws, nothing was committed and no answer is sent. The agent will report this again,
@@ -1455,7 +1525,7 @@ export class RegistrationCoordinator {
     const [rows] = await connection.execute<RowDataPacket[]>(
       `SELECT op.*, a.revoked_at AS agent_revoked_at, ar.agent_id AS authorized, r.enabled
        FROM registration_operations AS op
-       JOIN agents AS a ON a.id = op.agent_id
+       LEFT JOIN agents AS a ON a.id = op.agent_id
        JOIN repositories AS r ON r.id = op.repository_id
        LEFT JOIN agent_repositories AS ar
          ON ar.agent_id = op.agent_id AND ar.repository_id = op.repository_id
@@ -1493,10 +1563,15 @@ export class RegistrationCoordinator {
     if (row.cancel_requested_at) {
       return refuse('cancelled', 'cancelled', 'Cancelled by an administrator.');
     }
-    if (row.agent_revoked_at) {
+    // The server's own clone (decision 0055) has no agent to revoke or authorize: only the repository counts.
+    const serverRun = row.agent_id === null;
+    if (serverRun && row.mode !== 'clone') {
+      return refuse('failed', 'invalid_result', FAILURE_TEXT.invalid_result ?? 'invalid_result');
+    }
+    if (!serverRun && row.agent_revoked_at) {
       return refuse('failed', 'agent_revoked', FAILURE_TEXT.agent_revoked as string);
     }
-    if (!row.authorized || !row.enabled) {
+    if ((!serverRun && !row.authorized) || !row.enabled) {
       return refuse(
         'failed',
         'repository_not_authorized',
@@ -1828,7 +1903,9 @@ export class RegistrationCoordinator {
       [payload.repositoryId],
     );
     let { ok, code, message } = payload;
-    if (ok && rows[0]) {
+    // An agent that only uses the relay has no SFTP settings of its own to compare (decision 0055).
+    const relayOnly = payload.transport === 'relay' && payload.configuration === null;
+    if (ok && rows[0] && !relayOnly) {
       // The agent's settings are local, so they may have drifted from this record. That only matters
       // if they point somewhere else, which is reported rather than trusted.
       const expected = (
@@ -1857,6 +1934,7 @@ export class RegistrationCoordinator {
       message,
       payload.hostKeyFingerprint,
       payload.freeBytes,
+      payload.transport,
     );
     // Only now: until the result is stored, a reader must not see "finished, with no result".
     this.finishHealthCheck(key);

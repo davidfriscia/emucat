@@ -13,6 +13,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import type { RowDataPacket } from 'mysql2/promise';
 import { afterEach, describe, expect, it } from 'vitest';
+import { expectArchiveRoutesOnlyWhereAllowed } from './route-paths.js';
 import {
   envelope,
   GENEROUS_RATE_LIMITS,
@@ -246,10 +247,9 @@ describe('authorization', () => {
     }
   });
 
-  it('has no route that receives or returns an archive', async () => {
+  it('carries archives only through the authenticated relay and the read-only archive listing', async () => {
     const w = await world();
-    const routes = w.context.app.printRoutes();
-    expect(routes).not.toMatch(/upload|download|archive/i);
+    expectArchiveRoutesOnlyWhereAllowed(w.context.app);
   });
 });
 

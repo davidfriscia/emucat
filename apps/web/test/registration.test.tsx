@@ -57,6 +57,9 @@ function repository(overrides: Partial<RepositorySummary> = {}): RepositorySumma
     port: 22,
     username: 'emucat',
     remoteRoot: '/srv/emucat',
+    serverHost: null,
+    serverPort: null,
+    serverAccess: { configured: false, lastTest: null },
     enabled: true,
     status: 'healthy',
     lastSuccessfulCheckAt: WHEN,
@@ -73,6 +76,7 @@ function repository(overrides: Partial<RepositorySummary> = {}): RepositorySumma
         errorMessage: null,
         hostKeyFingerprint: 'SHA256:abcdef',
         freeBytes: 1024 * 1024 * 1024,
+        transport: null,
       },
     ],
     configurationErrors: [],
@@ -120,6 +124,7 @@ function operation(overrides: Partial<RegistrationOperation> = {}): Registration
     agentId: AGENT_ID,
     agentName: 'Desk PC',
     agentOnline: true,
+    performedBy: 'agent',
     repositoryId: REPOSITORY_ID,
     repositoryName: 'NAS',
     emulatorType: 'qemu',
@@ -867,7 +872,65 @@ describe('the repositories page', () => {
       port: 22,
       username: 'emucat',
       remoteRoot: '/srv/emucat',
+      serverHost: null,
+      serverPort: null,
     });
+  });
+
+  it('saves the server’s own address, and runs Test Server Connection step by step', async () => {
+    const path = `/admin/repositories/${REPOSITORY_ID}/server-test`;
+    const result = {
+      ok: false,
+      testedAt: WHEN,
+      address: { host: '10.0.0.5', port: 2222, source: 'server' },
+      hostKeyFingerprint: 'SHA256:server',
+      freeBytes: null,
+      steps: [
+        { step: 'configuration', ok: true, message: '' },
+        { step: 'resolve', ok: true, message: '' },
+        { step: 'connect', ok: true, message: '' },
+        { step: 'host_key', ok: false, message: 'Add the key to known_hosts after checking it.' },
+        { step: 'authentication', ok: null, message: '' },
+      ],
+      error: { code: 'host_key_unknown', message: 'Unknown host key' },
+    };
+    const api = mockApi(
+      page({
+        [`POST ${path}`]: result,
+        [`PUT /admin/repositories/${REPOSITORY_ID}`]: (call: { body: unknown }) => ({
+          ...repository(),
+          ...(call.body as object),
+        }),
+      }),
+    );
+    renderAt('/admin/repositories');
+    fireEvent.click(await screen.findByRole('button', { name: 'Test Server Connection' }));
+    await waitFor(() => expect(api.callsTo('POST', path).length).toBe(1));
+    const status = await screen.findByText(/The server cannot use it/);
+    const report = status.closest('[role="status"]') as HTMLElement;
+    expect(within(report).getByText('Host key verification')).toBeTruthy();
+    expect(report.textContent).toMatch(/Add the key to known_hosts/);
+    expect(report.textContent).toMatch(/10\.0\.0\.5:2222 \(server address\)/);
+    expect(report.textContent).not.toMatch(/PRIVATE KEY|\/run\/secrets/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Server host'), { target: { value: '10.0.0.5' } });
+    fireEvent.change(screen.getByLabelText('Server port'), { target: { value: '2222' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    const put = `/admin/repositories/${REPOSITORY_ID}`;
+    await waitFor(() => expect(api.callsTo('PUT', put).length).toBe(1));
+    expect(api.callsTo('PUT', put)[0]?.body).toMatchObject({
+      serverHost: '10.0.0.5',
+      serverPort: 2222,
+    });
+  });
+
+  it('says when an agent reached the repository through the relay', async () => {
+    const relayed = repository();
+    relayed.agents[0]!.transport = 'relay';
+    mockApi(page({ 'GET /admin/repositories': { repositories: [relayed] } }));
+    renderAt('/admin/repositories');
+    expect(await screen.findByText(/Reached through the server relay/)).toBeTruthy();
   });
 
   it('runs a connectivity test through the agent, and shows a failure', async () => {

@@ -231,6 +231,8 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
       [`${ROOT}/data`]: [0, 0, 0o755],
       [`${ROOT}/data/media`]: [1000, 1000, 0o750],
       [`${ROOT}/data/notes`]: [1000, 1000, 0o750],
+      [`${ROOT}/data/transfers`]: [1000, 1000, 0o750],
+      [`${ROOT}/config/repository-ssh`]: [1000, 1000, 0o711],
       [`${ROOT}/backups`]: [deploy.uid, deploy.gid, 0o750],
     };
     const checkLayout = () => {
@@ -422,7 +424,8 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
         'EMUCAT_APP_ENV_FILE=/opt/emucat/config/app.env ' +
           'EMUCAT_DEPLOYER_TOKEN_FILE=/opt/emucat/config/deployer.token ' +
           'EMUCAT_MEDIA_DIR=/opt/emucat/data/media EMUCAT_NOTES_DIR=/opt/emucat/data/notes ' +
-          'EMUCAT_SOCKET_DIR=/run/emucat-deployer',
+          'EMUCAT_SOCKET_DIR=/run/emucat-deployer EMUCAT_TRANSFERS_DIR=/opt/emucat/data/transfers ' +
+          'EMUCAT_REPOSITORY_SSH_DIR=/opt/emucat/config/repository-ssh EMUCAT_REPOSITORY_SSH_KEY=',
       );
     }
 

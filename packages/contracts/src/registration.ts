@@ -3,6 +3,7 @@ import { emulatorTypeSchema, filesystemEmulatorTypeSchema } from './emulator.js'
 import { virtualBoxUuidSchema } from './discovery.js';
 import { virtualBoxOperationSyncEntrySchema } from './virtualbox-management.js';
 import { sha256HexSchema, timestampSchema } from './version.js';
+import { serverConnectionTestSchema } from './transfers.js';
 import { vmNameSchema } from './vm-name.js';
 
 /**
@@ -125,6 +126,11 @@ export const REGISTRATION_ERROR_CODES = [
   // From a clone (decision 0052).
   'clone_unavailable',
   'source_archive_invalid',
+  // From the server's own repository connection and its staging area (decision 0055).
+  'server_repository_unavailable',
+  'server_restarted',
+  'transfer_staging_full',
+  'transfer_busy',
   // From local cleanup, after the master exists.
   'cleanup_identity_mismatch',
   'cleanup_content_changed',
@@ -205,6 +211,14 @@ const RECOVERY: Partial<Record<string, string>> = {
     'The agent cannot clone VMs: update it to this release, or choose another agent. Nothing was created.',
   source_archive_invalid:
     'The source version’s archive is not what was registered, so nothing was cloned. Check the repository, and verify the source version.',
+  server_repository_unavailable:
+    'The EmuCat server has no SSH key or known_hosts file for its own repository connection. See the deployment guide, then choose Test Server Connection on the Repositories page.',
+  server_restarted:
+    'The server restarted while this ran, and could not finish it safely. Nothing was registered. It is safe to try again.',
+  transfer_staging_full:
+    'The server’s transfer staging area is full. Wait for other transfers to finish, or raise TRANSFER_MAX_STAGING_BYTES, and try again.',
+  transfer_busy:
+    'The server is running as many transfers as it allows. Wait for one to finish, and try again.',
   cleanup_identity_mismatch:
     'The master is registered and safe. The directory is no longer the one that was archived, so it was kept. Decide what to do with it yourself.',
   cleanup_content_changed:
@@ -418,13 +432,17 @@ const REMOTE_ROOT = /^\/(?:[^/\\\0]+(?:\/[^/\\\0]+)*\/?)?$/;
 
 export const REPOSITORY_PROVIDERS = ['sftp'] as const;
 
+const repositoryHostSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .regex(/^[A-Za-z0-9.:_-]+$/, 'Use a host name or address');
+const repositoryPortSchema = z.number().int().min(1).max(65535);
+
 export const repositoryConfigSchema = z.object({
-  host: z
-    .string()
-    .min(1)
-    .max(255)
-    .regex(/^[A-Za-z0-9.:_-]+$/, 'Use a host name or address'),
-  port: z.number().int().min(1).max(65535),
+  /** The address agents use. Each agent's own file says the same, and a health check compares them. */
+  host: repositoryHostSchema,
+  port: repositoryPortSchema,
   username: z
     .string()
     .min(1)
@@ -441,7 +459,16 @@ export type RepositoryConfig = z.infer<typeof repositoryConfigSchema>;
 
 /** Connection details and nothing else. A private key never travels through the server. */
 export const saveRepositoryRequestSchema = repositoryConfigSchema
-  .extend({ name: z.string().trim().min(1).max(128) })
+  .extend({
+    name: z.string().trim().min(1).max(128),
+    /**
+     * Where the EmuCat server itself reaches the same SSH server, when that differs from the agents' address
+     * (decision 0055): another interface, a VPN address or an internal DNS name. `null` or absent: the server uses
+     * `host` and `port` too. The username, remote root and repository identity are always the same.
+     */
+    serverHost: repositoryHostSchema.nullable().optional(),
+    serverPort: repositoryPortSchema.nullable().optional(),
+  })
   .strict();
 export type SaveRepositoryRequest = z.infer<typeof saveRepositoryRequestSchema>;
 
@@ -454,6 +481,12 @@ export const repositoryHealthResultPayloadSchema = z.object({
   configuration: repositoryConfigSchema.nullable(),
   hostKeyFingerprint: z.string().max(128).nullable(),
   freeBytes: safeSizeSchema.nullable(),
+  /**
+   * How the agent reached the repository for this check (decision 0055): directly over SFTP, or through the server's
+   * HTTPS relay. An agent configured for the relay only has no SFTP settings to compare, so `configuration` is then
+   * `null` and is not compared. Older agents do not say, and always connect directly.
+   */
+  transport: z.enum(['sftp', 'relay']).nullable().default(null),
 });
 export type RepositoryHealthResultPayload = z.infer<typeof repositoryHealthResultPayloadSchema>;
 
@@ -471,6 +504,8 @@ export const repositoryAgentSchema = z.object({
   errorMessage: z.string().nullable(),
   hostKeyFingerprint: z.string().nullable(),
   freeBytes: safeSizeSchema.nullable(),
+  /** How the agent reached the repository in its most recent check (decision 0055). Unknown for older agents. */
+  transport: z.enum(['sftp', 'relay']).nullable().default(null),
 });
 export type RepositoryAgent = z.infer<typeof repositoryAgentSchema>;
 
@@ -482,12 +517,25 @@ export const repositorySummarySchema = z.object({
   port: z.number().int(),
   username: z.string(),
   remoteRoot: z.string(),
+  /** The server's own address for this repository, when it differs from `host` (decision 0055). */
+  serverHost: z.string().nullable().default(null),
+  serverPort: z.number().int().nullable().default(null),
   enabled: z.boolean(),
   status: z.enum(REPOSITORY_STATUSES),
   lastSuccessfulCheckAt: timestampSchema.nullable(),
   agents: z.array(repositoryAgentSchema),
   /** Problems found by the most recent checks, as text for an administrator. */
   configurationErrors: z.array(z.string()),
+  /**
+   * The server's own connection to this repository (decision 0055): whether this server has a key for it at all,
+   * and the most recent Test Server Connection. Absent from older servers.
+   */
+  serverAccess: z
+    .object({
+      configured: z.boolean(),
+      lastTest: serverConnectionTestSchema.nullable(),
+    })
+    .default({ configured: false, lastTest: null }),
 });
 export type RepositorySummary = z.infer<typeof repositorySummarySchema>;
 
@@ -542,9 +590,14 @@ export type CreateRegistrationRequest = z.infer<typeof createRegistrationRequest
 
 export const registrationOperationSchema = z.object({
   id: z.uuid(),
-  agentId: z.uuid(),
-  agentName: z.string(),
+  /**
+   * The agent doing the work. `null` for work the server does itself with its own repository connection: a clone
+   * since decision 0055. `performedBy` says which.
+   */
+  agentId: z.uuid().nullable(),
+  agentName: z.string().nullable(),
   agentOnline: z.boolean(),
+  performedBy: z.enum(['agent', 'server']).default('agent'),
   repositoryId: z.uuid(),
   repositoryName: z.string(),
   emulatorType: emulatorTypeSchema,
@@ -562,7 +615,7 @@ export const registrationOperationSchema = z.object({
     doneBytes: safeSizeSchema.nullable(),
     totalBytes: safeSizeSchema.nullable(),
   }),
-  /** Filled in once the agent has reported what it verified. The server has not read the archive. */
+  /** Filled in once the archive was verified in the repository, by `archive.verifiedBy`. */
   archive: z
     .object({
       /** An EmuCat ZIP with its manifest, or a VirtualBox OVA, which has none. */
@@ -573,7 +626,8 @@ export const registrationOperationSchema = z.object({
       manifestSha256: sha256HexSchema.nullable(),
       fileCount: safeSizeSchema.nullable(),
       totalUncompressedBytes: safeSizeSchema.nullable(),
-      verifiedBy: z.literal('agent'),
+      /** Who read the stored archive back and checked it: the agent, or the server for its own work. */
+      verifiedBy: z.enum(['agent', 'server']),
     })
     .nullable(),
   /** The VirtualBox machine a `virtualbox` registration exports, by its UUID. */

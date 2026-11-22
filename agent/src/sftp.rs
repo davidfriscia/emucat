@@ -27,11 +27,14 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::config::RepositoryConfig;
+use crate::config::{RepositoryConfig, TransportMode};
 use crate::credentials::{Secret, load_repository_passphrase};
 use crate::packaging::hex;
 use crate::protocol::RepositoryConfigSummary;
 use crate::registration::RepositoryProvider;
+use crate::relay::{
+    FallbackArchiveRepository, HttpRelayArchiveRepository, RelayEndpoint, RelayTimeouts,
+};
 use crate::repository::{
     ArchiveRepository, CancelFlag, HealthReport, ObjectMetadata, ProgressFn, RepositoryError,
     RepositoryErrorKind as Kind, RepositoryKey, RepositoryResult, VerifiedObject,
@@ -871,6 +874,7 @@ impl ArchiveRepository for SftpArchiveRepository {
 pub struct ConfiguredRepositories {
     repositories: BTreeMap<Uuid, RepositoryConfig>,
     state_dir: PathBuf,
+    relay: Option<RelayEndpoint>,
 }
 
 impl ConfiguredRepositories {
@@ -878,7 +882,36 @@ impl ConfiguredRepositories {
         Self {
             repositories,
             state_dir,
+            relay: None,
         }
+    }
+
+    /// The server this agent is paired with, whose HTTPS relay can be used (decision 0055). Without it,
+    /// only SFTP is ever used.
+    pub fn with_relay(mut self, relay: RelayEndpoint) -> Self {
+        self.relay = Some(relay);
+        self
+    }
+
+    fn relay_for(
+        &self,
+        id: Uuid,
+        config: &RepositoryConfig,
+    ) -> RepositoryResult<HttpRelayArchiveRepository> {
+        let endpoint = self.relay.clone().ok_or_else(|| {
+            RepositoryError::new(
+                Kind::NotConfigured,
+                "This agent is not paired, so it has no server relay to use",
+            )
+        })?;
+        HttpRelayArchiveRepository::new(
+            endpoint,
+            id,
+            RelayTimeouts::from_transfer_timeout(
+                Duration::from_secs(config.connect_timeout_seconds),
+                Duration::from_secs(config.transfer_timeout_seconds),
+            ),
+        )
     }
 
     fn settings(&self, id: Uuid) -> RepositoryResult<SftpSettings> {
@@ -914,14 +947,33 @@ impl ConfiguredRepositories {
 
 impl RepositoryProvider for ConfiguredRepositories {
     fn open(&self, repository_id: Uuid) -> RepositoryResult<Arc<dyn ArchiveRepository>> {
-        Ok(Arc::new(SftpArchiveRepository::new(
-            self.settings(repository_id)?,
-        )?))
+        let config = self.repositories.get(&repository_id).ok_or_else(|| {
+            RepositoryError::new(
+                Kind::NotConfigured,
+                format!("This agent has no configuration for repository {repository_id}"),
+            )
+        })?;
+        if config.transport == TransportMode::Relay {
+            return Ok(Arc::new(self.relay_for(repository_id, config)?));
+        }
+        let sftp: Arc<dyn ArchiveRepository> =
+            Arc::new(SftpArchiveRepository::new(self.settings(repository_id)?)?);
+        if config.transport == TransportMode::Sftp || self.relay.is_none() {
+            return Ok(sftp);
+        }
+        let relay = Arc::new(self.relay_for(repository_id, config)?);
+        Ok(Arc::new(FallbackArchiveRepository::new(
+            repository_id,
+            sftp,
+            relay,
+        )))
     }
 
     fn summary(&self, repository_id: Uuid) -> Option<RepositoryConfigSummary> {
         self.repositories
             .get(&repository_id)
+            // A relay-only repository has no SFTP settings here to compare with the server's.
+            .filter(|config| config.transport.uses_sftp())
             .map(|config| RepositoryConfigSummary {
                 host: config.host.clone(),
                 port: config.port,

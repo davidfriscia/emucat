@@ -3,7 +3,8 @@ use std::fs;
 use std::path::Path;
 
 use emucat_agent::config::{
-    Config, ConfigError, LogFormat, SettingOverrides, Severity, default_config_path, validate,
+    Config, ConfigError, LogFormat, SettingOverrides, Severity, TransportMode, default_config_path,
+    validate,
 };
 use emucat_agent::connectivity::agent_ws_url;
 use emucat_agent::emulators::EmulatorType;
@@ -525,4 +526,43 @@ fn the_staging_directory_defaults_to_the_state_directory() {
             .effective_staging_dir()
             .is_none_or(|dir| dir.ends_with("staging"))
     );
+}
+
+#[test]
+fn a_repository_prefers_sftp_and_may_fall_back_to_the_relay_by_default() {
+    let config = parse_repository(VALID_REPOSITORY).unwrap();
+    let repository = &config.repositories[&REPOSITORY_ID.parse().unwrap()];
+    assert_eq!(repository.transport, TransportMode::Auto);
+    let body = format!("{VALID_REPOSITORY}\ntransport = \"sftp\"\n");
+    let config = parse_repository(&body).unwrap();
+    assert_eq!(
+        config.repositories[&REPOSITORY_ID.parse().unwrap()].transport,
+        TransportMode::Sftp
+    );
+    let body = format!("{VALID_REPOSITORY}\ntransport = \"https\"\n");
+    assert!(parse_repository(&body).is_err());
+}
+
+#[test]
+fn a_relay_only_repository_needs_no_sftp_settings_and_accepts_none() {
+    let config = parse_repository("transport = \"relay\"\n").unwrap();
+    let repository = &config.repositories[&REPOSITORY_ID.parse().unwrap()];
+    assert_eq!(repository.transport, TransportMode::Relay);
+    assert!(repository.host.is_empty());
+    // Nothing about a key is checked, since nothing here connects to the repository.
+    assert!(
+        validate(&config)
+            .iter()
+            .all(|issue| !issue.message.contains("private key")),
+    );
+    let body = format!("{VALID_REPOSITORY}\ntransport = \"relay\"\n");
+    let error = parse_repository(&body).unwrap_err();
+    assert!(error.to_string().contains("relay"), "{error}");
+}
+
+#[test]
+fn an_sftp_repository_still_needs_its_key() {
+    let body = VALID_REPOSITORY.replace(r"private_key_path = 'C:\keys\emucat'", "");
+    let error = parse_repository(&body).unwrap_err();
+    assert!(error.to_string().contains("private_key_path"), "{error}");
 }

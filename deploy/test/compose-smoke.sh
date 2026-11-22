@@ -71,9 +71,11 @@ until docker exec "$db_container" healthcheck.sh --connect --innodb_initialized 
 sed "s/CHANGE_ME/$app_password/" "$repo/deploy/sql/bootstrap.sql" |
   docker exec -i "$db_container" mariadb -uroot "-p$root_password"
 
-# The installed layout, in miniature: EMUCAT_ROOT/config, EMUCAT_ROOT/data/media and EMUCAT_ROOT/data/notes.
+# The installed layout, in miniature: EMUCAT_ROOT/config, EMUCAT_ROOT/data/media, EMUCAT_ROOT/data/notes,
+# EMUCAT_ROOT/data/transfers and EMUCAT_ROOT/config/repository-ssh (empty: no server repository key).
 root=$work/opt/emucat
-mkdir -p "$root/config" "$root/data/media" "$root/data/notes" "$work/socket"
+mkdir -p "$root/config" "$root/config/repository-ssh" "$root/data/media" "$root/data/notes" \
+  "$root/data/transfers" "$work/socket"
 printf 'smoke-test-deployer-token-0123456789abcdef\n' >"$root/config/deployer.token"
 setup_token=smoke-setup-token-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 cat >"$root/config/app.env" <<EOF
@@ -89,7 +91,10 @@ EOF
 
 http_port=$((40000 + RANDOM % 10000))
 export EMUCAT_PROJECT=$project EMUCAT_RELEASE=smoke-$id EMUCAT_ENVIRONMENT=smoke
-export EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR EMUCAT_SOCKET_DIR EMUCAT_DEPLOYER_TOKEN_FILE
+export EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR EMUCAT_SOCKET_DIR EMUCAT_DEPLOYER_TOKEN_FILE \
+  EMUCAT_TRANSFERS_DIR EMUCAT_REPOSITORY_SSH_DIR
+EMUCAT_TRANSFERS_DIR=$(host_path "$root/data/transfers")
+EMUCAT_REPOSITORY_SSH_DIR=$(host_path "$root/config/repository-ssh")
 EMUCAT_APP_ENV_FILE=$(host_path "$root/config/app.env")
 EMUCAT_MEDIA_DIR=$(host_path "$root/data/media")
 EMUCAT_NOTES_DIR=$(host_path "$root/data/notes")
@@ -101,7 +106,7 @@ export EMUCAT_SOCKET_GID=990 EMUCAT_APP_UID=1000 EMUCAT_APP_GID=1000
 export EMUCAT_HTTP_PORT=$http_port EMUCAT_BIND_ADDRESS=127.0.0.1
 # Test-only networks, so as not to collide with a real installation on this machine.
 export EMUCAT_EDGE_SUBNET=172.31.243.0/24 EMUCAT_INTERNAL_SUBNET=172.31.244.0/24
-export EMUCAT_DATABASE_SUBNET=172.31.245.0/24
+export EMUCAT_DATABASE_SUBNET=172.31.245.0/24 EMUCAT_REPOSITORY_SUBNET=172.31.246.0/24
 compose() { docker compose --file "$repo/deploy/compose.yaml" "$@"; }
 COMPOSE_READY=1
 
@@ -130,7 +135,8 @@ check "no EACCES reading the migrations" lacks "$migrate$migrate_again" 'EACCES'
 check "a second migration run is a no-op (retrying is safe)" has "$migrate_again" 'Database is up to date'
 check "the migration container runs as 1000:1000" \
   test "$(compose run --rm --no-deps -T api sh -c 'echo $(id -u):$(id -g)' 2>/dev/null | tr -d '\r')" = 1000:1000
-for variable in EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR EMUCAT_DEPLOYER_TOKEN_FILE; do
+for variable in EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR EMUCAT_DEPLOYER_TOKEN_FILE \
+  EMUCAT_TRANSFERS_DIR EMUCAT_REPOSITORY_SSH_DIR; do
   check "Compose has no default for $variable (no fallback outside EMUCAT_ROOT)" bash -c \
     "! env -u $variable docker compose --file '$repo/deploy/compose.yaml' config --quiet 2>/dev/null"
 done
@@ -171,9 +177,9 @@ check "no container is privileged" test "$(inspect "$api" '{{.HostConfig.Privile
 check "all capabilities dropped" has "$(inspect "$api" '{{.HostConfig.CapDrop}}')" 'ALL'
 mounts=$(inspect "$api" '{{range .Mounts}}{{.Destination}}:{{.RW}} {{end}}')
 check "no Docker socket in the API" bash -c "! grep -q docker.sock <<<'$mounts'"
-check "API mounts only media, notes, the socket directory and its token, the last two read-only" \
+check "API mounts only media, notes, transfers, the socket directory, the repository SSH directory and the token" \
   test "$(tr ' ' '\n' <<<"$mounts" | grep -v '^$' | sort | tr '\n' ' ')" = \
-  "/data/notes:true /data/storage:true /run/emucat-deployer:false /run/secrets/deployer_token:false "
+  "/data/notes:true /data/storage:true /data/transfers:true /run/emucat-deployer:false /run/secrets/deployer_token:false /run/secrets/repository-ssh:false "
 check "the API port is not published" test -z "$(inspect "$api" '{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}{{$p}}{{end}}{{end}}')"
 check "the ingress is bound to the configured address only" \
   has "$(docker port "$web")" "127.0.0.1:$http_port"

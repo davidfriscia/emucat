@@ -24,6 +24,13 @@ import type { RemoteSessionOptions, WorkspaceCoordinator } from '../workspaces/c
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
 import { registerAdminCloneRoutes } from './admin-clones.js';
+import { registerAdminArchiveRoutes } from './admin-archives.js';
+import { registerAgentRepositoryRelayRoutes } from './agent-repository-relay.js';
+import type { ArchiveInspection } from '../archives/inspection.js';
+import type { ServerCloneRunner } from '../clones/server-runner.js';
+import type { RepositoryAccess } from '../repository-access/ssh.js';
+import type { TransferPolicy } from '../transfers/policy.js';
+import type { TransferService } from '../transfers/service.js';
 import { registerAdminNotesRoutes } from './admin-notes.js';
 import { CloneCoordinator } from '../clones/coordinator.js';
 import type { NotesStorage } from '../notes/storage.js';
@@ -68,6 +75,19 @@ export interface BrowserDependencies {
   versionDeletions?: Partial<VersionDeletionOptions>;
   /** Version reporting and the deployment service. Defaults to none configured. */
   deployment?: DeploymentDependencies;
+  /** The server's own repository connection (decision 0055). Without it, nothing the server does itself works. */
+  repositoryAccess?: RepositoryAccess;
+  /** The relay's and server-side clones' staging (decision 0055). */
+  transfers?: TransferPolicy;
+}
+
+/** What the server does in repositories itself (decision 0055). */
+export interface RepositoryServices {
+  access: RepositoryAccess;
+  transfers: TransferService;
+  inspection: ArchiveInspection;
+  clones: ServerCloneRunner;
+  chunkBytes: number;
 }
 
 export async function registerBrowserRoutes(
@@ -86,6 +106,7 @@ export async function registerBrowserRoutes(
     remasters?: RemasterCoordinator;
   },
   authenticateAgent: AgentAuthenticator,
+  repositories: RepositoryServices,
 ): Promise<void> {
   await api.register(cookie);
   api.decorateRequest('authSession', null);
@@ -105,7 +126,14 @@ export async function registerBrowserRoutes(
   );
   registerAgentPairingRoutes(api, dependencies);
   registerAdminAgentRoutes(api, dependencies, hub);
-  registerAdminRegistrationRoutes(api, dependencies, hub, registrations);
+  registerAdminRegistrationRoutes(api, dependencies, hub, registrations, repositories.access);
+  registerAgentRepositoryRelayRoutes(
+    api,
+    repositories.transfers,
+    authenticateAgent,
+    repositories.chunkBytes,
+  );
+  registerAdminArchiveRoutes(api, dependencies, repositories.inspection);
   registerAdminRestoreRoutes(api, dependencies, restores);
   registerAdminExecutionRoutes(api, dependencies, execution, captures);
   registerAdminVersionRoutes(
@@ -120,21 +148,7 @@ export async function registerBrowserRoutes(
   registerAdminCloneRoutes(
     api,
     dependencies,
-    new CloneCoordinator(
-      dependencies.pool,
-      {
-        isOnline: (agentId) => hub.isOnline(agentId),
-        isRegistrationCapable: (agentId) => hub.isRegistrationCapable(agentId),
-        isSnapshotCapable: (agentId) => hub.isSnapshotCapable(agentId),
-        isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
-        isCloneCapable: (agentId) => hub.isCloneCapable(agentId),
-        activeConnectionId: (agentId) => hub.activeConnectionId(agentId),
-        latestDiscovery: (agentId) => hub.discovery.get(agentId),
-        send: (agentId, message) => hub.sendToAgent(agentId, message),
-      },
-      registrations,
-      api.log,
-    ),
+    new CloneCoordinator(dependencies.pool, repositories.clones, registrations, api.log),
   );
   registerAdminNotesRoutes(api, dependencies);
   registerAdminSystemRoutes(api, dependencies);

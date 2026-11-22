@@ -6,3 +6,7 @@ packages:
 allowBuilds:
   esbuild: true
   sharp: true
+  # ssh2 (server-side repository access, decision 0055) runs in pure JavaScript: its optional native crypto addon
+  # and the CPU feature probe it uses are never built, so the API image needs no compiler.
+  ssh2: false
+  cpu-features: false

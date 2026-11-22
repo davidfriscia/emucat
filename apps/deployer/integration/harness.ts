@@ -64,6 +64,8 @@ export function createHost(): Host {
   const fake = join(configDir, 'fake');
   const media = join(root, 'data/media');
   const notes = join(root, 'data/notes');
+  const transfers = join(root, 'data/transfers');
+  const repositorySsh = join(configDir, 'repository-ssh');
   const backups = join(root, 'backups');
   const socketDir = join(dir, 'run');
   const remote = join(dir, 'remote.git');
@@ -73,6 +75,8 @@ export function createHost(): Host {
     fake,
     media,
     notes,
+    transfers,
+    repositorySsh,
     backups,
     socketDir,
     join(root, 'state/operations'),

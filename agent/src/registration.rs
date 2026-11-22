@@ -1792,17 +1792,26 @@ impl Inner {
         let inner = Arc::clone(self);
         tokio::spawn(async move {
             let configuration = inner.config.repositories.summary(request.repository_id);
+            // With `auto`, the first operation decides the transport, so it is read after the check.
             let checked = async {
-                let repository = inner.config.repositories.open(request.repository_id)?;
-                repository.health_check(&inner.stopping).await
+                match inner.config.repositories.open(request.repository_id) {
+                    Ok(repository) => {
+                        let report = repository.health_check(&inner.stopping).await;
+                        (report, Some(repository.transport()))
+                    }
+                    Err(error) => (Err(error), None),
+                }
             };
-            let outcome = tokio::time::timeout(HEALTH_CHECK_TIMEOUT, checked)
+            let (outcome, transport) = tokio::time::timeout(HEALTH_CHECK_TIMEOUT, checked)
                 .await
                 .unwrap_or_else(|_| {
-                    Err(RepositoryError::new(
-                        RepositoryErrorKind::Unreachable,
-                        "The health check took too long",
-                    ))
+                    (
+                        Err(RepositoryError::new(
+                            RepositoryErrorKind::Unreachable,
+                            "The health check took too long",
+                        )),
+                        None,
+                    )
                 });
             let result = match outcome {
                 Ok(report) => RepositoryHealthResult {
@@ -1814,6 +1823,7 @@ impl Inner {
                     configuration,
                     host_key_fingerprint: report.host_key_fingerprint,
                     free_bytes: report.free_bytes,
+                    transport,
                 },
                 Err(error) => RepositoryHealthResult {
                     operation_id: request.operation_id,
@@ -1824,6 +1834,7 @@ impl Inner {
                     configuration,
                     host_key_fingerprint: None,
                     free_bytes: None,
+                    transport,
                 },
             };
             inner.send(Message::AgentRepositoryHealthResult(result));

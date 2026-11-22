@@ -14,6 +14,7 @@
 //! - [`archives`]: version and snapshot domain rules, archive exclusions.
 //! - [`repository`]: the provider-independent archive store interface, and safe object keys.
 //! - [`sftp`]: the archive store over SSH and SFTP, with mandatory host-key verification.
+//! - [`relay`]: the same store through the server's HTTPS relay, and the SFTP-first fallback to it.
 //! - [`packaging`]: builds a standalone ZIP and its manifest, without changing the source.
 //! - [`zip_directory`]: reads a ZIP's central directory as written, which is what duplicates hide in.
 //! - [`extraction`]: takes an archive apart safely, and puts the result in place without replacing.
@@ -65,6 +66,7 @@ pub mod process;
 pub mod protocol;
 pub mod qmp;
 pub mod registration;
+pub mod relay;
 pub mod removal;
 pub mod repository;
 pub mod restore;

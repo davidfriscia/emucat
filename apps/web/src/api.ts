@@ -1,4 +1,13 @@
 import {
+  archiveListingResponseSchema,
+  archiveSummarySchema,
+  serverConnectionTestSchema,
+  type ArchiveListingResponse,
+  type ArchiveSummary,
+  type ArchiveView,
+  type ServerConnectionTest,
+} from '@emucat/contracts';
+import {
   cloneOptionsResponseSchema,
   vmNotesSchema,
   type CloneOptionsResponse,
@@ -678,6 +687,49 @@ export function checkRepository(repositoryId: string, agentId: string): Promise<
     `${repositoryAgentPath(repositoryId, agentId)}/health-check`,
     repositorySummarySchema,
     { method: 'POST' },
+  );
+}
+
+/**
+ * The server's own connection to a repository, checked step by step (decision 0055). The result names no key and no
+ * server path.
+ */
+export function testServerConnection(repositoryId: string): Promise<ServerConnectionTest> {
+  return requestJson(
+    `/admin/repositories/${encodeURIComponent(repositoryId)}/server-test`,
+    serverConnectionTestSchema,
+    { method: 'POST' },
+  );
+}
+
+// View Archive Contents (decision 0055). Read-only, over the server's own repository connection.
+
+const archivePath = (vm: VmIdentity, versionId: string) =>
+  `${relative(adminVmApiPath(vm))}/versions/${encodeURIComponent(versionId)}/archive`;
+
+export function fetchArchiveSummary(
+  vm: VmIdentity,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<ArchiveSummary> {
+  return requestJson(archivePath(vm, versionId), archiveSummarySchema, { signal });
+}
+
+export function fetchArchiveEntries(
+  vm: VmIdentity,
+  versionId: string,
+  query: { view: ArchiveView; path?: string; q?: string; offset?: number; limit?: number },
+  signal?: AbortSignal,
+): Promise<ArchiveListingResponse> {
+  const params = new URLSearchParams({ view: query.view });
+  if (query.q) params.set('q', query.q);
+  else if (query.path) params.set('path', query.path);
+  if (query.offset) params.set('offset', String(query.offset));
+  if (query.limit) params.set('limit', String(query.limit));
+  return requestJson(
+    `${archivePath(vm, versionId)}/entries?${params.toString()}`,
+    archiveListingResponseSchema,
+    { signal },
   );
 }
 

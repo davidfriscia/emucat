@@ -416,7 +416,8 @@
           "remoteRoot": "/repo"
         },
         "hostKeyFingerprint": "SHA256:abc",
-        "freeBytes": 1048576
+        "freeBytes": 1048576,
+        "transport": "sftp"
       }
     }
   ],

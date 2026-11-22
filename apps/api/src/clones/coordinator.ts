@@ -3,8 +3,6 @@ import {
   CLONE_REFUSAL_TEXT,
   archiveObjectKey,
   vmNameKey,
-  type CloneAgentOption,
-  type CloneAgentRefusal,
   type CloneOptionsResponse,
   type CloneVersionRefusal,
   type CloneVmRequest,
@@ -15,10 +13,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { lockUsableVersion, NOT_DELETED } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
-import type { AgentLink, RegistrationCoordinator } from '../registration/coordinator.js';
+import type { RegistrationCoordinator } from '../registration/coordinator.js';
+import type { ServerCloneRunner } from './server-runner.js';
 
-const refuse = (code: CloneAgentRefusal | CloneVersionRefusal) =>
-  new ApiError(409, code, CLONE_REFUSAL_TEXT[code]);
+const refuse = (code: CloneVersionRefusal) => new ApiError(409, code, CLONE_REFUSAL_TEXT[code]);
 
 function isDuplicateEntry(error: unknown): boolean {
   return (error as { code?: string }).code === 'ER_DUP_ENTRY';
@@ -44,24 +42,16 @@ interface SourceVersion {
   deleted: boolean;
 }
 
-/** One agent's other work, of any kind. An agent runs one operation at a time. */
-const AGENT_BUSY_SQL = `
-  SELECT 1 FROM restore_operations WHERE agent_id = ? AND active_marker = 1
-  UNION ALL SELECT 1 FROM vm_verifications WHERE agent_id = ? AND active_marker = 1
-  UNION ALL SELECT 1 FROM registration_operations WHERE agent_id = ? AND active_marker = 1
-  UNION ALL SELECT 1 FROM local_copy_removals WHERE agent_id = ? AND active_marker = 1
-  UNION ALL SELECT 1 FROM virtualbox_operations WHERE agent_id = ? AND active_marker = 1`;
-
 /**
  * Cloning one version of a VM into a new, independent VM (decision 0052). This only validates, reserves and
- * dispatches: the clone is a registration operation (`mode = 'clone'`) of the new VM, so the registration
- * coordinator receives the agent's reports and commits it, and its history, cancellation and recovery are those of
- * every registration. Nothing about the source is changed, locked for longer than the request, or deleted.
+ * queues: the clone is a registration operation (`mode = 'clone'`) of the new VM with no agent, performed by the
+ * server itself (decision 0055, {@link ServerCloneRunner}) and committed by the registration coordinator, so its
+ * history, cancellation and recovery are those of every registration. Nothing about the source is changed, locked for longer than the request, or deleted.
  */
 export class CloneCoordinator {
   constructor(
     private readonly pool: Pool,
-    private readonly link: AgentLink,
+    private readonly runner: ServerCloneRunner,
     private readonly registrations: RegistrationCoordinator,
     private readonly log: FastifyBaseLogger,
   ) {}
@@ -117,31 +107,7 @@ export class CloneCoordinator {
       if (remasters.length > 0) refusal = 'remaster_in_progress';
     }
 
-    // Only agents that may use this version's repository: no other could ever read the archive.
-    const [rows] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT a.id, a.name, a.revoked_at,
-              (SELECT COUNT(*) FROM restore_operations AS o WHERE o.agent_id = a.id AND o.active_marker = 1)
-            + (SELECT COUNT(*) FROM vm_verifications AS o WHERE o.agent_id = a.id AND o.active_marker = 1)
-            + (SELECT COUNT(*) FROM registration_operations AS o WHERE o.agent_id = a.id AND o.active_marker = 1)
-            + (SELECT COUNT(*) FROM local_copy_removals AS o WHERE o.agent_id = a.id AND o.active_marker = 1)
-            + (SELECT COUNT(*) FROM virtualbox_operations AS o WHERE o.agent_id = a.id AND o.active_marker = 1)
-              AS busy
-       FROM agent_repositories AS ar
-       JOIN agents AS a ON a.id = ar.agent_id
-       WHERE ar.repository_id = ? AND a.paired_at IS NOT NULL
-       ORDER BY a.name, a.id`,
-      [source.repositoryId],
-    );
-    const agents: CloneAgentOption[] = rows.map((row) => {
-      const agentId = row.id as string;
-      const online = this.link.isOnline(agentId);
-      let reason: CloneAgentRefusal | null = null;
-      if (row.revoked_at) reason = 'agent_revoked';
-      else if (!online) reason = 'agent_offline';
-      else if (!this.capable(agentId)) reason = 'agent_cannot_clone';
-      else if (Number(row.busy) > 0) reason = 'agent_busy';
-      return { agentId, agentName: row.name as string, online, eligible: reason === null, reason };
-    });
+    if (refusal === null && !this.runner.configured) refusal = 'server_repository_unavailable';
     return {
       source: {
         emulatorType: vm.emulatorType,
@@ -153,14 +119,9 @@ export class CloneCoordinator {
         archiveSizeBytes: source.archiveSizeBytes,
       },
       refusal,
-      agents,
+      performedBy: 'server',
+      agents: [],
     };
-  }
-
-  private capable(agentId: string): boolean {
-    return (
-      this.link.isRegistrationCapable(agentId) && (this.link.isCloneCapable?.(agentId) ?? false)
-    );
   }
 
   /**
@@ -176,13 +137,11 @@ export class CloneCoordinator {
     const repeated = await this.byRequest(input.requestId);
     if (repeated) return this.sameRequest(repeated, vm, versionId, input);
 
-    const { agentId } = input;
     const target = input.vmName;
     if (vmNameKey(target) === vmNameKey(vm.vmName)) {
       throw new ApiError(409, 'vm_already_registered', 'A clone needs a name of its own.');
     }
-    if (!this.link.isOnline(agentId)) throw refuse('agent_offline');
-    if (!this.capable(agentId)) throw refuse('agent_cannot_clone');
+    if (!this.runner.configured) throw refuse('server_repository_unavailable');
 
     const operationId = randomUUID();
     const newVersionId = randomUUID();
@@ -198,29 +157,6 @@ export class CloneCoordinator {
       const source = await this.sourceVersion(connection, vm, versionId, true);
       if (source.deleted) throw refuse('version_deleted');
       if (!source.repositoryEnabled) throw refuse('repository_disabled');
-
-      // Shared, as a registration's: a restore or launch takes it exclusively, so none starts alongside.
-      const [agents] = await connection.execute<RowDataPacket[]>(
-        'SELECT revoked_at, paired_at FROM agents WHERE id = ? LOCK IN SHARE MODE',
-        [agentId],
-      );
-      if (!agents[0] || !agents[0].paired_at) {
-        throw new ApiError(404, 'agent_not_found', 'Agent not found');
-      }
-      if (agents[0].revoked_at) throw refuse('agent_revoked');
-      const [authorized] = await connection.execute<RowDataPacket[]>(
-        'SELECT 1 FROM agent_repositories WHERE agent_id = ? AND repository_id = ?',
-        [agentId, source.repositoryId],
-      );
-      if (authorized.length === 0) throw refuse('repository_not_authorized');
-      const [busy] = await connection.execute<RowDataPacket[]>(AGENT_BUSY_SQL, [
-        agentId,
-        agentId,
-        agentId,
-        agentId,
-        agentId,
-      ]);
-      if (busy.length > 0) throw refuse('agent_busy');
 
       // The destination: no VM of this emulator with this name, ignoring case as the collation does, and no
       // operation creating one. The unique active-VM key on the operation makes the second guarantee hold for
@@ -244,10 +180,9 @@ export class CloneCoordinator {
               version_id, archive_key, clone_source_vm_name, clone_source_version_id,
               clone_source_archive_key, clone_source_archive_sha256, clone_source_archive_size_bytes,
               clone_source_manifest_sha256)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'clone', ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, NULL, ?, ?, ?, ?, ?, 'clone', ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             operationId,
-            agentId,
             source.repositoryId,
             userId,
             input.requestId,
@@ -276,7 +211,6 @@ export class CloneCoordinator {
               'A VM with this name is being created right now.',
             );
           }
-          throw refuse('agent_busy');
         }
         throw error;
       }
@@ -293,12 +227,9 @@ export class CloneCoordinator {
       connection.release();
     }
 
-    this.log.info(
-      { operationId, source: vm.vmName, versionId, target, agentId },
-      'Clone requested',
-    );
-    // If this cannot be delivered, the operation stays queued and goes out when the agent reconnects.
-    await this.registrations.dispatchOperation(agentId, operationId);
+    this.log.info({ operationId, source: vm.vmName, versionId, target }, 'Clone requested');
+    // Queued in the database first: a restart before it runs starts it then.
+    this.runner.enqueue(operationId);
     return this.require(operationId);
   }
 
@@ -319,7 +250,6 @@ export class CloneCoordinator {
   ): Promise<RegistrationOperation> {
     if (
       row.mode !== 'clone' ||
-      row.agent_id !== input.agentId ||
       row.emulator_type !== vm.emulatorType ||
       row.clone_source_version_id !== versionId ||
       vmNameKey(row.clone_source_vm_name as string) !== vmNameKey(vm.vmName) ||

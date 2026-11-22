@@ -43,6 +43,9 @@ pub struct EmulatorConfig {
 /// them. It names where a private key is, and never holds one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryConfig {
+    /// How the repository is reached (decision 0055). With `relay` the SFTP settings are not needed
+    /// and are empty.
+    pub transport: TransportMode,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -54,6 +57,25 @@ pub struct RepositoryConfig {
     pub transfer_timeout_seconds: u64,
     pub connect_retries: u32,
     pub upload_attempts: u32,
+}
+
+/// How an agent reaches a repository (decision 0055).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportMode {
+    /// Its own SFTP connection, and the server's HTTPS relay only when that cannot reach the repository.
+    #[default]
+    Auto,
+    /// Its own SFTP connection only.
+    Sftp,
+    /// The server's HTTPS relay only. Nothing here connects to the repository.
+    Relay,
+}
+
+impl TransportMode {
+    pub fn uses_sftp(self) -> bool {
+        self != Self::Relay
+    }
 }
 
 /// How screenshots are synchronized. The defaults are deliberately gentle.
@@ -274,13 +296,19 @@ struct StorageSection {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepositorySection {
+    #[serde(default = "default_repository_kind")]
     kind: String,
+    #[serde(default)]
+    transport: TransportMode,
+    #[serde(default)]
     host: String,
     #[serde(default = "default_ssh_port")]
     port: u16,
+    #[serde(default)]
     username: String,
+    #[serde(default)]
     remote_root: String,
-    private_key_path: PathBuf,
+    private_key_path: Option<PathBuf>,
     #[serde(default)]
     host_key_fingerprints: Vec<String>,
     known_hosts_path: Option<PathBuf>,
@@ -294,6 +322,9 @@ struct RepositorySection {
     upload_attempts: u32,
 }
 
+fn default_repository_kind() -> String {
+    "sftp".to_owned()
+}
 const fn default_ssh_port() -> u16 {
     22
 }
@@ -327,9 +358,51 @@ fn resolve_repositories(
                 section.kind
             )));
         }
+        if section.upload_attempts == 0 || section.transfer_timeout_seconds == 0 {
+            return Err(invalid(format!(
+                "{id}: upload_attempts and transfer_timeout_seconds must be at least 1"
+            )));
+        }
+        if section.transport == TransportMode::Relay {
+            // Nothing here connects to the repository, so nothing about the connection is accepted:
+            // a half-filled SFTP section would only suggest otherwise.
+            if !section.host.is_empty()
+                || !section.username.is_empty()
+                || !section.remote_root.is_empty()
+                || section.private_key_path.is_some()
+                || !section.host_key_fingerprints.is_empty()
+                || section.known_hosts_path.is_some()
+            {
+                return Err(invalid(format!(
+                    "{id}: transport = \"relay\" uses the server's own connection. Remove host, \
+                     username, remote_root, private_key_path and host keys, or use \"auto\""
+                )));
+            }
+            repositories.insert(
+                uuid,
+                RepositoryConfig {
+                    transport: TransportMode::Relay,
+                    host: String::new(),
+                    port: section.port,
+                    username: String::new(),
+                    remote_root: String::new(),
+                    private_key_path: PathBuf::new(),
+                    host_key_fingerprints: Vec::new(),
+                    known_hosts_path: None,
+                    connect_timeout_seconds: section.connect_timeout_seconds,
+                    transfer_timeout_seconds: section.transfer_timeout_seconds,
+                    connect_retries: section.connect_retries,
+                    upload_attempts: section.upload_attempts,
+                },
+            );
+            continue;
+        }
         if section.host.is_empty() || section.username.is_empty() {
             return Err(invalid(format!("{id}: host and username are required")));
         }
+        let Some(private_key_path) = section.private_key_path else {
+            return Err(invalid(format!("{id}: private_key_path is required")));
+        };
         if section.remote_root.is_empty()
             || section.remote_root.contains('\\')
             || section
@@ -356,19 +429,15 @@ fn resolve_repositories(
                 "{id}: host_key_fingerprints must look like SHA256:…, as ssh-keygen -lf prints them"
             )));
         }
-        if section.upload_attempts == 0 || section.transfer_timeout_seconds == 0 {
-            return Err(invalid(format!(
-                "{id}: upload_attempts and transfer_timeout_seconds must be at least 1"
-            )));
-        }
         repositories.insert(
             uuid,
             RepositoryConfig {
+                transport: section.transport,
                 host: section.host,
                 port: section.port,
                 username: section.username,
                 remote_root: section.remote_root,
-                private_key_path: section.private_key_path,
+                private_key_path,
                 host_key_fingerprints: section.host_key_fingerprints,
                 known_hosts_path: section.known_hosts_path,
                 connect_timeout_seconds: section.connect_timeout_seconds,
@@ -896,7 +965,11 @@ pub fn validate(config: &Config) -> Vec<ValidationIssue> {
         }
     }
 
-    for (id, repository) in &config.repositories {
+    for (id, repository) in config
+        .repositories
+        .iter()
+        .filter(|(_, repository)| repository.transport.uses_sftp())
+    {
         if !repository.private_key_path.is_absolute() {
             error(format!(
                 "repository {id}: private_key_path must be absolute"

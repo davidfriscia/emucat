@@ -70,8 +70,6 @@ const ETAG_EMPTY = `"${'0'.repeat(64)}"`;
 const ETAG_ONE = `"${'1'.repeat(64)}"`;
 const ETAG_TWO = `"${'2'.repeat(64)}"`;
 const MASTER = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e9010';
-const AGENT = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e9001';
-const OTHER_AGENT = '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e9002';
 const SHA = 'a'.repeat(64);
 
 function notes(markdown: string, etag = ETAG_ONE): VmNotes {
@@ -430,16 +428,8 @@ describe('cloning a version', () => {
         archiveSizeBytes: 2048,
       },
       refusal: null,
-      agents: [
-        {
-          agentId: OTHER_AGENT,
-          agentName: 'Old PC',
-          online: true,
-          eligible: false,
-          reason: 'agent_cannot_clone',
-        },
-        { agentId: AGENT, agentName: 'Study PC', online: true, eligible: true, reason: null },
-      ],
+      performedBy: 'server',
+      agents: [],
       ...overrides,
     };
   }
@@ -481,12 +471,11 @@ describe('cloning a version', () => {
     expect(within(dialog).getByText(/Windows 98 SE/)).toBeTruthy();
     expect(within(dialog).getByText(/Master: Master/)).toBeTruthy();
     expect(within(dialog).getByText(/new, independent qemu VM/)).toBeTruthy();
-    expect(await within(dialog).findByRole('combobox')).toBeTruthy();
-    // The eligible agent is chosen; the other says why it cannot.
-    expect((within(dialog).getByRole('combobox') as HTMLSelectElement).value).toBe(AGENT);
+    // The server makes the clone: there is no agent to choose (decision 0055).
     expect(
-      within(dialog).getByRole('option', { name: /Old PC — The agent is too old/ }),
+      await within(dialog).findByText(/The EmuCat server makes the clone itself/),
     ).toBeTruthy();
+    expect(within(dialog).queryByRole('combobox')).toBeNull();
 
     const name = within(dialog).getByRole('textbox', { name: 'New VM name' });
     const submit = within(dialog).getByRole('button', { name: 'Clone VM' }) as HTMLButtonElement;
@@ -509,11 +498,12 @@ describe('cloning a version', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     const [post] = api.callsTo('POST', `${VM_PATH}/versions/${MASTER}/clone`);
-    expect(post?.body).toMatchObject({ agentId: AGENT, vmName: 'Win98 - Office' });
+    expect(post?.body).toMatchObject({ vmName: 'Win98 - Office' });
+    expect(post?.body).not.toHaveProperty('agentId');
     expect((post?.body as { requestId: string }).requestId).toMatch(/^[0-9a-f-]{36}$/);
     const status = await screen.findByText(/Clone Win98 - Office/);
     expect(status.closest('[role="status"]')?.textContent).toMatch(
-      /Downloading and writing the clone \(25%\)/,
+      /The server is downloading the source and writing the clone \(25%\)/,
     );
     const link = await screen.findByRole(
       'link',
@@ -533,7 +523,8 @@ describe('cloning a version', () => {
       ),
     });
     const dialog = await openDialog();
-    await within(dialog).findByRole('combobox');
+    await within(dialog).findByText(/The EmuCat server makes the clone itself/);
+    await waitFor(() => expect(within(dialog).queryByText('Checking the source')).toBeNull());
     fireEvent.change(within(dialog).getByRole('textbox', { name: 'New VM name' }), {
       target: { value: 'copy' },
     });
@@ -556,6 +547,17 @@ describe('cloning a version', () => {
     expect(
       (within(dialog).getByRole('button', { name: 'Clone VM' }) as HTMLButtonElement).disabled,
     ).toBe(true);
+  });
+
+  it('says when the server has no repository connection of its own', async () => {
+    page({
+      [`GET ${VM_PATH}/versions/${MASTER}/clone-options`]: options({
+        refusal: 'server_repository_unavailable',
+      }),
+    });
+    const dialog = await openDialog();
+    expect(await within(dialog).findByText(/no connection of its own/)).toBeTruthy();
+    expect(within(dialog).getByText(/Test Server Connection/)).toBeTruthy();
   });
 
   it('shows where a clone came from, with a link while the source exists and text once it is gone', async () => {

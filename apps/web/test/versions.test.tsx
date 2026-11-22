@@ -1175,3 +1175,121 @@ describe('version tags', () => {
     expect(within(drawn).getByRole('list', { name: 'Tags of Master' }).textContent).toBe('#gold');
   });
 });
+
+describe('view archive contents', () => {
+  const ARCHIVE = `${VM_PATH}/versions/${MASTER}/archive`;
+  function summary() {
+    return {
+      vm: { emulatorType: 'qemu', vmName: 'Win98', title: 'Windows 98 SE' },
+      version: {
+        id: MASTER,
+        kind: 'master',
+        snapshotName: null,
+        title: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      archive: {
+        format: 'zip',
+        fileName: `${MASTER}.zip`,
+        repositoryName: 'NAS',
+        sizeBytes: 4096,
+        sha256: SHA,
+      },
+      complete: true,
+      manifest: {
+        manifestVersion: 1,
+        vmName: 'Win98',
+        fileCount: 2,
+        directoryCount: 1,
+        totalUncompressedBytes: 3000,
+        sha256: SHA,
+        matchesRegistration: true,
+      },
+      physical: {
+        entryCount: 4,
+        fileCount: 3,
+        directoryCount: 1,
+        compressedBytes: 2000,
+        uncompressedBytes: 3100,
+      },
+      views: ['logical', 'physical'],
+      warnings: [],
+    };
+  }
+  const entry = (path: string, type: 'file' | 'directory', extra = {}) => ({
+    name: path.split('/').at(-1),
+    path,
+    type,
+    sizeBytes: type === 'file' ? 1000 : null,
+    compressedSizeBytes: null,
+    method: null,
+    sha256: type === 'file' ? SHA : null,
+    modifiedAt: null,
+    childCount: type === 'directory' ? 1 : null,
+    ...extra,
+  });
+  const listing = (call: { query: URLSearchParams }) => {
+    const view = call.query.get('view');
+    const path = call.query.get('path') ?? '';
+    const q = call.query.get('q');
+    const entries =
+      view === 'physical'
+        ? [entry('.emucat-manifest.json', 'file', { method: 'deflated', compressedSizeBytes: 90 })]
+        : q
+          ? [entry('disks/hdd0.img', 'file')]
+          : path === 'disks'
+            ? [entry('disks/hdd0.img', 'file')]
+            : [entry('disks', 'directory'), entry('vm.cfg', 'file')];
+    return { view, path, q, entries, total: entries.length, nextOffset: null };
+  };
+
+  it('summarizes the archive and browses it one directory at a time, read-only', async () => {
+    const api = base({
+      [`GET ${ARCHIVE}`]: summary(),
+      [`GET ${ARCHIVE}/entries`]: listing,
+    });
+    const tree = await history();
+    fireEvent.click(
+      within(tree).getAllByRole('button', { name: /View the archive contents of Master/ })[0]!,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'Archive contents' });
+    expect(await within(dialog).findByText(`${MASTER}.zip`)).toBeTruthy();
+    expect(within(dialog).getByText(/complete archive/)).toBeTruthy();
+    expect(within(dialog).getByText(/verified when this version was registered/)).toBeTruthy();
+    expect(await within(dialog).findByText('vm.cfg')).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open directory disks' }));
+    expect(await within(dialog).findByText('hdd0.img')).toBeTruthy();
+    const crumbs = within(within(dialog).getByRole('navigation', { name: 'Archive path' }));
+    expect(crumbs.getByText('disks').getAttribute('aria-current')).toBe('location');
+    expect(api.calls.some((call) => call.query.get('path') === 'disks')).toBe(true);
+
+    fireEvent.change(within(dialog).getByRole('searchbox', { name: 'Search paths' }), {
+      target: { value: 'hdd' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Search' }));
+    expect(await within(dialog).findByText('disks/hdd0.img')).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Stored entries' }));
+    expect(await within(dialog).findByText('.emucat-manifest.json')).toBeTruthy();
+    expect(within(dialog).getByText('deflated')).toBeTruthy();
+    // Nothing but reads.
+    expect(api.calls.every((call) => call.method === 'GET')).toBe(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('explains why an archive cannot be listed', async () => {
+    base({
+      [`GET ${ARCHIVE}`]: apiError(503, 'server_repository_unavailable', 'unavailable'),
+    });
+    const tree = await history();
+    fireEvent.click(
+      within(tree).getAllByRole('button', { name: /View the archive contents of Master/ })[0]!,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'Archive contents' });
+    expect((await within(dialog).findByRole('alert')).textContent).toMatch(
+      /no connection of its own/,
+    );
+  });
+});

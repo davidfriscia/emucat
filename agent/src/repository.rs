@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -201,6 +202,24 @@ pub struct VerifiedObject {
     pub sha256: String,
 }
 
+/// How an agent reaches a repository (decision 0055): with its own SFTP connection, or through the
+/// server's HTTPS relay, which then uses the server's own SFTP connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepositoryTransport {
+    Sftp,
+    Relay,
+}
+
+impl RepositoryTransport {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sftp => "sftp",
+            Self::Relay => "relay",
+        }
+    }
+}
+
 /// What a health check established. Each field was tested, not assumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthReport {
@@ -268,4 +287,9 @@ pub trait ArchiveRepository: Send + Sync {
 
     /// Removes an object. An object that does not exist is not an error.
     fn delete<'a>(&'a self, key: &'a RepositoryKey) -> BoxFuture<'a, RepositoryResult<()>>;
+
+    /// How this store is being reached. A store that chooses decides with its first operation.
+    fn transport(&self) -> RepositoryTransport {
+        RepositoryTransport::Sftp
+    }
 }

@@ -5,7 +5,7 @@ use std::time::Duration;
 use clap::Parser;
 use emucat_agent::archive_cache::ArchiveCache;
 use emucat_agent::cli::{Cli, Command, Overrides, print_info};
-use emucat_agent::config::{Config, ConfigError, Severity, process_env, validate};
+use emucat_agent::config::{Config, ConfigError, Severity, TransportMode, process_env, validate};
 use emucat_agent::connectivity::{self, ConnectionEnd, ConnectionSettings, check_transport};
 use emucat_agent::credentials::{self, CredentialStore, Secret};
 use emucat_agent::discovery::{self, ScanLimits};
@@ -16,6 +16,7 @@ use emucat_agent::pairing::{self, PairingRequest};
 use emucat_agent::platform::{Architecture, Platform};
 use emucat_agent::protocol::AgentHello;
 use emucat_agent::registration::{AgentOperations, OperationsConfig, RepositoryProvider};
+use emucat_agent::relay::RelayEndpoint;
 use emucat_agent::repository::CancelFlag;
 use emucat_agent::sftp::ConfiguredRepositories;
 use emucat_agent::virtualbox::VirtualBoxLimits;
@@ -171,6 +172,8 @@ fn run(cli: &Cli) -> Result<(), String> {
         &config.api_url,
         stored.credential.clone(),
     )?);
+    // The relay (decision 0055) is the paired server's, with the same credential.
+    let relay = RelayEndpoint::new(&config.api_url, stored.credential.clone());
     let mut settings = ConnectionSettings::new(
         &config.api_url,
         stored.credential,
@@ -199,7 +202,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         })?;
         settings.media = Some(Arc::clone(&media));
         // Loading resumes interrupted work, which needs the runtime.
-        let operations = operations(&config, agent_id, &settings, Arc::clone(&media))?;
+        let operations = operations(&config, agent_id, &settings, Arc::clone(&media), relay)?;
         operations.set_capture_uploader(capture_api);
         settings.operations = Some(operations);
         let watcher = tokio::spawn(Arc::clone(&media).run());
@@ -222,6 +225,7 @@ fn operations(
     agent_id: Uuid,
     settings: &ConnectionSettings,
     media: Arc<MediaSync>,
+    relay: RelayEndpoint,
 ) -> Result<Arc<AgentOperations>, String> {
     let state_dir = config
         .state_dir
@@ -236,10 +240,10 @@ fn operations(
     AgentOperations::load(OperationsConfig {
         agent_id,
         restore,
-        repositories: Arc::new(ConfiguredRepositories::new(
-            config.repositories.clone(),
-            state_dir.clone(),
-        )),
+        repositories: Arc::new(
+            ConfiguredRepositories::new(config.repositories.clone(), state_dir.clone())
+                .with_relay(relay),
+        ),
         state_dir,
         staging_dir,
         emulators: Arc::clone(&settings.emulators),
@@ -292,20 +296,44 @@ fn repository_check(cli: &Cli, repository_id: Uuid) -> Result<(), String> {
         .state_dir
         .clone()
         .ok_or("no state directory is configured and no default is known")?;
-    let repositories = ConfiguredRepositories::new(config.repositories.clone(), state_dir);
-    let summary = repositories
-        .summary(repository_id)
+    let repository_config = config
+        .repositories
+        .get(&repository_id)
         .ok_or_else(|| format!("this agent has no configuration for repository {repository_id}"))?;
-    println!(
-        "Testing {}@{}:{} with remote root {}",
-        summary.username, summary.host, summary.port, summary.remote_root
-    );
+    let mut repositories = ConfiguredRepositories::new(config.repositories.clone(), state_dir);
+    // The relay needs this agent's credential, and only for the server it belongs to.
+    let stored = credential_store(&config)
+        .ok()
+        .and_then(|store| store.load().ok().flatten())
+        .filter(|stored| stored.belongs_to(&config.api_url));
+    if let Some(stored) = stored {
+        repositories =
+            repositories.with_relay(RelayEndpoint::new(&config.api_url, stored.credential));
+    } else if repository_config.transport == TransportMode::Relay {
+        return Err(
+            "this repository uses the server relay, and this agent is not paired with the configured \
+             server. Run `emucat-agent pair` first"
+                .to_owned(),
+        );
+    }
+    match repositories.summary(repository_id) {
+        Some(summary) => println!(
+            "Testing {}@{}:{} with remote root {} (transport: {:?})",
+            summary.username,
+            summary.host,
+            summary.port,
+            summary.remote_root,
+            repository_config.transport
+        ),
+        None => println!("Testing through the server relay at {}", config.api_url),
+    }
     let repository = repositories
         .open(repository_id)
         .map_err(|error| error.message)?;
     let report = runtime()?
         .block_on(repository.health_check(&CancelFlag::new()))
         .map_err(|error| format!("{}: {}", error.kind.code(), error.message))?;
+    println!("Transport used: {}", repository.transport().as_str());
     println!("Connection and authentication: ok");
     println!(
         "Host key: trusted ({})",
@@ -550,6 +578,7 @@ fn import_ova(
             ),
         );
     }
+    let relay = RelayEndpoint::new(&config.api_url, stored.credential.clone());
     let api = match HttpImportApi::new(&config.api_url, stored.credential) {
         Ok(api) => api,
         Err(error) => return fail(Kind::Configuration, "invalid_configuration", error),
@@ -560,10 +589,9 @@ fn import_ova(
         state_dir: state_dir.clone(),
         server_origin: stored.server_origin.clone(),
         api: Arc::new(api),
-        repositories: Arc::new(ConfiguredRepositories::new(
-            config.repositories.clone(),
-            state_dir,
-        )),
+        repositories: Arc::new(
+            ConfiguredRepositories::new(config.repositories.clone(), state_dir).with_relay(relay),
+        ),
         reporter: terminal.reporter(),
         retry_delay: Duration::from_secs(5),
     };

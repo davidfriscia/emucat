@@ -101,6 +101,7 @@ load_config() {
   : "${EMUCAT_EDGE_SUBNET:=172.31.253.0/24}"
   : "${EMUCAT_INTERNAL_SUBNET:=172.31.254.0/24}"
   : "${EMUCAT_DATABASE_SUBNET:=172.31.252.0/24}"
+  : "${EMUCAT_REPOSITORY_SUBNET:=172.31.251.0/24}"
   : "${EMUCAT_API_MEMORY_LIMIT:=1g}"
   : "${EMUCAT_ADMIN_UPDATES_ENABLED:=false}"
   : "${EMUCAT_VERIFY:=true}"
@@ -146,11 +147,25 @@ load_config() {
   [[ $host == *:* ]] && host="[$host]"
   readonly INGRESS="http://$host:$EMUCAT_HTTP_PORT"
 
-  # Everything Compose substitutes into compose.yaml. The three file and directory paths are derived.
+  # The server's own repository connection (decision 0055): passed to the API only for the files that exist, as
+  # paths inside the container. A key without known_hosts is still passed, so that the API refuses it visibly
+  # rather than connecting without host-key checks.
+  EMUCAT_REPOSITORY_SSH_KEY=
+  EMUCAT_REPOSITORY_SSH_KNOWN_HOSTS=
+  EMUCAT_REPOSITORY_SSH_PASSPHRASE=
+  if [[ -e $EMUCAT_REPOSITORY_SSH_DIR/$REPOSITORY_SSH_KEY_NAME ]]; then
+    EMUCAT_REPOSITORY_SSH_KEY=$REPOSITORY_SSH_MOUNT/$REPOSITORY_SSH_KEY_NAME
+    EMUCAT_REPOSITORY_SSH_KNOWN_HOSTS=$REPOSITORY_SSH_MOUNT/known_hosts
+    [[ ! -e $EMUCAT_REPOSITORY_SSH_DIR/passphrase ]] ||
+      EMUCAT_REPOSITORY_SSH_PASSPHRASE=$REPOSITORY_SSH_MOUNT/passphrase
+  fi
+
+  # Everything Compose substitutes into compose.yaml. The file and directory paths are derived.
   export EMUCAT_PROJECT EMUCAT_ENVIRONMENT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR \
     EMUCAT_SOCKET_DIR EMUCAT_SOCKET_GID EMUCAT_APP_UID EMUCAT_APP_GID EMUCAT_BIND_ADDRESS EMUCAT_HTTP_PORT \
     EMUCAT_TRUSTED_PROXIES EMUCAT_DB_HOST_GATEWAY EMUCAT_EDGE_SUBNET EMUCAT_INTERNAL_SUBNET EMUCAT_DATABASE_SUBNET \
-    EMUCAT_API_MEMORY_LIMIT
+    EMUCAT_API_MEMORY_LIMIT EMUCAT_TRANSFERS_DIR EMUCAT_REPOSITORY_SSH_DIR EMUCAT_REPOSITORY_SSH_KEY \
+    EMUCAT_REPOSITORY_SSH_KNOWN_HOSTS EMUCAT_REPOSITORY_SSH_PASSPHRASE EMUCAT_REPOSITORY_SUBNET
 }
 
 # The one place that says where things live. Nothing persistent is outside EMUCAT_ROOT.
@@ -161,6 +176,8 @@ load_config() {
 #   state/       current release, operations and their logs, the lock, build exports, the account's home
 #   data/media/  screenshots and other media, owned by the API container's UID
 #   data/notes/  per-VM Markdown notes, owned by the API container's UID
+#   data/transfers/  repository transfer and clone staging (decision 0055), owned by the API container's UID
+#   config/repository-ssh/  the server's own repository key and known_hosts, owned by the API container's UID
 #   backups/     database dumps
 layout_paths() {
   readonly TOOLING=$EMUCAT_ROOT/tooling
@@ -180,6 +197,10 @@ layout_paths() {
   readonly EMUCAT_DEPLOYER_TOKEN_FILE=$CONFIG_DIR/deployer.token
   readonly EMUCAT_MEDIA_DIR=$DATA_DIR/media
   readonly EMUCAT_NOTES_DIR=$DATA_DIR/notes
+  readonly EMUCAT_TRANSFERS_DIR=$DATA_DIR/transfers
+  readonly EMUCAT_REPOSITORY_SSH_DIR=$CONFIG_DIR/repository-ssh
+  readonly REPOSITORY_SSH_MOUNT=/run/secrets/repository-ssh
+  readonly REPOSITORY_SSH_KEY_NAME=id_ed25519
 }
 
 load_app_database() {
@@ -650,6 +671,10 @@ cmd_update() {
   [[ -d $EMUCAT_MEDIA_DIR ]] || fail configuration_invalid "The media directory does not exist"
   [[ -d $EMUCAT_NOTES_DIR && ! -L $EMUCAT_NOTES_DIR ]] ||
     fail configuration_invalid "The notes directory $EMUCAT_NOTES_DIR does not exist; run emucatctl install from this release"
+  [[ -d $EMUCAT_TRANSFERS_DIR && ! -L $EMUCAT_TRANSFERS_DIR ]] ||
+    fail configuration_invalid "The transfer staging directory $EMUCAT_TRANSFERS_DIR does not exist; run emucatctl install from this release"
+  [[ -d $EMUCAT_REPOSITORY_SSH_DIR && ! -L $EMUCAT_REPOSITORY_SSH_DIR ]] ||
+    fail configuration_invalid "The directory $EMUCAT_REPOSITORY_SSH_DIR does not exist; run emucatctl install from this release"
   [[ -n $EMUCAT_SOCKET_GID ]] || fail configuration_invalid "The socket group $EMUCAT_SOCKET_GROUP does not exist"
   [[ -n $EMUCAT_APP_UID && -n $EMUCAT_APP_GID ]] ||
     fail configuration_invalid "The application account $EMUCAT_APP_USER:$EMUCAT_APP_GROUP does not exist"
@@ -943,6 +968,19 @@ cmd_check() {
   check_item "notes directory $EMUCAT_NOTES_DIR" test -d "$EMUCAT_NOTES_DIR" -a ! -L "$EMUCAT_NOTES_DIR"
   check_item "notes directory owned by $EMUCAT_APP_USER:$EMUCAT_APP_GROUP ($EMUCAT_APP_UID:$EMUCAT_APP_GID)" \
     test "$(stat -c %u:%g -- "$EMUCAT_NOTES_DIR" 2>/dev/null)" = "$EMUCAT_APP_UID:$EMUCAT_APP_GID"
+  check_item "transfer staging directory $EMUCAT_TRANSFERS_DIR" test -d "$EMUCAT_TRANSFERS_DIR" -a ! -L "$EMUCAT_TRANSFERS_DIR"
+  check_item "transfer staging directory owned by $EMUCAT_APP_USER:$EMUCAT_APP_GROUP" \
+    test "$(stat -c %u:%g -- "$EMUCAT_TRANSFERS_DIR" 2>/dev/null)" = "$EMUCAT_APP_UID:$EMUCAT_APP_GID"
+  check_item "repository SSH directory $EMUCAT_REPOSITORY_SSH_DIR, owned by $EMUCAT_APP_USER and closed to others" \
+    owned_with_mode "$EMUCAT_REPOSITORY_SSH_DIR" "$EMUCAT_APP_UID" 711
+  if [[ -e $EMUCAT_REPOSITORY_SSH_DIR/$REPOSITORY_SSH_KEY_NAME ]]; then
+    check_item "repository key $REPOSITORY_SSH_KEY_NAME is readable by $EMUCAT_APP_USER only" \
+      owned_with_mode "$EMUCAT_REPOSITORY_SSH_DIR/$REPOSITORY_SSH_KEY_NAME" "$EMUCAT_APP_UID" 600
+    check_item "repository known_hosts exists (host keys are always verified)" \
+      test -s "$EMUCAT_REPOSITORY_SSH_DIR/known_hosts"
+  else
+    say "  - no server repository key: clones, View Archive Contents and the relay are unavailable (optional)"
+  fi
   check_item "$EMUCAT_APP_USER is not a member of $EMUCAT_SOCKET_GROUP on the host (only the container is)" \
     not_in_group "$EMUCAT_APP_USER" "$EMUCAT_SOCKET_GROUP"
   check_item "deployment service socket" test -S "$EMUCAT_SOCKET_DIR/deployer.sock"
@@ -1039,6 +1077,20 @@ create_layout() {
     else
       warn "$EMUCAT_NOTES_DIR holds files but is not owned by $media_owner; fix it by hand (see docs/deployment.md)"
     fi
+  fi
+  # Transfer and clone staging (decision 0055): the same rules. Only the API writes in it.
+  [[ ! -L $EMUCAT_TRANSFERS_DIR ]] || abort "$EMUCAT_TRANSFERS_DIR must be a directory, not a link"
+  if [[ ! -d $EMUCAT_TRANSFERS_DIR ]]; then
+    install -d -o "$EMUCAT_APP_USER" -g "$EMUCAT_APP_GROUP" -m 0750 "$EMUCAT_TRANSFERS_DIR"
+  elif [[ $(stat -c %u:%g -- "$EMUCAT_TRANSFERS_DIR") != "$EMUCAT_APP_UID:$EMUCAT_APP_GID" ]]; then
+    warn "$EMUCAT_TRANSFERS_DIR is not owned by $media_owner; fix it by hand (see docs/deployment.md)"
+  fi
+  # The server's repository key lives here, readable by the application account only. 0711: others may reach a
+  # file by its name, as emucatctl does to see whether a key exists, and list nothing. The key is never created
+  # or changed here: an administrator puts it in place (docs/deployment.md).
+  [[ ! -L $EMUCAT_REPOSITORY_SSH_DIR ]] || abort "$EMUCAT_REPOSITORY_SSH_DIR must be a directory, not a link"
+  if [[ ! -d $EMUCAT_REPOSITORY_SSH_DIR ]]; then
+    install -d -o "$EMUCAT_APP_USER" -g "$EMUCAT_APP_GROUP" -m 0711 "$EMUCAT_REPOSITORY_SSH_DIR"
   fi
 }
 

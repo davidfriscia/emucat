@@ -32,10 +32,15 @@ import {
   getRepository,
   isAgentAssociated,
   listRepositories,
+  recordServerCheck,
+  repositoryRecord,
   updateRepository,
   type RepositoryPresence,
 } from '../registration/repositories.js';
 import type { BrowserDependencies } from './browser.js';
+import type { RepositoryAccess } from '../repository-access/ssh.js';
+import { testServerConnection } from '../repository-access/test-connection.js';
+import type { ServerConnectionTest } from '@emucat/contracts';
 
 /**
  * Registering VMs and administering repositories. None of these routes ever accepts or returns archive
@@ -46,13 +51,17 @@ export function registerAdminRegistrationRoutes(
   dependencies: BrowserDependencies,
   hub: AgentHub,
   registrations: RegistrationCoordinator,
+  access: RepositoryAccess,
 ): void {
   const { pool, session, cookie, publicOrigin } = dependencies;
   const presence: RepositoryPresence = {
     isOnline: (agentId) => hub.isOnline(agentId),
     isHealthCheckRunning: (repositoryId, agentId) =>
       registrations.isHealthCheckRunning(repositoryId, agentId),
+    serverAccessConfigured: access.configured,
   };
+  /** One test per repository at a time: a second request waits for the same result. */
+  const serverTests = new Map<string, Promise<ServerConnectionTest>>();
 
   void parent.register(
     async (api) => {
@@ -185,6 +194,30 @@ export function registerAdminRegistrationRoutes(
           >;
           await dissociateAgent(pool, repositoryId, agentId);
           return getRepository(pool, repositoryId, presence);
+        },
+      );
+
+      api.post(
+        '/repositories/:repositoryId/server-test',
+        { schema: { params: repositoryPathParamsSchema } },
+        async (request): Promise<ServerConnectionTest> => {
+          const { repositoryId } = request.params as z.infer<typeof repositoryPathParamsSchema>;
+          const running = serverTests.get(repositoryId);
+          if (running) return running;
+          const record = await repositoryRecord(pool, repositoryId);
+          if (!record) throw new ApiError(404, 'repository_not_found', 'Repository not found');
+          const test = testServerConnection(access, record.endpoint)
+            .then(async (result) => {
+              await recordServerCheck(pool, repositoryId, result);
+              request.log.info(
+                { repositoryId, ok: result.ok, code: result.error?.code ?? null },
+                'Server repository connection tested',
+              );
+              return result;
+            })
+            .finally(() => serverTests.delete(repositoryId));
+          serverTests.set(repositoryId, test);
+          return test;
         },
       );
 

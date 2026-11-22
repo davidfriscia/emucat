@@ -7,12 +7,18 @@ import { vmNameSchema } from './vm-name.js';
  * Cloning a VM from one of its versions (decision 0052). A clone is a new, independent catalog VM: its own
  * identity, its own master, its own archive under its own key, and none of the source's history, screenshots, tags,
  * notes, publication or agent state. What it keeps of the source is a provenance record, which is information only.
+ *
+ * Since decision 0055 the EmuCat server makes the clone itself, over its own connection to the repository: no agent
+ * takes part, needs to be online, or needs a copy of the source.
  */
 
 /** What an administrator asks for. Nothing here can name a path, a repository or an archive. */
 export const cloneVmRequestSchema = z.strictObject({
-  /** The agent that downloads the source archive and publishes the clone's. */
-  agentId: z.uuid(),
+  /**
+   * Accepted from browsers of the previous release and ignored: the server makes every new clone itself
+   * (decision 0055).
+   */
+  agentId: z.uuid().optional(),
   /** The new VM's name, under the same emulator. The VM name rules apply, and it must be free, ignoring case. */
   vmName: vmNameSchema,
   /** Chosen by the browser, so that a repeated request finds the clone it already started. */
@@ -35,6 +41,7 @@ export const CLONE_VERSION_REFUSALS = [
   'version_deleted',
   'repository_disabled',
   'remaster_in_progress',
+  'server_repository_unavailable',
 ] as const;
 export type CloneVersionRefusal = (typeof CLONE_VERSION_REFUSALS)[number];
 
@@ -48,6 +55,8 @@ export const CLONE_REFUSAL_TEXT: Record<CloneAgentRefusal | CloneVersionRefusal,
   version_deleted: 'This version is deleted or being deleted, so it cannot be cloned.',
   repository_disabled: 'The repository that holds this version is disabled.',
   remaster_in_progress: 'A remaster of this VM is running. Wait for it to finish.',
+  server_repository_unavailable:
+    'The EmuCat server has no connection of its own to this repository, so it cannot make the clone. Set one up (see the deployment guide), then choose Test Server Connection on the Repositories page.',
 };
 
 export const cloneAgentOptionSchema = z.object({
@@ -59,7 +68,7 @@ export const cloneAgentOptionSchema = z.object({
 });
 export type CloneAgentOption = z.infer<typeof cloneAgentOptionSchema>;
 
-/** What the clone dialog needs: the source, whether it can be cloned, and who can do it. */
+/** What the clone dialog needs: the source, and whether the server can clone it now. */
 export const cloneOptionsResponseSchema = z.object({
   source: z.object({
     emulatorType: emulatorTypeSchema,
@@ -72,7 +81,10 @@ export const cloneOptionsResponseSchema = z.object({
   }),
   /** `null` when the version can be cloned. */
   refusal: z.enum(CLONE_VERSION_REFUSALS).nullable(),
-  agents: z.array(cloneAgentOptionSchema),
+  /** Who makes the clone: always the server since decision 0055. */
+  performedBy: z.literal('server').default('server'),
+  /** Kept for browsers of the previous release; always empty. */
+  agents: z.array(cloneAgentOptionSchema).default([]),
 });
 export type CloneOptionsResponse = z.infer<typeof cloneOptionsResponseSchema>;
 

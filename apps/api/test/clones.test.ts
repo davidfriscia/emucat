@@ -1,7 +1,11 @@
 /**
- * Cloning a version into a new, independent VM (decision 0052): the request, the agent's command, the commit, and
- * what the clone does and does not share with its source.
+ * Cloning a version into a new, independent VM (decisions 0052 and 0055): the request, the server's own work in the
+ * repository, the commit, and what the clone does and does not share with its source. The server does everything
+ * itself over its own SFTP connection; no agent takes part.
  */
+import { existsSync, readdirSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   adminVmDetailSchema,
@@ -12,120 +16,43 @@ import {
 } from '@emucat/contracts';
 import type { RowDataPacket } from 'mysql2/promise';
 import { afterEach, describe, expect, it } from 'vitest';
-import { envelope, waitFor } from './agent-helpers.js';
+import { inspectZip } from '../src/archives/manifest.js';
+import { waitFor } from './agent-helpers.js';
 import { insertMedia, insertVm, TestClient } from './browser-app.js';
-import {
-  barrier,
-  closeWorlds,
-  errorCode,
-  resync,
-  SHA,
-  MANIFEST_SHA,
-  world,
-  type World,
-} from './version-world.js';
+import { closeServers, serverWorld, type ServerWorld } from './server-world.js';
+import { closeWorlds, errorCode, world, type World } from './version-world.js';
+import { buildTar, sha256, vmZip } from './zip-builder.js';
 
-afterEach(closeWorlds);
+afterEach(async () => {
+  await closeWorlds();
+  await closeServers();
+});
+
+const FILES = {
+  'disk.qcow2': Buffer.alloc(150_000, 3),
+  'vm.json': Buffer.from('{"memory":64}'),
+  'firmware/bios.bin': Buffer.from([0x55, 0xaa]),
+};
 
 function cloneRequest(
   w: World,
   versionId: string,
   vmName: string,
   overrides: object = {},
-  source = 'Win98',
+  source = 'Win95',
   emulatorType = 'qemu',
 ) {
   return w.admin.request({
     method: 'POST',
     url: `/admin/vms/${emulatorType}/${encodeURIComponent(source)}/versions/${versionId}/clone`,
-    payload: { agentId: w.paired.agentId, vmName, requestId: randomUUID(), ...overrides },
+    payload: { vmName, requestId: randomUUID(), ...overrides },
   });
 }
 
-async function clone(
-  w: World,
-  versionId: string,
-  vmName: string,
-  overrides: object = {},
-): Promise<RegistrationOperation> {
+async function clone(w: World, versionId: string, vmName: string, overrides: object = {}) {
   const response = await cloneRequest(w, versionId, vmName, overrides);
   expect(response.statusCode, response.body).toBe(202);
   return registrationOperationSchema.parse(response.json());
-}
-
-const NEW_SHA = 'c'.repeat(64);
-const NEW_MANIFEST = 'd'.repeat(64);
-
-function zipResult(operation: RegistrationOperation) {
-  return {
-    operationId: operation.id,
-    versionId: operation.versionId,
-    archiveKey: operation.archiveKey,
-    archiveSizeBytes: 4096,
-    archiveSha256: NEW_SHA,
-    manifestVersion: 1,
-    manifestSha256: NEW_MANIFEST,
-    fileCount: 4,
-    totalUncompressedBytes: 8192,
-  };
-}
-
-/** The agent's side: the command, progress, the result, the committed answer, the cleanup report, closed. */
-async function completeClone(w: World, operation: RegistrationOperation) {
-  const request = await w.agent.next('server.clone_request');
-  expect(request.payload.operationId).toBe(operation.id);
-  w.agent.send(
-    envelope('agent.registration_progress', {
-      operationId: operation.id,
-      stage: 'archiving',
-      doneBytes: 10,
-      totalBytes: 2048,
-    }),
-  );
-  w.agent.send(envelope('agent.registration_result', zipResult(operation)));
-  const ack = await w.agent.next('server.registration_ack');
-  expect(ack.payload).toEqual({
-    operationId: operation.id,
-    outcome: 'committed',
-    versionId: operation.versionId,
-    removeLocal: false,
-  });
-  w.agent.send(
-    envelope('agent.registration_cleanup', {
-      operationId: operation.id,
-      versionId: operation.versionId,
-      localCopy: 'preserved',
-      code: null,
-      message: null,
-    }),
-  );
-  expect((await w.agent.next('server.registration_ack')).payload.outcome).toBe('closed');
-  return request;
-}
-
-async function rows(w: World, sql: string, values: unknown[] = []): Promise<RowDataPacket[]> {
-  const [result] = await w.context.pool.execute<RowDataPacket[]>(sql, values as string[]);
-  return result;
-}
-
-async function insertSnapshot(w: World, parentId: string, title: string | null = null) {
-  const id = randomUUID();
-  await w.context.pool.execute(
-    `INSERT INTO vm_versions
-       (id, emulator_type, vm_name, kind, parent_version_id, snapshot_name, title, repository_id,
-        archive_key, archive_sha256, archive_size_bytes, created_by_agent_id)
-     VALUES (?, 'qemu', 'Win98', 'snapshot', ?, 'Win98_202601311530', ?, ?, ?, ?, 3072, ?)`,
-    [
-      id,
-      parentId,
-      title,
-      w.repository.id,
-      archiveObjectKey({ emulatorType: 'qemu', vmName: 'Win98' }, id),
-      'e'.repeat(64),
-      w.paired.agentId,
-    ],
-  );
-  return id;
 }
 
 async function operationRow(w: World, operationId: string): Promise<RegistrationOperation> {
@@ -134,9 +61,69 @@ async function operationRow(w: World, operationId: string): Promise<Registration
   return registrationOperationSchema.parse(response.json());
 }
 
-describe('cloning a version', () => {
-  it('clones the master into a new, private, independent VM with its own archive', async () => {
-    const w = await world();
+async function finished(w: World, operationId: string): Promise<RegistrationOperation> {
+  return waitFor(
+    async () => {
+      const operation = await operationRow(w, operationId);
+      return ['succeeded', 'failed', 'cancelled'].includes(operation.state) ? operation : null;
+    },
+    'the clone to finish',
+    20_000,
+  );
+}
+
+async function rows(w: World, sql: string, values: unknown[] = []): Promise<RowDataPacket[]> {
+  const [result] = await w.context.pool.execute<RowDataPacket[]>(sql, values as string[]);
+  return result;
+}
+
+/** A world whose Win95 master is a real archive in the repository, registered with its manifest. */
+const WIN95 = { emulatorType: 'qemu' as const, vmName: 'Win95' };
+
+async function archivedWorld(options: Parameters<typeof serverWorld>[0] = {}) {
+  const base = await serverWorld(options);
+  await insertVm(base.context.pool, { vmName: 'Win95' });
+  const { zip, manifestSha256 } = vmZip('qemu', 'Win95', FILES);
+  const { id, key } = await base.insertVersion(zip, { vm: WIN95 });
+  const w: ServerWorld = { ...base, masterId: id };
+  await w.context.pool.execute(
+    `INSERT INTO registration_operations
+       (id, agent_id, repository_id, emulator_type, vm_name, mode, state, version_id, archive_key,
+        archive_size_bytes, archive_sha256, manifest_version, manifest_sha256, committed_at, finished_at,
+        local_copy)
+     VALUES (?, ?, ?, 'qemu', 'Win95', 'copy', 'succeeded', ?, ?, ?, ?, 1, ?, UTC_TIMESTAMP(3),
+       UTC_TIMESTAMP(3), 'preserved')`,
+    [
+      randomUUID(),
+      w.paired.agentId,
+      w.repository.id,
+      id,
+      key,
+      zip.length,
+      sha256(zip),
+      manifestSha256,
+    ],
+  );
+  return { w, zip, manifestSha256, key };
+}
+
+async function insertSnapshot(w: ServerWorld, parentId: string, title: string | null = null) {
+  const { id } = await w.insertVersion(
+    vmZip('qemu', 'Win95', { ...FILES, 'office.txt': Buffer.from('installed') }).zip,
+    {
+      vm: WIN95,
+      kind: 'snapshot',
+      parentVersionId: parentId,
+      snapshotName: 'Win95_202601311530',
+      title,
+    },
+  );
+  return id;
+}
+
+describe('cloning a version on the server', () => {
+  it('clones the master into a new, private, independent VM with its own archive, with no agent', async () => {
+    const { w } = await archivedWorld();
     // What the source has that a clone must never inherit.
     const tagId = randomUUID();
     await w.context.pool.execute(
@@ -144,115 +131,95 @@ describe('cloning a version', () => {
       [tagId],
     );
     await w.context.pool.execute(
-      "INSERT INTO vm_tags (emulator_type, vm_name, tag_id) VALUES ('qemu', 'Win98', ?)",
+      "INSERT INTO vm_tags (emulator_type, vm_name, tag_id) VALUES ('qemu', 'Win95', ?)",
       [tagId],
     );
     await w.context.pool.execute(
-      "UPDATE virtual_machines SET display_name = 'Windows 98', description = 'Source notes' WHERE vm_name = 'Win98'",
+      "UPDATE virtual_machines SET display_name = 'Windows 98', description = 'Source notes' WHERE vm_name = 'Win95'",
     );
-    await insertMedia(w.context, { vmName: 'Win98' }, { isMain: true });
-    const notes = await w.admin.get('/admin/vms/qemu/Win98/notes');
-    const saved = await w.admin.request({
-      method: 'PUT',
-      url: '/admin/vms/qemu/Win98/notes',
-      headers: { 'if-match': notes.json<{ etag: string }>().etag },
-      payload: { markdown: '# Source only' },
-    });
-    expect(saved.statusCode, saved.body).toBe(200);
+    await insertMedia(w.context, { vmName: 'Win95' }, { isMain: true });
 
-    const operation = await clone(w, w.masterId, 'Win98 - Office');
+    const operation = await clone(w, w.masterId, 'Win95 - Office');
     expect(operation).toMatchObject({
       mode: 'clone',
-      state: 'queued',
       emulatorType: 'qemu',
-      vmName: 'Win98 - Office',
-      cloneSource: { vmName: 'Win98', versionId: w.masterId },
+      vmName: 'Win95 - Office',
+      agentId: null,
+      agentName: null,
+      performedBy: 'server',
+      cloneSource: { vmName: 'Win95', versionId: w.masterId },
     });
-    expect(operation.versionId).not.toBe(w.masterId);
     expect(operation.archiveKey).toBe(
-      archiveObjectKey({ emulatorType: 'qemu', vmName: 'Win98 - Office' }, operation.versionId),
+      archiveObjectKey({ emulatorType: 'qemu', vmName: 'Win95 - Office' }, operation.versionId),
     );
 
-    const request = await completeClone(w, operation);
-    expect(request.payload).toEqual({
-      operationId: operation.id,
-      emulatorType: 'qemu',
-      repositoryId: w.repository.id,
-      source: {
-        vmName: 'Win98',
-        versionId: w.masterId,
-        archiveKey: archiveObjectKey({ emulatorType: 'qemu', vmName: 'Win98' }, w.masterId),
-        archiveSizeBytes: 2048,
-        archiveSha256: SHA,
-        manifestSha256: null,
-      },
-      target: {
-        vmName: 'Win98 - Office',
-        versionId: operation.versionId,
-        archiveKey: operation.archiveKey,
-      },
-    });
+    const done = await finished(w, operation.id);
+    expect(done.error).toBeNull();
+    expect(done).toMatchObject({ state: 'succeeded', localCopy: 'preserved' });
+    expect(done.archive).toMatchObject({ format: 'zip', verifiedBy: 'server', fileCount: 3 });
 
-    const finished = await operationRow(w, operation.id);
-    expect(finished.state).toBe('succeeded');
-    expect(finished.localCopy).toBe('preserved');
+    // The new archive: a complete VM archive whose manifest names the new VM, with the same files.
+    const stored = await readFile(join(w.sftp.root, operation.archiveKey));
+    expect(sha256(stored)).toBe(done.archive?.sha256);
+    const inspected = await inspectZip(
+      {
+        sizeBytes: stored.length,
+        read: async (offset, length) => stored.subarray(offset, offset + length),
+      },
+      {
+        emulatorType: 'qemu',
+        vmName: 'Win95 - Office',
+        manifestSha256: done.archive?.manifestSha256 ?? null,
+      },
+    );
+    expect(inspected.manifest.entries.map((entry) => entry.path)).toEqual([
+      'disk.qcow2',
+      'firmware',
+      'firmware/bios.bin',
+      'vm.json',
+    ]);
+    // Nothing staged is left, in the repository or on the server.
+    expect(readdirSync(join(w.sftp.root, 'archives/.staging'))).toEqual([]);
 
-    const detail = await w.admin.get('/admin/vms/qemu/Win98%20-%20Office');
-    expect(detail.statusCode, detail.body).toBe(200);
-    const vm = adminVmDetailSchema.parse(detail.json());
+    const vm = adminVmDetailSchema.parse(
+      (await w.admin.get('/admin/vms/qemu/Win95%20-%20Office')).json(),
+    );
     expect(vm).toMatchObject({
-      vmName: 'Win98 - Office',
       displayName: null,
       description: null,
       visibility: 'private',
-      mainMediaId: null,
       mediaCount: 0,
       versionCount: 1,
       tags: [],
     });
     expect(vm.clonedFrom).toMatchObject({
-      sourceEmulatorType: 'qemu',
-      sourceVmName: 'Win98',
+      sourceVmName: 'Win95',
       sourceDisplayName: 'Windows 98',
       sourceVersionId: w.masterId,
       sourceVersionKind: 'master',
-      sourceSnapshotName: null,
       clonedByDisplayName: 'The Admin',
       sourceExists: true,
     });
-
-    // One master, at its own key, with no parent and no history from the source.
     const versions = await rows(
       w,
-      "SELECT id, kind, parent_version_id, archive_key, archive_sha256 FROM vm_versions WHERE vm_name = 'Win98 - Office'",
+      "SELECT kind, parent_version_id, archive_sha256, created_by_agent_id FROM vm_versions WHERE vm_name = 'Win95 - Office'",
     );
     expect(versions).toEqual([
       {
-        id: operation.versionId,
         kind: 'master',
         parent_version_id: null,
-        archive_key: operation.archiveKey,
-        archive_sha256: NEW_SHA,
+        archive_sha256: sha256(stored),
+        created_by_agent_id: null,
       },
     ]);
-    // No agent holds it, no session, no screenshot, no notes, no tag.
-    for (const table of [
-      'agent_vm_state',
-      'vm_sessions',
-      'vm_media',
-      'vm_tags',
-      'vm_media_suppressions',
-    ]) {
+    for (const table of ['agent_vm_state', 'vm_sessions', 'vm_media', 'vm_tags']) {
       expect(
-        await rows(w, `SELECT 1 FROM ${table} WHERE vm_name = 'Win98 - Office'`),
+        await rows(w, `SELECT 1 FROM ${table} WHERE vm_name = 'Win95 - Office'`),
         table,
       ).toEqual([]);
     }
-    const cloneNotes = await w.admin.get('/admin/vms/qemu/Win98%20-%20Office/notes');
-    expect(cloneNotes.json()).toMatchObject({ markdown: '', exists: false });
-
-    // The source is unchanged.
-    const source = adminVmDetailSchema.parse((await w.admin.get('/admin/vms/qemu/Win98')).json());
+    // The source is unchanged, archive included.
+    const source = adminVmDetailSchema.parse((await w.admin.get('/admin/vms/qemu/Win95')).json());
     expect(source).toMatchObject({
       displayName: 'Windows 98',
       mediaCount: 1,
@@ -260,73 +227,68 @@ describe('cloning a version', () => {
       clonedFrom: null,
     });
     expect(source.tags.map((tag) => tag.name)).toEqual(['retro']);
-    expect((await w.admin.get('/admin/vms/qemu/Win98/notes')).json()).toMatchObject({
-      markdown: '# Source only',
-    });
-
-    // A restore of the clone is offered with the manifest its own registration verified.
-    const options = await w.admin.get('/admin/vms/qemu/Win98%20-%20Office/restore-options');
-    expect(options.statusCode, options.body).toBe(200);
-    expect(options.body).toContain(NEW_MANIFEST);
   });
 
   it('clones a snapshot from its exact archive, and records which one', async () => {
-    const w = await world();
+    const { w } = await archivedWorld();
     const snapshotId = await insertSnapshot(w, w.masterId, 'After Office Installation');
-    const operation = await clone(w, snapshotId, 'Win98-Office');
-    const request = await completeClone(w, operation);
-    expect(request.payload.source).toEqual({
-      vmName: 'Win98',
-      versionId: snapshotId,
-      archiveKey: archiveObjectKey({ emulatorType: 'qemu', vmName: 'Win98' }, snapshotId),
-      archiveSizeBytes: 3072,
-      archiveSha256: 'e'.repeat(64),
-      manifestSha256: null,
-    });
+    const operation = await clone(w, snapshotId, 'Win95-Office');
+    const done = await finished(w, operation.id);
+    expect(done.state, JSON.stringify(done.error)).toBe('succeeded');
+    expect(done.archive?.fileCount).toBe(4);
     const vm = adminVmDetailSchema.parse(
-      (await w.admin.get('/admin/vms/qemu/Win98-Office')).json(),
+      (await w.admin.get('/admin/vms/qemu/Win95-Office')).json(),
     );
     expect(vm.clonedFrom).toMatchObject({
       sourceVersionId: snapshotId,
       sourceVersionKind: 'snapshot',
-      sourceSnapshotName: 'Win98_202601311530',
+      sourceSnapshotName: 'Win95_202601311530',
       sourceVersionTitle: 'After Office Installation',
     });
-    // The clone's master is a master: the snapshot's parent does not come along.
-    const versions = await rows(
-      w,
-      "SELECT kind, parent_version_id FROM vm_versions WHERE vm_name = 'Win98-Office'",
-    );
-    expect(versions).toEqual([{ kind: 'master', parent_version_id: null }]);
+    expect(
+      await rows(
+        w,
+        "SELECT kind, parent_version_id FROM vm_versions WHERE vm_name = 'Win95-Office'",
+      ),
+    ).toEqual([{ kind: 'master', parent_version_id: null }]);
   });
 
-  it('passes on what the source registration verified, so a wrong archive is refused by the agent', async () => {
-    const w = await world();
+  it('refuses a source whose bytes or manifest are not the registered ones, and creates nothing', async () => {
+    const { w, key } = await archivedWorld();
+    // Same size, other bytes.
+    const original = await readFile(join(w.sftp.root, key));
+    const tampered = Buffer.from(original);
+    tampered[100] = (tampered[100] ?? 0) ^ 0xff;
+    await w.put(key, tampered);
+    const first = await finished(w, (await clone(w, w.masterId, 'Copy')).id);
+    expect(first).toMatchObject({ state: 'failed', error: { code: 'source_archive_invalid' } });
+
+    // The right bytes, and a registration that verified another manifest.
+    await w.put(key, original);
     await w.context.pool.execute(
-      `INSERT INTO registration_operations
-         (id, agent_id, repository_id, emulator_type, vm_name, mode, state, version_id, archive_key,
-          archive_size_bytes, archive_sha256, manifest_version, manifest_sha256, committed_at, finished_at,
-          local_copy)
-       VALUES (?, ?, ?, 'qemu', 'Win98', 'copy', 'succeeded', ?, ?, 2048, ?, 1, ?, UTC_TIMESTAMP(3),
-         UTC_TIMESTAMP(3), 'preserved')`,
-      [
-        randomUUID(),
-        w.paired.agentId,
-        w.repository.id,
-        w.masterId,
-        archiveObjectKey({ emulatorType: 'qemu', vmName: 'Win98' }, w.masterId),
-        SHA,
-        MANIFEST_SHA,
-      ],
+      "UPDATE registration_operations SET manifest_sha256 = ? WHERE mode = 'copy'",
+      ['f'.repeat(64)],
     );
-    await clone(w, w.masterId, 'Copy');
-    const request = await w.agent.next('server.clone_request');
-    expect(request.payload.source.manifestSha256).toBe(MANIFEST_SHA);
+    const second = await finished(w, (await clone(w, w.masterId, 'Copy')).id);
+    expect(second).toMatchObject({ state: 'failed', error: { code: 'source_archive_invalid' } });
+
+    expect(await rows(w, "SELECT 1 FROM virtual_machines WHERE vm_name = 'Copy'")).toEqual([]);
+    expect(await rows(w, 'SELECT 1 FROM vm_clone_provenance')).toEqual([]);
+    expect(existsSync(join(w.sftp.root, 'archives/qemu/copy'))).toBe(false);
+  });
+
+  it('fails plainly when the source archive is missing', async () => {
+    const { w, key } = await archivedWorld();
+    const { rmSync } = await import('node:fs');
+    rmSync(join(w.sftp.root, key));
+    const done = await finished(w, (await clone(w, w.masterId, 'Copy')).id);
+    expect(done).toMatchObject({ state: 'failed', error: { code: 'remote_object_missing' } });
+    expect(done.recovery).not.toBeNull();
   });
 
   it('validates the destination name and refuses any collision, ignoring case', async () => {
-    const w = await world();
-    for (const name of ['', 'a/b', '..', 'café', 'CON', 'x'.repeat(65), 'Win98_202601010000']) {
+    const { w } = await archivedWorld();
+    for (const name of ['', 'a/b', '..', 'café', 'CON', 'x'.repeat(65), 'Win95_202601010000']) {
       const response = await cloneRequest(w, w.masterId, name);
       expect(response.statusCode, name).toBe(400);
     }
@@ -336,14 +298,15 @@ describe('cloning a version', () => {
     const existing = await cloneRequest(w, w.masterId, 'OTHER');
     expect(existing.statusCode).toBe(409);
     expect(await errorCode(existing)).toBe('vm_already_registered');
-    expect(existing.json<{ error: { message: string } }>().error.message).toContain('Other');
     expect(await rows(w, "SELECT 1 FROM registration_operations WHERE mode = 'clone'")).toEqual([]);
   });
 
-  it('reserves the destination while a clone runs, and the database refuses a second creator', async () => {
-    const w = await world();
+  it('queues clones beyond the server’s limit, reserves their names, and cancels one that waits', async () => {
+    // No slot at all: every clone waits.
+    const { w } = await archivedWorld({ transfers: { maxConcurrent: 0 } });
     const operation = await clone(w, w.masterId, 'Copy');
-    // A second agent's registration of the same name, as the unique active marker sees it, ignoring case.
+    expect(operation.state).toBe('queued');
+    // The name is reserved, ignoring case, for as long as it runs.
     await expect(
       w.context.pool.execute(
         `INSERT INTO registration_operations
@@ -352,29 +315,28 @@ describe('cloning a version', () => {
         [randomUUID(), w.paired.agentId, w.repository.id, randomUUID()],
       ),
     ).rejects.toMatchObject({ code: 'ER_DUP_ENTRY' });
-    // And this agent is busy with it.
-    const again = await cloneRequest(w, w.masterId, 'Copy2');
-    expect(again.statusCode).toBe(409);
-    expect(await errorCode(again)).toBe('agent_busy');
-    await completeClone(w, operation);
-  });
+    // Another clone can be queued alongside: the server is not one agent with one slot.
+    const second = await clone(w, w.masterId, 'Copy2');
+    expect(second.state).toBe('queued');
+    // Its source version cannot be deleted meanwhile.
+    const refused = await w.admin.request({
+      method: 'POST',
+      url: `/admin/vms/qemu/Win95/versions/${w.masterId}/deletion`,
+      payload: { requestId: randomUUID(), versionId: w.masterId },
+    });
+    expect(refused.statusCode, refused.body).toBe(409);
 
-  it('refuses a name that became taken before the commit, and asks for the published archive to go', async () => {
-    const w = await world();
-    const operation = await clone(w, w.masterId, 'Copy');
-    await w.agent.next('server.clone_request');
-    await insertVm(w.context.pool, { vmName: 'copy' });
-    w.agent.send(envelope('agent.registration_result', zipResult(operation)));
-    const ack = await w.agent.next('server.registration_ack');
-    expect(ack.payload).toMatchObject({ outcome: 'rejected', deletePublished: true });
-    const finished = await operationRow(w, operation.id);
-    expect(finished).toMatchObject({ state: 'failed', error: { code: 'duplicate_registration' } });
-    // The VM that was there is untouched, and nothing was added to it.
-    expect(await rows(w, "SELECT 1 FROM vm_versions WHERE vm_name = 'copy'")).toEqual([]);
+    const cancelled = await w.admin.request({
+      method: 'POST',
+      url: `/admin/registrations/${operation.id}/cancel`,
+    });
+    expect(cancelled.statusCode, cancelled.body).toBe(200);
+    expect(cancelled.json<RegistrationOperation>().state).toBe('cancelled');
+    expect(await rows(w, "SELECT 1 FROM virtual_machines WHERE vm_name = 'Copy'")).toEqual([]);
   });
 
   it('returns the same clone for a repeated request, and refuses the ID for anything else', async () => {
-    const w = await world();
+    const { w } = await archivedWorld({ transfers: { maxConcurrent: 0 } });
     const requestId = randomUUID();
     const first = await clone(w, w.masterId, 'Copy', { requestId });
     const again = await cloneRequest(w, w.masterId, 'Copy', { requestId });
@@ -385,238 +347,124 @@ describe('cloning a version', () => {
     expect(await errorCode(other)).toBe('request_id_reused');
   });
 
-  it('leaves nothing behind when the agent fails, and can be tried again', async () => {
-    const w = await world();
-    const operation = await clone(w, w.masterId, 'Copy');
-    await w.agent.next('server.clone_request');
-    w.agent.send(
-      envelope('agent.registration_error', {
-        operationId: operation.id,
-        code: 'hash_mismatch',
-        message: 'The downloaded archive is not the registered one',
-      }),
-    );
-    expect((await w.agent.next('server.registration_ack')).payload.outcome).toBe('closed');
-    expect(await operationRow(w, operation.id)).toMatchObject({ state: 'failed' });
-    expect(await rows(w, "SELECT 1 FROM virtual_machines WHERE vm_name = 'Copy'")).toEqual([]);
-    expect(await rows(w, 'SELECT 1 FROM vm_clone_provenance')).toEqual([]);
-
-    const retry = await clone(w, w.masterId, 'Copy');
-    expect(retry.versionId).not.toBe(operation.versionId);
-    await completeClone(w, retry);
-    expect(await rows(w, "SELECT 1 FROM virtual_machines WHERE vm_name = 'Copy'")).toHaveLength(1);
+  it('ignores an agent named by a browser of the previous release', async () => {
+    const { w } = await archivedWorld();
+    const operation = await clone(w, w.masterId, 'Copy', { agentId: w.paired.agentId });
+    expect(operation.agentId).toBeNull();
+    expect((await finished(w, operation.id)).state).toBe('succeeded');
   });
 
-  it('can be cancelled before it commits, which creates nothing', async () => {
-    const w = await world();
+  it(
+    'after a restart, runs an interrupted clone again, and gives up on one interrupted too often',
+    { timeout: 90_000 },
+    async () => {
+      const { w, zip } = await archivedWorld({ transfers: { maxConcurrent: 0 } });
+      const retried = await clone(w, w.masterId, 'Retried');
+      const abandoned = await clone(w, w.masterId, 'Abandoned');
+      await w.context.pool.execute(
+        "UPDATE registration_operations SET state = 'uploading', server_attempts = 1 WHERE id = ?",
+        [retried.id],
+      );
+      await w.context.pool.execute(
+        "UPDATE registration_operations SET state = 'archiving', server_attempts = 3 WHERE id = ?",
+        [abandoned.id],
+      );
+      // A new server process over the same database, staging and repository.
+      const { accessFor } = await import('./server-world.js');
+      const { DEFAULT_TRANSFER_POLICY } = await import('../src/transfers/policy.js');
+      const restarted = await w.context.buildAnother({
+        repositoryAccess: accessFor(w.sftp),
+        // This one has slots.
+        transfers: { ...DEFAULT_TRANSFER_POLICY, stagingPath: join(w.sftp.directory, 'staging') },
+      });
+      await restarted.ready();
+      expect(await finished(w, abandoned.id)).toMatchObject({
+        state: 'failed',
+        error: { code: 'server_restarted' },
+      });
+      const done = await finished(w, retried.id);
+      expect(done.state, JSON.stringify(done.error)).toBe('succeeded');
+      expect(done.archive?.sizeBytes).toBeGreaterThan(zip.length - 100);
+    },
+  );
+
+  it('stays usable after its source VM and every version of it are gone', async () => {
+    const { w } = await archivedWorld();
     const operation = await clone(w, w.masterId, 'Copy');
-    await w.agent.next('server.clone_request');
-    const cancelled = await w.admin.request({
-      method: 'POST',
-      url: `/admin/registrations/${operation.id}/cancel`,
-    });
-    expect(cancelled.statusCode, cancelled.body).toBe(200);
-    await w.agent.next('server.registration_cancel');
-    w.agent.send(envelope('agent.registration_result', zipResult(operation)));
-    const ack = await w.agent.next('server.registration_ack');
-    expect(ack.payload).toMatchObject({ outcome: 'rejected', deletePublished: true });
-    expect(await rows(w, "SELECT 1 FROM virtual_machines WHERE vm_name = 'Copy'")).toEqual([]);
-  });
-
-  it('protects its source version from deletion while it runs', async () => {
-    const w = await world({ deleteArchives: true });
-    const snapshotId = await insertSnapshot(w, w.masterId);
-    const operation = await clone(w, snapshotId, 'Copy');
-    const refused = await w.admin.request({
-      method: 'POST',
-      url: `/admin/vms/qemu/Win98/versions/${snapshotId}/deletion`,
-      payload: { requestId: randomUUID(), versionId: snapshotId },
-    });
-    expect(refused.statusCode, refused.body).toBe(409);
-    expect(await errorCode(refused)).toBe('snapshot_in_use');
-    expect(await rows(w, 'SELECT 1 FROM vm_version_deletions')).toEqual([]);
-    await completeClone(w, operation);
-  });
-
-  it('stays usable after its source VM and every version of it are gone, and the provenance stays', async () => {
-    const w = await world();
-    const operation = await clone(w, w.masterId, 'Copy');
-    await completeClone(w, operation);
-
-    // Nothing in the schema ties the clone to its source.
-    const foreign = await rows(
-      w,
-      `SELECT TABLE_NAME, REFERENCED_TABLE_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS
-       WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'vm_clone_provenance'`,
-    );
-    expect(foreign.map((row) => row.REFERENCED_TABLE_NAME).sort()).toEqual([
-      'users',
-      'virtual_machines',
-    ]);
-
-    // The source goes, with everything of it: there is no VM deletion in the product yet, so the rows are deleted
-    // here exactly as a deletion would have to.
-    await w.context.pool.execute("DELETE FROM agent_vm_state WHERE vm_name = 'Win98'");
-    await w.context.pool.execute("DELETE FROM vm_versions WHERE vm_name = 'Win98'");
-    await w.context.pool.execute("DELETE FROM virtual_machines WHERE vm_name = 'Win98'");
-
+    expect((await finished(w, operation.id)).state).toBe('succeeded');
+    await w.context.pool.execute("DELETE FROM agent_vm_state WHERE vm_name = 'Win95'");
+    await w.context.pool.execute("DELETE FROM registration_operations WHERE vm_name = 'Win95'");
+    await w.context.pool.execute("DELETE FROM vm_versions WHERE vm_name = 'Win95'");
+    await w.context.pool.execute("DELETE FROM virtual_machines WHERE vm_name = 'Win95'");
     const vm = adminVmDetailSchema.parse((await w.admin.get('/admin/vms/qemu/Copy')).json());
     expect(vm.versionCount).toBe(1);
-    expect(vm.clonedFrom).toMatchObject({ sourceVmName: 'Win98', sourceExists: false });
-    const versions = await w.admin.get('/admin/vms/qemu/Copy/versions');
-    expect(versions.statusCode, versions.body).toBe(200);
-    expect(versions.body).toContain(operation.versionId);
-    expect(versions.body).not.toContain(w.masterId);
-    // It can itself be cloned, snapshotted from or restored as any VM can: its archive is its own.
+    expect(vm.clonedFrom).toMatchObject({ sourceVmName: 'Win95', sourceExists: false });
     const options = await w.admin.get(
       `/admin/vms/qemu/Copy/versions/${operation.versionId}/clone-options`,
     );
     expect(cloneOptionsResponseSchema.parse(options.json()).refusal).toBeNull();
   });
 
-  it('can be deleted without touching its source', async () => {
-    const w = await world();
-    const operation = await clone(w, w.masterId, 'Copy');
-    await completeClone(w, operation);
-    await w.context.pool.execute("DELETE FROM vm_versions WHERE vm_name = 'Copy'");
-    await w.context.pool.execute("DELETE FROM virtual_machines WHERE vm_name = 'Copy'");
-    // Its provenance goes with it, and nothing of the source does.
-    expect(await rows(w, 'SELECT 1 FROM vm_clone_provenance')).toEqual([]);
-    expect(await rows(w, "SELECT id FROM vm_versions WHERE vm_name = 'Win98'")).toEqual([
-      { id: w.masterId },
+  it('clones a VirtualBox OVA byte for byte, and links no machine', async () => {
+    const { w } = await archivedWorld();
+    await insertVm(w.context.pool, { emulatorType: 'virtualbox', vmName: 'XP-Box' });
+    const ova = buildTar([
+      ['xp.ovf', Buffer.from('<Envelope/>')],
+      ['xp-disk001.vmdk', Buffer.alloc(5000, 2)],
     ]);
-    expect(await rows(w, "SELECT 1 FROM agent_vm_state WHERE vm_name = 'Win98'")).toHaveLength(1);
+    const { id: ovaId } = await w.insertVersion(ova, {
+      vm: { emulatorType: 'virtualbox', vmName: 'XP-Box' },
+    });
+    const response = await cloneRequest(w, ovaId, 'XP-Box-Copy', {}, 'XP-Box', 'virtualbox');
+    expect(response.statusCode, response.body).toBe(202);
+    const operation = registrationOperationSchema.parse(response.json());
+    expect(operation.archiveKey).toMatch(/^archives\/virtualbox\/xp-box-copy\/.+\.ova$/);
+    const done = await finished(w, operation.id);
+    expect(done.state, JSON.stringify(done.error)).toBe('succeeded');
+    expect(done.archive).toMatchObject({
+      format: 'ova',
+      sha256: sha256(ova),
+      manifestSha256: null,
+    });
+    expect((await readFile(join(w.sftp.root, operation.archiveKey))).equals(ova)).toBe(true);
+    expect(await rows(w, "SELECT 1 FROM virtualbox_sources WHERE vm_name = 'XP-Box-Copy'")).toEqual(
+      [],
+    );
   });
 
-  it('lists the agents that can clone, and why the others cannot', async () => {
-    const w = await world({ clones: false });
-    const options = await w.admin.get(`/admin/vms/qemu/Win98/versions/${w.masterId}/clone-options`);
-    expect(options.statusCode, options.body).toBe(200);
-    const parsed = cloneOptionsResponseSchema.parse(options.json());
-    expect(parsed.source).toMatchObject({ vmName: 'Win98', versionId: w.masterId, kind: 'master' });
-    expect(parsed.agents).toEqual([
-      {
-        agentId: w.paired.agentId,
-        agentName: expect.any(String),
-        online: true,
-        eligible: false,
-        reason: 'agent_cannot_clone',
-      },
-    ]);
-    const refused = await cloneRequest(w, w.masterId, 'Copy');
-    expect(refused.statusCode).toBe(409);
-    expect(await errorCode(refused)).toBe('agent_cannot_clone');
-
-    await resync(w, { clones: true });
-    const again = cloneOptionsResponseSchema.parse(
-      (await w.admin.get(`/admin/vms/qemu/Win98/versions/${w.masterId}/clone-options`)).json(),
+  it('says the server does it, and lists no agents', async () => {
+    const { w } = await archivedWorld();
+    const options = cloneOptionsResponseSchema.parse(
+      (await w.admin.get(`/admin/vms/qemu/Win95/versions/${w.masterId}/clone-options`)).json(),
     );
-    expect(again.agents[0]).toMatchObject({ eligible: true, reason: null });
+    expect(options).toMatchObject({ refusal: null, performedBy: 'server', agents: [] });
     expect(
       (await w.admin.get(`/admin/vms/qemu/Other/versions/${w.masterId}/clone-options`)).statusCode,
     ).toBe(404);
   });
 
-  it('fails a queued clone whose agent comes back unable to clone', async () => {
+  it('refuses to clone when the server has no repository connection of its own', async () => {
     const w = await world();
-    w.agent.close();
-    await waitFor(async () => {
-      const options = cloneOptionsResponseSchema.parse(
-        (await w.admin.get(`/admin/vms/qemu/Win98/versions/${w.masterId}/clone-options`)).json(),
-      );
-      return options.agents[0]?.online === false;
-    });
-    // Queued while offline is refused up front, so the operation is created as if the agent dropped right after.
-    await w.context.pool.execute(
-      `INSERT INTO registration_operations
-         (id, agent_id, repository_id, request_id, emulator_type, vm_name, mode, version_id, archive_key,
-          clone_source_vm_name, clone_source_version_id, clone_source_archive_key,
-          clone_source_archive_sha256, clone_source_archive_size_bytes)
-       VALUES (?, ?, ?, ?, 'qemu', 'Copy', 'clone', ?, 'archives/qemu/copy/v.zip', 'Win98', ?, 'k', ?, 2048)`,
-      [
-        randomUUID(),
-        w.paired.agentId,
-        w.repository.id,
-        randomUUID(),
-        randomUUID(),
-        w.masterId,
-        SHA,
-      ],
+    const options = cloneOptionsResponseSchema.parse(
+      (await w.admin.get(`/admin/vms/qemu/Win98/versions/${w.masterId}/clone-options`)).json(),
     );
-    const { TestAgent, wsUrl } = await import('./agent-helpers.js');
-    const agent = await TestAgent.connect(wsUrl(w.context.app), w.paired.credential);
-    await agent.hello();
-    w.agent = agent;
-    await resync(w, { clones: false });
-    await barrier(agent);
-    const [row] = await rows(
-      w,
-      "SELECT state, error_code FROM registration_operations WHERE mode = 'clone'",
-    );
-    expect(row).toEqual({ state: 'failed', error_code: 'clone_unavailable' });
-  });
-
-  it('clones a VirtualBox OVA byte for byte, and links no machine', async () => {
-    const w = await world();
-    await insertVm(w.context.pool, { emulatorType: 'virtualbox', vmName: 'XP-Box' });
-    const ovaId = randomUUID();
-    await w.context.pool.execute(
-      `INSERT INTO vm_versions
-         (id, emulator_type, vm_name, kind, repository_id, archive_key, archive_sha256, archive_size_bytes)
-       VALUES (?, 'virtualbox', 'XP-Box', 'master', ?, ?, ?, 9000)`,
-      [
-        ovaId,
-        w.repository.id,
-        archiveObjectKey({ emulatorType: 'virtualbox', vmName: 'XP-Box' }, ovaId),
-        SHA,
-      ],
-    );
-    const response = await cloneRequest(w, ovaId, 'XP-Box-Copy', {}, 'XP-Box', 'virtualbox');
-    expect(response.statusCode, response.body).toBe(202);
-    const operation = registrationOperationSchema.parse(response.json());
-    expect(operation.archiveKey).toMatch(/^archives\/virtualbox\/xp-box-copy\/.+\.ova$/);
-    const request = await w.agent.next('server.clone_request');
-    expect(request.payload).toMatchObject({
-      emulatorType: 'virtualbox',
-      source: {
-        archiveKey: archiveObjectKey({ emulatorType: 'virtualbox', vmName: 'XP-Box' }, ovaId),
-      },
-    });
-    // A ZIP result for an OVA is not what was asked for.
-    w.agent.send(
-      envelope('agent.virtualbox_registration_result', {
-        operationId: operation.id,
-        versionId: operation.versionId,
-        archiveKey: operation.archiveKey,
-        archiveSizeBytes: 9000,
-        archiveSha256: SHA,
-      }),
-    );
-    expect((await w.agent.next('server.registration_ack')).payload.outcome).toBe('committed');
-    const vm = adminVmDetailSchema.parse(
-      (await w.admin.get('/admin/vms/virtualbox/XP-Box-Copy')).json(),
-    );
-    expect(vm.clonedFrom).toMatchObject({
-      sourceVmName: 'XP-Box',
-      sourceEmulatorType: 'virtualbox',
-    });
-    expect(await rows(w, "SELECT 1 FROM virtualbox_sources WHERE vm_name = 'XP-Box-Copy'")).toEqual(
-      [],
-    );
-    expect(await rows(w, "SELECT 1 FROM agent_vm_state WHERE vm_name = 'XP-Box-Copy'")).toEqual([]);
+    expect(options.refusal).toBe('server_repository_unavailable');
+    const refused = await cloneRequest(w, w.masterId, 'Copy', {}, 'Win98');
+    expect(refused.statusCode).toBe(409);
+    expect(await errorCode(refused)).toBe('server_repository_unavailable');
   });
 
   it('is for administrators only', async () => {
     const w = await world();
     const anonymous = new TestClient(w.context.app);
-    const options = await anonymous.get(
-      `/admin/vms/qemu/Win98/versions/${w.masterId}/clone-options`,
-    );
-    expect(options.statusCode).toBe(401);
+    expect(
+      (await anonymous.get(`/admin/vms/qemu/Win98/versions/${w.masterId}/clone-options`))
+        .statusCode,
+    ).toBe(401);
     const created = await anonymous.request({
       method: 'POST',
       url: `/admin/vms/qemu/Win98/versions/${w.masterId}/clone`,
-      payload: { agentId: w.paired.agentId, vmName: 'Copy', requestId: randomUUID() },
+      payload: { vmName: 'Copy', requestId: randomUUID() },
     });
     expect([401, 403]).toContain(created.statusCode);
     expect(await rows(w, "SELECT 1 FROM registration_operations WHERE mode = 'clone'")).toEqual([]);

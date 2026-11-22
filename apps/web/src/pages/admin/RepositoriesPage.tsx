@@ -1,8 +1,10 @@
-import type {
-  AgentSummary,
-  RepositoryAgent,
-  RepositorySummary,
-  SaveRepositoryRequest,
+import {
+  SERVER_CONNECTION_STEP_TEXT,
+  type AgentSummary,
+  type RepositoryAgent,
+  type RepositorySummary,
+  type SaveRepositoryRequest,
+  type ServerConnectionTest,
 } from '@emucat/contracts';
 import { useCallback, useState, type FormEvent } from 'react';
 import {
@@ -12,6 +14,7 @@ import {
   dissociateRepositoryAgent,
   fetchAgents,
   fetchRepositories,
+  testServerConnection,
   updateRepository,
 } from '../../api';
 import { formatBytes, formatTime } from '../../components/Agents';
@@ -32,6 +35,8 @@ const EMPTY_FORM: SaveRepositoryRequest = {
   port: 22,
   username: '',
   remoteRoot: '',
+  serverHost: null,
+  serverPort: null,
 };
 
 function RepositoryForm({
@@ -48,11 +53,20 @@ function RepositoryForm({
   const [form, setForm] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const update = (field: keyof SaveRepositoryRequest) => (event: { target: { value: string } }) =>
+  const update = (field: keyof SaveRepositoryRequest) => (event: { target: { value: string } }) => {
+    const value = event.target.value;
+    // The server's own address is optional: empty means "the same as the agents'".
+    const optional = field === 'serverHost' || field === 'serverPort';
     setForm({
       ...form,
-      [field]: field === 'port' ? Number(event.target.value) : event.target.value,
+      [field]:
+        optional && value.trim() === ''
+          ? null
+          : field === 'port' || field === 'serverPort'
+            ? Number(value)
+            : value,
     });
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -136,9 +150,47 @@ function RepositoryForm({
           />
         </div>
       </div>
+      <fieldset className="row g-2 mt-1">
+        <legend className="col-12 h6 mb-0 fs-6">Server’s own address (optional)</legend>
+        <div className="col-12 col-md-4">
+          <label className="form-label" htmlFor="repository-server-host">
+            Server host
+          </label>
+          <input
+            id="repository-server-host"
+            className="form-control"
+            placeholder="Same as Host"
+            value={form.serverHost ?? ''}
+            aria-describedby="repository-server-help"
+            onChange={update('serverHost')}
+          />
+        </div>
+        <div className="col-12 col-md-2">
+          <label className="form-label" htmlFor="repository-server-port">
+            Server port
+          </label>
+          <input
+            id="repository-server-port"
+            className="form-control"
+            type="number"
+            min={1}
+            max={65535}
+            placeholder={String(form.port)}
+            value={form.serverPort ?? ''}
+            aria-describedby="repository-server-help"
+            onChange={update('serverPort')}
+          />
+        </div>
+        <div id="repository-server-help" className="col-12 form-text mt-0">
+          Where the EmuCat server itself reaches the same SSH server, if not at Host and Port: for
+          example an internal name or a VPN address. It is used for clones, View Archive Contents
+          and the relay for agents that cannot reach the repository. The user and remote root are
+          the same.
+        </div>
+      </fieldset>
       <div className="form-text mb-2">
-        These details say where the repository is. The private key stays on each agent, and is never
-        sent here.
+        These details say where the repository is. Private keys are never entered here: each agent
+        keeps its own, and the server’s own key is a file on the server (see the deployment guide).
       </div>
       <div className="d-flex flex-wrap gap-2">
         <button type="submit" className="btn btn-primary" disabled={busy}>
@@ -197,6 +249,11 @@ function AssociatedAgent({
             Last checked: {formatTime(agent.lastCheckedAt)}. Last success:{' '}
             {formatTime(agent.lastSuccessAt)}.
             {agent.freeBytes !== null ? ` Free space: ${formatBytes(agent.freeBytes)}.` : ''}
+            {agent.transport === 'relay'
+              ? ' Reached through the server relay.'
+              : agent.transport === 'sftp'
+                ? ' Reached directly over SFTP.'
+                : ''}
           </div>
           {agent.hostKeyFingerprint ? (
             <div className="small text-body-secondary text-break">
@@ -230,6 +287,90 @@ function AssociatedAgent({
       ) : null}
       <FormError error={error} />
     </li>
+  );
+}
+
+/**
+ * The server's own connection to the repository (decision 0055), tested step by step. The steps say what failed and
+ * what to do; they never show a key or a server path.
+ */
+function ServerConnection({
+  repository,
+  onChanged,
+}: {
+  repository: RepositorySummary;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [result, setResult] = useState<ServerConnectionTest | null>(null);
+  const shown = result ?? repository.serverAccess.lastTest;
+  const test = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await testServerConnection(repository.id));
+      onChanged();
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="mb-3" aria-labelledby={`server-connection-${repository.id}`}>
+      <h3 className="h6" id={`server-connection-${repository.id}`}>
+        Server connection
+      </h3>
+      <p className="small text-body-secondary mb-2">
+        The EmuCat server’s own SSH connection, used for clones, View Archive Contents and the relay
+        for agents that cannot reach the repository themselves.{' '}
+        {repository.serverAccess.configured
+          ? 'This server has a key and a known_hosts file for it.'
+          : 'This server has no key for repositories yet: see the deployment guide.'}
+      </p>
+      <button
+        type="button"
+        className="btn btn-sm btn-primary mb-2"
+        disabled={busy}
+        onClick={() => void test()}
+      >
+        {busy ? 'Testing…' : 'Test Server Connection'}
+      </button>
+      <FormError error={error} />
+      {shown ? (
+        <div
+          className={`alert ${shown.ok ? 'alert-success' : 'alert-danger'} small mb-0`}
+          role="status"
+        >
+          <div>
+            {shown.ok ? 'The server can use this repository.' : 'The server cannot use it.'} Tested{' '}
+            {formatTime(shown.testedAt)} at {shown.address.host}:{shown.address.port}
+            {shown.address.source === 'server' ? ' (server address)' : ''}.
+            {shown.freeBytes !== null ? ` Free space: ${formatBytes(shown.freeBytes)}.` : ''}
+          </div>
+          {shown.hostKeyFingerprint ? (
+            <div className="text-break">
+              Host key: <code>{shown.hostKeyFingerprint}</code>
+            </div>
+          ) : null}
+          <ul className="list-unstyled mb-0 mt-1">
+            {shown.steps.map((step) => (
+              <li key={step.step}>
+                <span aria-hidden="true">
+                  {step.ok === true ? '✓' : step.ok === false ? '✗' : '–'}
+                </span>{' '}
+                <strong>{SERVER_CONNECTION_STEP_TEXT[step.step]}</strong>
+                <span className="visually-hidden">
+                  {step.ok === true ? ': passed' : step.ok === false ? ': failed' : ': not reached'}
+                </span>
+                {step.message ? ` — ${step.message}` : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -280,6 +421,8 @@ function RepositoryCard({
               port: repository.port,
               username: repository.username,
               remoteRoot: repository.remoteRoot,
+              serverHost: repository.serverHost,
+              serverPort: repository.serverPort,
             }}
             submitLabel="Save"
             onCancel={() => setEditing(false)}
@@ -300,6 +443,15 @@ function RepositoryCard({
               <dd>
                 {repository.host}:{repository.port}
               </dd>
+              {repository.serverHost !== null || repository.serverPort !== null ? (
+                <>
+                  <dt>Server address</dt>
+                  <dd>
+                    {repository.serverHost ?? repository.host}:
+                    {repository.serverPort ?? repository.port}
+                  </dd>
+                </>
+              ) : null}
               <dt>SSH user</dt>
               <dd>{repository.username}</dd>
               <dt>Remote root</dt>
@@ -316,6 +468,8 @@ function RepositoryCard({
             </button>
           </>
         )}
+
+        <ServerConnection repository={repository} onChanged={onChanged} />
 
         <h3 className="h6">Agents allowed to use it</h3>
         <p className="small text-body-secondary">
@@ -387,8 +541,9 @@ export function RepositoriesPage() {
       <title>Repositories · EmuCat</title>
       <h1 className="h3 mb-2">Repositories</h1>
       <p className="text-body-secondary">
-        Where VM archives are stored. Agents reach a repository directly over SSH, so archives never
-        pass through this server.
+        Where VM archives are stored. Agents reach a repository directly over SSH when they can. An
+        agent that cannot may send and fetch archives through this server, which then uses its own
+        connection; clones are made by this server too.
       </p>
       {error ? (
         <div className="alert alert-warning" role="alert">

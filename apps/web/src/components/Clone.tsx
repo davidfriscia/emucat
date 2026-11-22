@@ -25,15 +25,18 @@ import { NAME_ERROR_TEXT } from './VirtualBox';
 /**
  * Cloning a version into a new, independent VM (decision 0052). The dialog names the source, the version and the
  * new name, and says what a clone is. Progress is the clone's registration operation, polled until it ends.
+ *
+ * The EmuCat server makes the clone itself, over its own repository connection (decision 0055), so there is no agent
+ * to choose and none needs to be online.
  */
 
 const ACTIVE_POLL_MS = 1_500;
 
 const STATE_TEXT: Record<string, string> = {
-  queued: 'Waiting for the agent',
+  queued: 'Waiting for the server',
   validating: 'Checking the source',
-  archiving: 'Downloading and writing the clone',
-  uploading: 'Uploading the clone',
+  archiving: 'The server is downloading the source and writing the clone',
+  uploading: 'The server is uploading the clone',
   verifying: 'Verifying the clone in the repository',
   committing: 'Registering the new VM',
   cleaning_local: 'Finishing',
@@ -64,7 +67,6 @@ export function CloneVmDialog({
   const [requestId] = useState(() => crypto.randomUUID());
   const [name, setName] = useState('');
   const [touched, setTouched] = useState(false);
-  const [agentId, setAgentId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
@@ -75,8 +77,6 @@ export function CloneVmDialog({
   );
   const { state } = useAsync(load);
   const options = state.status === 'success' ? state.data : null;
-  const eligible = options?.agents.filter((agent) => agent.eligible) ?? [];
-  const chosen = agentId ?? eligible[0]?.agentId ?? null;
 
   const trimmed = name.trim();
   const validation = validateVmName(trimmed);
@@ -86,16 +86,16 @@ export function CloneVmDialog({
     : sameName
       ? 'A clone needs a name of its own.'
       : null;
-  const canSubmit = !busy && nameProblem === null && chosen !== null && options?.refusal === null;
+  const canSubmit = !busy && nameProblem === null && options !== null && options.refusal === null;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setTouched(true);
-    if (!canSubmit || chosen === null) return;
+    if (!canSubmit) return;
     setBusy(true);
     setError(null);
     try {
-      onStarted(await cloneVm(vm, node.id, { agentId: chosen, vmName: trimmed, requestId }));
+      onStarted(await cloneVm(vm, node.id, { vmName: trimmed, requestId }));
     } catch (failure) {
       setError(failure);
       setBusy(false);
@@ -165,43 +165,18 @@ export function CloneVmDialog({
             </p>
           ) : null}
           <div className="mt-3">
-            {state.status === 'loading' ? <LoadingState label="Finding agents" /> : null}
+            {state.status === 'loading' ? <LoadingState label="Checking the source" /> : null}
             {options?.refusal ? (
               <div className="alert alert-warning small mb-2" role="alert">
                 {CLONE_REFUSAL_TEXT[options.refusal]}
               </div>
             ) : null}
-            {options && options.agents.length > 0 ? (
-              <>
-                <label htmlFor={`${ids}-agent`} className="form-label">
-                  Agent that makes the copy
-                </label>
-                <select
-                  id={`${ids}-agent`}
-                  className="form-select"
-                  value={chosen ?? ''}
-                  aria-describedby={`${ids}-agent-help`}
-                  onChange={(event) => setAgentId(event.target.value)}
-                >
-                  {eligible.length === 0 ? <option value="">No agent can clone now</option> : null}
-                  {options.agents.map((agent) => (
-                    <option key={agent.agentId} value={agent.agentId} disabled={!agent.eligible}>
-                      {agent.agentName}
-                      {agent.reason ? ` — ${CLONE_REFUSAL_TEXT[agent.reason]}` : ''}
-                    </option>
-                  ))}
-                </select>
-                <div id={`${ids}-agent-help`} className="form-text">
-                  It downloads the archive from the repository and uploads the copy. Nothing on its
-                  disk outside its staging directory is touched.
-                </div>
-              </>
-            ) : null}
-            {options && options.agents.length === 0 ? (
-              <p className="small text-body-secondary mb-0">
-                No agent is associated with the repository that holds this version.
-              </p>
-            ) : null}
+            <p className="small text-body-secondary mb-0" data-testid="clone-performed-by">
+              The EmuCat server makes the clone itself: it downloads this version from the
+              repository over its own connection, checks it, writes the copy under the new name and
+              verifies it in the repository. No agent takes part or needs to be online, and nothing
+              on any agent’s computer changes.
+            </p>
           </div>
           <div className="mt-3">
             <FormError error={error} />

@@ -1,7 +1,14 @@
 import { isAbsolute, resolve } from 'node:path';
+import {
+  TRANSFER_DEFAULT_CHUNK_BYTES,
+  TRANSFER_MAX_CHUNK_BYTES,
+  TRANSFER_MIN_CHUNK_BYTES,
+} from '@emucat/contracts';
 import { z } from 'zod';
 import { REPOSITORY_ROOT } from './env.js';
 import { DEFAULT_MEDIA_POLICY, type MediaPolicy } from './media/uploads.js';
+import type { RepositoryAccessSettings } from './repository-access/ssh.js';
+import { DEFAULT_TRANSFER_POLICY, type TransferPolicy } from './transfers/policy.js';
 
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
@@ -82,6 +89,55 @@ const envSchema = z.object({
   // application updates are not configured.
   DEPLOYER_SOCKET: emptyAsUndefined(z.string().min(1).optional()),
   DEPLOYER_TOKEN_FILE: emptyAsUndefined(z.string().min(1).optional()),
+  // The server's own SSH connection to repositories (decision 0055). Without a key, the server has none: clones,
+  // archive inspection and the transfer relay say so, and everything else works as before. The key is read from
+  // this file whenever a connection is opened, and never stored, logged or returned.
+  REPOSITORY_SSH_PRIVATE_KEY_PATH: emptyAsUndefined(z.string().min(1).optional()),
+  // A file holding the key's passphrase, if it has one. Never the passphrase itself.
+  REPOSITORY_SSH_PASSPHRASE_FILE: emptyAsUndefined(z.string().min(1).optional()),
+  // OpenSSH known_hosts with the repository's host key. Required with a key: host keys are always verified.
+  REPOSITORY_SSH_KNOWN_HOSTS_PATH: emptyAsUndefined(z.string().min(1).optional()),
+  REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
+  REPOSITORY_SSH_REQUEST_TIMEOUT_SECONDS: z.coerce.number().int().min(5).max(600).default(60),
+  // Where transfers and clones stage bytes on the server: a persistent disk, never the container layer.
+  TRANSFER_STAGING_PATH: z.string().min(1).default('var/transfers'),
+  TRANSFER_RELAY_ENABLED: booleanFlag.default(true),
+  TRANSFER_CHUNK_BYTES: z.coerce
+    .number()
+    .int()
+    .min(TRANSFER_MIN_CHUNK_BYTES)
+    .max(TRANSFER_MAX_CHUNK_BYTES)
+    .default(TRANSFER_DEFAULT_CHUNK_BYTES),
+  TRANSFER_MAX_STAGING_BYTES: z.coerce
+    .number()
+    .int()
+    .min(64 * 1024 * 1024)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(DEFAULT_TRANSFER_POLICY.maxStagingBytes),
+  TRANSFER_MIN_FREE_BYTES: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(DEFAULT_TRANSFER_POLICY.minFreeBytes),
+  TRANSFER_MAX_CONCURRENT: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(64)
+    .default(DEFAULT_TRANSFER_POLICY.maxConcurrent),
+  TRANSFER_INACTIVITY_TIMEOUT_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 86400)
+    .default(DEFAULT_TRANSFER_POLICY.inactivityTimeoutSeconds),
+  TRANSFER_RETENTION_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(30 * 86400)
+    .default(DEFAULT_TRANSFER_POLICY.retentionSeconds),
 });
 
 export interface Config {
@@ -108,6 +164,13 @@ export interface Config {
   environment: string;
   build: { commit: string | undefined; builtAt: string | undefined };
   deployer: { socketPath: string; tokenFile: string } | undefined;
+  /** The server's own repository connection. `undefined` when no key is configured. */
+  repositoryAccess: RepositoryAccessSettings | undefined;
+  transfers: TransferPolicy;
+}
+
+function absolute(path: string): string {
+  return isAbsolute(path) ? path : resolve(REPOSITORY_ROOT, path);
 }
 
 export class ConfigError extends Error {
@@ -127,6 +190,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if ((values.DEPLOYER_SOCKET === undefined) !== (values.DEPLOYER_TOKEN_FILE === undefined)) {
     throw new ConfigError(
       'Invalid configuration:\n  DEPLOYER_SOCKET and DEPLOYER_TOKEN_FILE must be set together',
+    );
+  }
+  if (
+    values.REPOSITORY_SSH_PRIVATE_KEY_PATH !== undefined &&
+    values.REPOSITORY_SSH_KNOWN_HOSTS_PATH === undefined
+  ) {
+    throw new ConfigError(
+      'Invalid configuration:\n  REPOSITORY_SSH_KNOWN_HOSTS_PATH is required with REPOSITORY_SSH_PRIVATE_KEY_PATH: host keys are always verified',
     );
   }
   return {
@@ -169,5 +240,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       values.DEPLOYER_SOCKET && values.DEPLOYER_TOKEN_FILE
         ? { socketPath: values.DEPLOYER_SOCKET, tokenFile: values.DEPLOYER_TOKEN_FILE }
         : undefined,
+    repositoryAccess:
+      values.REPOSITORY_SSH_PRIVATE_KEY_PATH && values.REPOSITORY_SSH_KNOWN_HOSTS_PATH
+        ? {
+            privateKeyPath: absolute(values.REPOSITORY_SSH_PRIVATE_KEY_PATH),
+            passphraseFile: values.REPOSITORY_SSH_PASSPHRASE_FILE
+              ? absolute(values.REPOSITORY_SSH_PASSPHRASE_FILE)
+              : undefined,
+            knownHostsPath: absolute(values.REPOSITORY_SSH_KNOWN_HOSTS_PATH),
+            connectTimeoutMs: values.REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS * 1000,
+            requestTimeoutMs: values.REPOSITORY_SSH_REQUEST_TIMEOUT_SECONDS * 1000,
+          }
+        : undefined,
+    transfers: {
+      stagingPath: absolute(values.TRANSFER_STAGING_PATH),
+      relayEnabled: values.TRANSFER_RELAY_ENABLED,
+      chunkBytes: values.TRANSFER_CHUNK_BYTES,
+      maxStagingBytes: values.TRANSFER_MAX_STAGING_BYTES,
+      minFreeBytes: values.TRANSFER_MIN_FREE_BYTES,
+      maxConcurrent: values.TRANSFER_MAX_CONCURRENT,
+      inactivityTimeoutSeconds: values.TRANSFER_INACTIVITY_TIMEOUT_SECONDS,
+      retentionSeconds: values.TRANSFER_RETENTION_SECONDS,
+    },
   };
 }

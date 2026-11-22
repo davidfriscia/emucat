@@ -7,6 +7,7 @@ export function registrationOperation(): RegistrationOperation {
     agentId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6103',
     agentName: 'Desk PC',
     agentOnline: true,
+    performedBy: 'agent',
     repositoryId: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6102',
     repositoryName: 'NAS',
     emulatorType: 'qemu',

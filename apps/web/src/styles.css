@@ -900,6 +900,16 @@ main.container:has(> .page-wide) {
     flex: 1 1 100%;
   }
 }
+.archive-dialog {
+  max-width: 56rem;
+  width: 100%;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+.archive-listing {
+  max-height: 50vh;
+  overflow-y: auto;
+}
 .clone-dialog {
   max-width: 36rem;
 }

@@ -23,6 +23,7 @@ import {
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
 import { DeleteSnapshotDialog, deletionReasonText } from './Cleanup';
+import { ArchiveContentsDialog } from './ArchiveContents';
 import { CloneProgress, CloneVmDialog } from './Clone';
 import { ConfirmDialog } from './Dialogs';
 import { VmLaunchDialog, WORKSPACE_STATE_TEXT, type RunPreselection } from './Execution';
@@ -100,8 +101,11 @@ function VersionItem({
   onEditTags,
   onPromote,
   onClone,
+  onViewContents,
 }: {
   entry: VersionTreeEntry;
+  /** Opens View Archive Contents (decision 0055). */
+  onViewContents: (node: VersionNode) => void;
   /** Opens the dialog that clones this version into a new VM (decision 0052). */
   onClone: (node: VersionNode) => void;
   onEditDetails: (node: VersionNode) => void;
@@ -406,6 +410,16 @@ function VersionItem({
               >
                 Clone VM…
               </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary theme-button"
+                disabled={!node.available}
+                aria-label={`View the archive contents of ${nameOf(node)}`}
+                aria-haspopup="dialog"
+                onClick={() => onViewContents(node)}
+              >
+                View contents…
+              </button>
               {node.kind === 'snapshot' ? (
                 <button
                   type="button"
@@ -441,6 +455,7 @@ function VersionItem({
               onEditTags={onEditTags}
               onPromote={onPromote}
               onClone={onClone}
+              onViewContents={onViewContents}
             />
           ))}
         </ul>
@@ -663,6 +678,7 @@ function VersionHistory({
   const [promoting, setPromoting] = useState<VersionNode | null>(null);
   const [remastering, setRemastering] = useState(false);
   const [cloning, setCloning] = useState<VersionNode | null>(null);
+  const [viewing, setViewing] = useState<VersionNode | null>(null);
   const [clones, setClones] = useState<string[]>([]);
   const [startedRemaster, setStartedRemaster] = useState<string | null>(null);
   const runToken = useRef(0);
@@ -823,6 +839,7 @@ function VersionHistory({
               onEditTags={setTagging}
               onPromote={setPromoting}
               onClone={setCloning}
+              onViewContents={setViewing}
             />
           </ul>
         </>
@@ -955,6 +972,9 @@ function VersionHistory({
             if (isVirtualBox) notifyVirtualBoxChanged(identity);
           }}
         />
+      ) : null}
+      {viewing ? (
+        <ArchiveContentsDialog vm={identity} node={viewing} onClose={() => setViewing(null)} />
       ) : null}
       {cloning ? (
         <CloneVmDialog

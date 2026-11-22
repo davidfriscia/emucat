@@ -14,6 +14,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import type { RowDataPacket } from 'mysql2/promise';
 import { afterEach, describe, expect, it } from 'vitest';
+import { expectArchiveRoutesOnlyWhereAllowed } from './route-paths.js';
 import {
   GENEROUS_RATE_LIMITS,
   TestAgent,
@@ -1357,6 +1358,56 @@ describe('repositories', () => {
     expect(summary?.lastSuccessfulCheckAt).toBeNull();
   });
 
+  it('accept a check through the relay from an agent with no SFTP settings, and say so', async () => {
+    const w = await world();
+    const url = `/admin/repositories/${w.repository.id}/agents/${w.paired.agentId}/health-check`;
+    await w.admin.request({ method: 'POST', url });
+    const request = await w.agent.next('server.repository_health_request');
+    w.agent.send(
+      envelope('agent.repository_health_result', {
+        operationId: request.payload.operationId,
+        repositoryId: w.repository.id,
+        ok: true,
+        code: null,
+        message: null,
+        configuration: null,
+        hostKeyFingerprint: 'SHA256:server',
+        freeBytes: 2048,
+        transport: 'relay',
+      }),
+    );
+    await barrier(w.agent);
+    const summary = (await w.admin.get('/admin/repositories')).json<{
+      repositories: RepositorySummary[];
+    }>().repositories[0];
+    expect(summary?.status).toBe('healthy');
+    expect(summary?.agents[0]).toMatchObject({ transport: 'relay', errorCode: null });
+
+    // Without saying it used the relay, missing settings are still a mismatch.
+    await w.admin.request({ method: 'POST', url });
+    const again = await w.agent.next('server.repository_health_request');
+    w.agent.send(
+      envelope('agent.repository_health_result', {
+        operationId: again.payload.operationId,
+        repositoryId: w.repository.id,
+        ok: true,
+        code: null,
+        message: null,
+        configuration: null,
+        hostKeyFingerprint: null,
+        freeBytes: null,
+      }),
+    );
+    await barrier(w.agent);
+    const mismatch = (await w.admin.get('/admin/repositories')).json<{
+      repositories: RepositorySummary[];
+    }>().repositories[0];
+    expect(mismatch?.agents[0]).toMatchObject({
+      errorCode: 'repository_config_mismatch',
+      transport: null,
+    });
+  });
+
   it('ignore a health result nobody asked for', async () => {
     const w = await world();
     w.agent.send(
@@ -1395,9 +1446,8 @@ describe('repositories', () => {
 });
 
 describe('the API', () => {
-  it('has no route that receives or returns an archive', async () => {
+  it('carries archives only through the authenticated relay and the read-only archive listing', async () => {
     const w = await world();
-    const routes = w.context.app.printRoutes({ commonPrefix: false });
-    expect(routes).not.toMatch(/upload|download|archive/i);
+    expectArchiveRoutesOnlyWhereAllowed(w.context.app);
   });
 });

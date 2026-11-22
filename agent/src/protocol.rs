@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::discovery::DiscoveryReport;
 use crate::emulators::{EmulatorType, VmName};
 use crate::platform::{Architecture, Platform};
+use crate::repository::RepositoryTransport;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const AGENT_MAX_MESSAGE_BYTES: usize = 64 * 1024;
@@ -483,6 +484,9 @@ pub struct RepositoryHealthResult {
     pub configuration: Option<RepositoryConfigSummary>,
     pub host_key_fingerprint: Option<String>,
     pub free_bytes: Option<u64>,
+    /// How the repository was reached for this check (decision 0055). Older agents do not say.
+    #[serde(default)]
+    pub transport: Option<RepositoryTransport>,
 }
 
 /// An administrator asks to try removing a local VM again, after a screenshot blocked it. It names

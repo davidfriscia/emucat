@@ -8,6 +8,7 @@ import { AgentHub, type AgentHubOptions } from '../src/agents/hub.js';
 import { DEFAULT_PAIRING_POLICY } from '../src/agents/pairing.js';
 import { databaseAgentPresence } from '../src/agents/repository.js';
 import { buildApp, type AppDependencies } from '../src/app.js';
+import { DEFAULT_TRANSFER_POLICY } from '../src/transfers/policy.js';
 import { databaseAgentAuthenticator } from '../src/auth/agent-auth.js';
 import { createPasswordHasher } from '../src/auth/passwords.js';
 import { RateLimiter } from '../src/auth/rate-limiter.js';
@@ -65,6 +66,8 @@ export async function startBrowserApp(
     cookie: { secure: false, maxAgeSeconds: 7200 },
     pairing: DEFAULT_PAIRING_POLICY,
     pairingRateLimits: DEFAULT_PAIRING_RATE_LIMITS,
+    // Each context its own staging: an app removes what no transfer of its database claims (decision 0055).
+    transfers: { ...DEFAULT_TRANSFER_POLICY, stagingPath: join(storageRoot, 'transfers') },
     ...overrides,
   });
   const dependencies = baseDependencies();

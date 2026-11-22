@@ -18,6 +18,12 @@ import { WorkspaceCoordinator } from './workspaces/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
 import { registerBrowserRoutes, type BrowserDependencies } from './routes/browser.js';
+import { ArchiveInspection } from './archives/inspection.js';
+import { ServerCloneRunner } from './clones/server-runner.js';
+import { NO_REPOSITORY_ACCESS } from './repository-access/ssh.js';
+import { DEFAULT_TRANSFER_POLICY } from './transfers/policy.js';
+import { TransferService } from './transfers/service.js';
+import { StagingArea } from './transfers/staging.js';
 import { RequestLogController } from './request-logging.js';
 import { registerSystemRoutes } from './routes/system.js';
 import { zodValidatorCompiler } from './validation.js';
@@ -202,6 +208,38 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         registrations.remasters = remasters;
         remasters.start();
         app.addHook('onClose', () => remasters.close());
+        // The server's own repository work (decision 0055): relayed transfers, clones and archive listings.
+        const access = browser.repositoryAccess ?? NO_REPOSITORY_ACCESS;
+        const transferPolicy = browser.transfers ?? DEFAULT_TRANSFER_POLICY;
+        const staging = new StagingArea(transferPolicy);
+        const transfers = new TransferService(
+          browser.pool,
+          access,
+          staging,
+          transferPolicy,
+          app.log,
+        );
+        const serverClones = new ServerCloneRunner(
+          browser.pool,
+          access,
+          registrations,
+          staging,
+          app.log,
+        );
+        const inspection = new ArchiveInspection(browser.pool, access, app.log);
+        app.addHook('onReady', async () => {
+          // Recovery only: the API starts even when the database or the staging disk is not there yet.
+          await transfers.start().catch((error: unknown) => {
+            app.log.warn({ err: error }, 'Cannot recover relayed transfers');
+          });
+          await serverClones.start().catch((error: unknown) => {
+            app.log.warn({ err: error }, 'Cannot recover server-side clones');
+          });
+        });
+        app.addHook('onClose', async () => {
+          await serverClones.close();
+          await transfers.close();
+        });
         await api.register(async (scope) =>
           registerBrowserRoutes(
             scope,
@@ -215,6 +253,13 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             virtualboxManagement,
             { removals, deletions, remasters },
             dependencies.authenticateAgent,
+            {
+              access,
+              transfers,
+              inspection,
+              clones: serverClones,
+              chunkBytes: transferPolicy.chunkBytes,
+            },
           ),
         );
       }
