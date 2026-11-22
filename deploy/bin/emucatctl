@@ -80,7 +80,8 @@ load_config() {
   : "${EMUCAT_GIT_URL:?EMUCAT_GIT_URL is required in $CONFIG_PATH}"
   [[ $EMUCAT_ENVIRONMENT =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
     abort "EMUCAT_ENVIRONMENT must be a short lowercase name"
-  git check-ref-format --branch "$EMUCAT_BRANCH" >/dev/null 2>&1 ||
+  # From /: with --branch, Git looks at the working directory, and fails in one this account cannot read.
+  (cd / && git check-ref-format --branch "$EMUCAT_BRANCH") >/dev/null 2>&1 ||
     abort "EMUCAT_BRANCH is not a valid branch name"
   [[ $EMUCAT_BRANCH =~ ^[A-Za-z0-9_][A-Za-z0-9._/-]*$ ]] || abort "EMUCAT_BRANCH has unusual characters"
   [[ $EMUCAT_GIT_URL != -* ]] || abort "EMUCAT_GIT_URL is not valid"
@@ -557,10 +558,14 @@ EMUCAT_ROOT. For another root, set EMUCAT_DEPLOY_CONFIG to <root>/config/deploy.
 EOF
 }
 
-# Commands other than install run as the deployment account, so that state files keep one owner.
+# Commands other than install run as the deployment account, so that state files keep one owner. They start
+# from /, by the script's absolute path: the caller's directory (often root's home) may be unreadable to that account.
 drop_privileges() {
   if [[ $EUID -eq 0 ]] && id -u "$EMUCAT_DEPLOY_USER" >/dev/null 2>&1; then
-    exec runuser -u "$EMUCAT_DEPLOY_USER" -- env EMUCAT_DEPLOY_CONFIG="$CONFIG_PATH" "$0" "$@"
+    local self
+    self=$(readlink -f -- "${BASH_SOURCE[0]}")
+    cd /
+    exec runuser -u "$EMUCAT_DEPLOY_USER" -- env EMUCAT_DEPLOY_CONFIG="$CONFIG_PATH" "$self" "$@"
   fi
 }
 
