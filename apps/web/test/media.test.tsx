@@ -5,6 +5,7 @@ import {
   MEDIA_ID,
   mockApi,
   OTHER_MEDIA_ID,
+  adminVm,
   renderAt,
   resetApiState,
   signedInAsAdmin,
@@ -58,10 +59,11 @@ describe('the screenshot gallery', () => {
   it('opens the full image from a thumbnail, and closes it with Escape, returning focus', async () => {
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: items },
       [`GET ${SYNC_PATH}`]: status(),
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     const open = await screen.findByRole('button', {
       name: 'View screenshots/nested/boot.png at full resolution',
     });
@@ -81,8 +83,12 @@ describe('the screenshot gallery', () => {
   });
 
   it('shows what an administrator needs to know about each image', async () => {
-    mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: items } });
-    renderAt(MEDIA_PATH);
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: items },
+    });
+    renderAt(`${VM_PATH}/screenshots`);
     const heading = await screen.findByRole('heading', { name: 'screenshots/nested/boot.png' });
     const card = heading.closest('article') as HTMLElement;
     expect(within(card).queryByText('Private')).toBeNull();
@@ -94,14 +100,22 @@ describe('the screenshot gallery', () => {
   });
 
   it('explains that screenshots follow the VM’s visibility', async () => {
-    mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: items } });
-    renderAt(MEDIA_PATH);
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: items },
+    });
+    renderAt(`${VM_PATH}/screenshots`);
     expect(await screen.findByText(/They have no visibility of their own/)).toBeTruthy();
   });
 
   it('never reveals a storage location, because it is never given one', async () => {
-    mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: items } });
-    renderAt(MEDIA_PATH);
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: items },
+    });
+    renderAt(`${VM_PATH}/screenshots`);
     await screen.findByRole('heading', { name: 'desktop.png' });
     expect(document.body.innerHTML).not.toMatch(/media\/(originals|full|thumbnails)\//);
   });
@@ -111,10 +125,11 @@ describe('the synchronization summary', () => {
   it('shows what the agent reported', async () => {
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: items },
       [`GET ${SYNC_PATH}`]: status(),
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     const summary = await screen.findByRole('region', { name: 'Screenshot synchronization' });
     expect(within(summary).getByText('Desk PC')).toBeTruthy();
     expect(within(summary).getByText('Online')).toBeTruthy();
@@ -127,6 +142,7 @@ describe('the synchronization summary', () => {
   it('says which file failed and why', async () => {
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: [] },
       [`GET ${SYNC_PATH}`]: status({
         failed: 1,
@@ -137,7 +153,7 @@ describe('the synchronization summary', () => {
         },
       }),
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     expect(
       await screen.findByText('screenshots/bad.png: The image could not be decoded'),
     ).toBeTruthy();
@@ -146,28 +162,34 @@ describe('the synchronization summary', () => {
   it('copes with an offline agent, no report and no agent', async () => {
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: [] },
       [`GET ${SYNC_PATH}`]: {
         agents: [{ agentId: AGENT_ID, agentName: 'Desk PC', online: false, status: null }],
       },
     });
-    const first = renderAt(MEDIA_PATH);
+    const first = renderAt(`${VM_PATH}/screenshots`);
     expect(await screen.findByText('Offline')).toBeTruthy();
     expect(screen.getByText(/has not reported/)).toBeTruthy();
     first.unmount();
 
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: [] },
       [`GET ${SYNC_PATH}`]: { agents: [] },
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     expect(await screen.findByText(/No agent holds this VM/)).toBeTruthy();
   });
 
   it('does not take the gallery down with it when it cannot be loaded', async () => {
-    mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: items } });
-    renderAt(MEDIA_PATH);
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: items },
+    });
+    renderAt(`${VM_PATH}/screenshots`);
     expect(await screen.findByRole('heading', { name: 'desktop.png' })).toBeTruthy();
     expect(await screen.findByText(/status is not available/)).toBeTruthy();
   });

@@ -1,6 +1,6 @@
 import { render } from '@testing-library/react';
 import type { AdminMedia, AdminVmDetail, AuthenticatedSession } from '@emucat/contracts';
-import { MemoryRouter, useLocation } from 'react-router';
+import { createMemoryRouter, RouterProvider, useLocation } from 'react-router';
 import { vi } from 'vitest';
 import { App } from '../src/App';
 import { setCsrfToken, setSessionLostHandler } from '../src/api';
@@ -80,13 +80,31 @@ function LocationProbe() {
   return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
 }
 
+/** The probe shows the hash too, when there is one, so that a test can tell where a link to a version leads. */
+function HashProbe() {
+  const { hash } = useLocation();
+  return <span data-testid="location-hash">{hash}</span>;
+}
+
+/** The application at `path`, under a data router as in production (src/main.tsx). */
 export function renderAt(path: string) {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <App />
-      <LocationProbe />
-    </MemoryRouter>,
+  const router = createMemoryRouter(
+    [
+      {
+        path: '*',
+        element: (
+          <>
+            <App />
+            <LocationProbe />
+            <HashProbe />
+          </>
+        ),
+      },
+    ],
+    { initialEntries: [path] },
   );
+  const result = render(<RouterProvider router={router} />);
+  return Object.assign(result, { router });
 }
 
 export function resetApiState() {

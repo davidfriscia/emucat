@@ -4,7 +4,6 @@ import {
   EMULATOR_LABELS,
   publicMediaPath,
   publicVmRoute,
-  vmPathParamsSchema,
   vmTitle,
   type PublicGalleryMedia,
   type PublicMedia,
@@ -12,7 +11,7 @@ import {
   type VmIdentity,
 } from '@emucat/contracts';
 import { useCallback, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { Link, Navigate, useParams } from 'react-router';
+import { Link, Navigate } from 'react-router';
 import { ApiRequestError, fetchPublicVm } from '../api';
 import { useAuth } from '../auth';
 import { EmulatorBadge } from '../components/Catalog';
@@ -28,6 +27,7 @@ import {
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { TagList } from '../components/TagList';
 import { VmVersionHistory } from '../components/Versions';
+import { useVmRouteIdentity } from '../navigation';
 import { useAsync } from '../useAsync';
 
 function MissingVm() {
@@ -362,10 +362,8 @@ function VmDetail({ identity }: { identity: VmIdentity }) {
 }
 
 export function VmDetailPage() {
-  const params = vmPathParamsSchema.safeParse(useParams());
-  if (!params.success) return <MissingVm />;
+  const identity = useVmRouteIdentity();
+  if (!identity) return <MissingVm />;
   // Remounted for another VM, so that nothing from the previous one lingers.
-  return (
-    <VmDetail key={`${params.data.emulatorType}/${params.data.vmName}`} identity={params.data} />
-  );
+  return <VmDetail key={`${identity.emulatorType}/${identity.vmName}`} identity={identity} />;
 }

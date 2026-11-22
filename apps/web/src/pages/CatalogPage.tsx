@@ -1,12 +1,27 @@
 import { publicMediaPath, publicVmRoute, vmTitle } from '@emucat/contracts';
 import { useCallback } from 'react';
 import { fetchPublicCatalog } from '../api';
+import { useAuth } from '../auth';
 import { CatalogControls, Pagination, useCatalogFilters, VmCard } from '../components/Catalog';
 import { EmptyState, ErrorState, LoadingState } from '../components/States';
 import { useAsync } from '../useAsync';
+import { AdminCatalog } from './admin/AdminCatalog';
+
+/**
+ * The catalog: the application's first area, and the only way into a VM's management. Everyone else sees the public
+ * catalog; an administrator sees every registered VM, public or private, and opens one to manage it.
+ */
+export function CatalogPage() {
+  const { state } = useAuth();
+  if (state.status === 'loading') return <LoadingState label="Loading the catalog" />;
+  if (state.status === 'authenticated' && state.session.user.role === 'admin') {
+    return <AdminCatalog />;
+  }
+  return <PublicCatalog />;
+}
 
 /** The public catalog. It works without signing in, and only ever shows public VMs. */
-export function CatalogPage() {
+function PublicCatalog() {
   const filters = useCatalogFilters();
   const { q, emulatorType, page, filtered, update } = filters;
   const load = useCallback(

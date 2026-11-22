@@ -94,7 +94,6 @@ export function useAuth(): AuthContextValue {
 
 /** A sign-in redirect target must stay on this site, whatever the URL says. */
 export function safeNextPath(next: string | null): string {
-  if (!next || !next.startsWith('/') || next.startsWith('//') || next.includes('\\'))
-    return '/admin';
+  if (!next || !next.startsWith('/') || next.startsWith('//') || next.includes('\\')) return '/';
   return next;
 }

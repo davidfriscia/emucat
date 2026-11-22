@@ -1,18 +1,23 @@
 import { useState } from 'react';
-import { Link, NavLink, Outlet, useNavigate } from 'react-router';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { useAuth } from '../auth';
+import { ADMIN_PATH, CATALOG_PATH, globalAreaOf } from '../navigation';
 import { ApiStatusBadge } from './ApiStatusBadge';
 import { BrandLogo } from './Brand';
 import { ThemeButton } from './ThemeButton';
 
-const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `nav-link${isActive ? ' active' : ''}`;
+/**
+ * A global area is active anywhere inside it, which a link's own path matching cannot tell: a VM's management is
+ * under /admin, yet it is part of the catalog. So these are plain links, marked from {@link globalAreaOf}.
+ */
+const areaLinkClass = (active: boolean) => `nav-link${active ? ' active' : ''}`;
 
 export function Layout() {
   const [menuOpen, setMenuOpen] = useState(false);
   const closeMenu = () => setMenuOpen(false);
   const { state, signOut } = useAuth();
   const navigate = useNavigate();
+  const area = globalAreaOf(useLocation().pathname);
   const session = state.status === 'authenticated' ? state.session : null;
   const isAdmin = session?.user.role === 'admin';
 
@@ -25,7 +30,7 @@ export function Layout() {
 
   return (
     <div className="d-flex flex-column min-vh-100">
-      <nav className="navbar navbar-expand-xl border-bottom bg-body-tertiary">
+      <nav className="navbar navbar-expand-lg border-bottom bg-body-tertiary">
         <div className="container">
           <Link to="/" className="navbar-brand" onClick={closeMenu}>
             <BrandLogo />
@@ -46,48 +51,29 @@ export function Layout() {
           >
             <ul className="navbar-nav me-auto">
               <li className="nav-item">
-                <NavLink to="/" end className={navLinkClass} onClick={closeMenu}>
+                <Link
+                  to={CATALOG_PATH}
+                  className={areaLinkClass(area === 'catalog')}
+                  aria-current={area === 'catalog' ? 'page' : undefined}
+                  onClick={closeMenu}
+                >
                   Catalog
-                </NavLink>
+                </Link>
               </li>
               {isAdmin ? (
-                <>
-                  <li className="nav-item">
-                    <NavLink to="/admin" end className={navLinkClass} onClick={closeMenu}>
-                      Dashboard
-                    </NavLink>
-                  </li>
-                  <li className="nav-item">
-                    <NavLink to="/admin/catalog" className={navLinkClass} onClick={closeMenu}>
-                      Manage
-                    </NavLink>
-                  </li>
-                  <li className="nav-item">
-                    <NavLink to="/admin/agents" className={navLinkClass} onClick={closeMenu}>
-                      Agents
-                    </NavLink>
-                  </li>
-                  <li className="nav-item">
-                    <NavLink to="/admin/registrations" className={navLinkClass} onClick={closeMenu}>
-                      Registrations
-                    </NavLink>
-                  </li>
-                  <li className="nav-item">
-                    <NavLink to="/admin/repositories" className={navLinkClass} onClick={closeMenu}>
-                      Repositories
-                    </NavLink>
-                  </li>
-                </>
-              ) : null}
-              {session ? (
                 <li className="nav-item">
-                  <NavLink to="/settings" className={navLinkClass} onClick={closeMenu}>
-                    Settings
-                  </NavLink>
+                  <Link
+                    to={ADMIN_PATH}
+                    className={areaLinkClass(area === 'admin')}
+                    aria-current={area === 'admin' ? 'page' : undefined}
+                    onClick={closeMenu}
+                  >
+                    Admin
+                  </Link>
                 </li>
               ) : null}
             </ul>
-            <div className="d-flex flex-wrap align-items-center gap-3 py-2 py-xl-0">
+            <div className="d-flex flex-wrap align-items-center gap-3 py-2 py-lg-0">
               <ApiStatusBadge />
               <ThemeButton />
               {session ? (

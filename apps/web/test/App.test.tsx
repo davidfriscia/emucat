@@ -1,6 +1,6 @@
 import { fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mockApi, renderAt, resetApiState, signedInAsAdmin } from './mock-api';
+import { adminSession, mockApi, renderAt, resetApiState, signedInAsAdmin } from './mock-api';
 
 const NOT_READY = { status: 'not_ready', checks: { database: 'failed', migrations: 'skipped' } };
 const INFO = {
@@ -36,10 +36,24 @@ describe('application shell', () => {
   });
 
   it('navigates between pages', async () => {
-    mockApi({ ...signedInAsAdmin, 'GET /info': INFO });
+    mockApi({
+      ...signedInAsAdmin,
+      'GET /info': INFO,
+      'GET /admin/summary': {
+        vms: { total: 0, public: 0, private: 0 },
+        media: { total: 0, public: 0, private: 0 },
+      },
+      'GET /admin/vms': {
+        items: [],
+        pagination: { page: 1, pageSize: 24, total: 0, totalPages: 0 },
+      },
+      'GET /admin/agents': { agents: [] },
+    });
     renderAt('/');
-    fireEvent.click(await screen.findByRole('link', { name: 'Settings' }));
-    expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+    fireEvent.click(await screen.findByRole('link', { name: 'Admin' }));
+    const sidebar = within(await screen.findByRole('navigation', { name: 'Admin' }));
+    fireEvent.click(sidebar.getByRole('link', { name: 'Appearance' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Appearance' })).toBeTruthy();
     await screen.findByText('API online');
   });
 
@@ -87,9 +101,10 @@ describe('API status', () => {
   });
 });
 
-describe('settings', () => {
+describe('settings of a user who is not an administrator', () => {
+  const user = { 'GET /auth/session': { session: adminSession({ role: 'user' }) } };
   beforeEach(() => {
-    mockApi({ ...signedInAsAdmin, 'GET /info': INFO });
+    mockApi({ ...user, 'GET /info': INFO });
   });
 
   it('shows information from the server', async () => {
@@ -98,7 +113,7 @@ describe('settings', () => {
   });
 
   it('says so when the server information is unavailable', async () => {
-    mockApi(signedInAsAdmin);
+    mockApi(user);
     renderAt('/settings');
     expect(await screen.findByText('Server information is unavailable.')).toBeTruthy();
   });
@@ -108,6 +123,31 @@ describe('settings', () => {
     fireEvent.click(await screen.findByRole('radio', { name: 'Dark' }));
     expect(document.documentElement.getAttribute('data-bs-theme')).toBe('dark');
     await screen.findByText('1.2.3');
+  });
+
+  it('is linked from the account page', async () => {
+    mockApi({ ...user, 'GET /info': INFO, 'GET /account/sessions': { sessions: [] } });
+    renderAt('/account');
+    fireEvent.click(await screen.findByRole('link', { name: 'Settings' }));
+    expect(await screen.findByRole('heading', { name: 'Settings' })).toBeTruthy();
+  });
+});
+
+describe('Appearance, for an administrator', () => {
+  it('is where an old link to Settings leads', async () => {
+    mockApi({ ...signedInAsAdmin, 'GET /info': INFO });
+    renderAt('/settings');
+    expect(await screen.findByRole('heading', { level: 1, name: 'Appearance' })).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).toBe('/admin/appearance');
+  });
+
+  it('changes the theme', async () => {
+    mockApi(signedInAsAdmin);
+    renderAt('/admin/appearance');
+    fireEvent.click(await screen.findByRole('radio', { name: 'Dark' }));
+    expect(document.documentElement.getAttribute('data-bs-theme')).toBe('dark');
+    fireEvent.click(screen.getByRole('radio', { name: 'Light' }));
+    expect(document.documentElement.getAttribute('data-bs-theme')).toBe('light');
   });
 });
 

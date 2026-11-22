@@ -27,6 +27,10 @@ afterEach(() => {
 });
 
 const location = () => screen.getByTestId('location').textContent;
+const ADMIN_CATALOG = {
+  'GET /admin/summary': SUMMARY,
+  'GET /admin/vms': { items: [], pagination: { page: 1, pageSize: 24, total: 0, totalPages: 0 } },
+};
 
 function typeCredentials(username: string, password: string) {
   fireEvent.change(screen.getByLabelText('Username'), { target: { value: username } });
@@ -39,35 +43,68 @@ describe('navigation by authentication state', () => {
     renderAt('/');
     const nav = screen.getByRole('navigation');
     expect(await within(nav).findByRole('link', { name: 'Sign in' })).toBeTruthy();
-    for (const name of ['Dashboard', 'Manage', 'Settings']) {
+    expect(within(nav).getByRole('link', { name: 'Catalog' })).toBeTruthy();
+    for (const name of ['Admin', 'Dashboard', 'Manage', 'Settings']) {
       expect(within(nav).queryByRole('link', { name })).toBeNull();
     }
     expect(within(nav).queryByRole('button', { name: 'Sign out' })).toBeNull();
   });
 
-  it('offers the administration links to an administrator', async () => {
-    mockApi(signedInAsAdmin);
+  it('offers exactly Catalog and Admin to an administrator', async () => {
+    mockApi({ ...signedInAsAdmin, ...ADMIN_CATALOG });
     renderAt('/');
     const nav = screen.getByRole('navigation');
-    expect(await within(nav).findByRole('link', { name: 'Dashboard' })).toBeTruthy();
-    expect(within(nav).getByRole('link', { name: 'Manage' })).toBeTruthy();
-    expect(within(nav).getByRole('link', { name: 'Settings' })).toBeTruthy();
+    expect(await within(nav).findByRole('link', { name: 'Admin' })).toBeTruthy();
+    const areas = within(nav.querySelector('.navbar-nav') as HTMLElement).getAllByRole('link');
+    expect(areas.map((link) => link.textContent)).toEqual(['Catalog', 'Admin']);
+    expect(within(nav).getByRole('link', { name: 'Admin' }).getAttribute('href')).toBe('/admin');
+    for (const name of ['Dashboard', 'Manage', 'Settings', 'Agents', 'Repositories']) {
+      expect(within(nav).queryByRole('link', { name })).toBeNull();
+    }
     expect(within(nav).getByRole('link', { name: 'Ada Admin' })).toBeTruthy();
     expect(within(nav).getByRole('button', { name: 'Sign out' })).toBeTruthy();
     expect(within(nav).queryByRole('link', { name: 'Sign in' })).toBeNull();
   });
 
-  it('does not offer administration links to other users', async () => {
+  it('does not offer Admin to other users', async () => {
     mockApi({ 'GET /auth/session': { session: adminSession({ role: 'user' }) } });
     renderAt('/');
     const nav = screen.getByRole('navigation');
-    expect(await within(nav).findByRole('link', { name: 'Settings' })).toBeTruthy();
+    expect(await within(nav).findByRole('button', { name: 'Sign out' })).toBeTruthy();
+    expect(within(nav).getByRole('link', { name: 'Catalog' })).toBeTruthy();
+    expect(within(nav).queryByRole('link', { name: 'Admin' })).toBeNull();
     expect(within(nav).queryByRole('link', { name: 'Dashboard' })).toBeNull();
+  });
+
+  it('marks the area that is open as the current page', async () => {
+    mockApi({ ...signedInAsAdmin, ...ADMIN_CATALOG });
+    renderAt('/admin/appearance');
+    const nav = screen.getByRole('navigation', { name: '' });
+    const admin = await within(nav).findByRole('link', { name: 'Admin' });
+    expect(admin.getAttribute('aria-current')).toBe('page');
+    expect(admin.className).toMatch(/\bactive\b/);
+    const catalog = within(nav).getByRole('link', { name: 'Catalog' });
+    expect(catalog.getAttribute('aria-current')).toBeNull();
+    fireEvent.click(catalog);
+    await screen.findByRole('heading', { name: 'Catalog' });
+    expect(catalog.getAttribute('aria-current')).toBe('page');
+    expect(admin.getAttribute('aria-current')).toBeNull();
   });
 });
 
 describe('route protection', () => {
-  it.each(['/admin', '/admin/catalog', '/admin/vms/qemu/Win98', '/account', '/settings'])(
+  it.each([
+    '/admin',
+    '/admin/catalog',
+    '/admin/agents',
+    '/admin/appearance',
+    '/admin/updates',
+    '/admin/vms/qemu/Win98',
+    '/admin/vms/qemu/Win98/versions',
+    '/admin/vms/qemu/Win98/notes',
+    '/account',
+    '/settings',
+  ])(
     'sends an anonymous visitor from %s to sign in, and remembers where they were going',
     async (path) => {
       const api = mockApi();
@@ -90,7 +127,22 @@ describe('route protection', () => {
     const api = mockApi({ 'GET /auth/session': { session: adminSession({ role: 'user' }) } });
     renderAt('/admin');
     expect(await screen.findByRole('heading', { name: 'Administrators only' })).toBeTruthy();
-    expect(api.callsTo('GET', '/admin/summary')).toEqual([]);
+    expect(api.calls.filter((call) => call.path.startsWith('/admin'))).toEqual([]);
+  });
+
+  it.each([
+    '/admin/agents',
+    '/admin/updates',
+    '/admin/vms/qemu/Win98',
+    '/admin/vms/qemu/Win98/screenshots',
+  ])('turns away a user who is not an administrator from a direct link to %s', async (path) => {
+    const api = mockApi({ 'GET /auth/session': { session: adminSession({ role: 'user' }) } });
+    renderAt(path);
+    expect(await screen.findByRole('heading', { name: 'Administrators only' })).toBeTruthy();
+    // No sidebar is drawn, and nothing private is asked for.
+    expect(screen.queryByRole('navigation', { name: 'Admin' })).toBeNull();
+    expect(screen.queryByRole('navigation', { name: 'VM' })).toBeNull();
+    expect(api.calls.filter((call) => call.path.startsWith('/admin'))).toEqual([]);
   });
 
   it('does not treat an unreachable server as signed out', async () => {
@@ -104,24 +156,23 @@ describe('route protection', () => {
     let up = false;
     mockApi({
       ...signedInAsAdmin,
-      'GET /admin/summary': SUMMARY,
       'GET /auth/session': () => (up ? { session: adminSession() } : new Reply(502, 'Bad gateway')),
     });
-    renderAt('/admin');
+    renderAt('/admin/appearance');
     await screen.findByRole('heading', { name: 'Cannot check your session' });
     up = true;
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Appearance' })).toBeTruthy();
   });
 
   it('goes to sign-in as soon as the server says the session is gone', async () => {
     mockApi({
       ...signedInAsAdmin,
-      'GET /admin/summary': apiError(401, 'unauthenticated', 'Sign in required'),
+      'GET /admin/agents': apiError(401, 'unauthenticated', 'Sign in required'),
     });
-    renderAt('/admin');
+    renderAt('/admin/agents');
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeTruthy();
-    expect(location()).toBe(`/login?next=${encodeURIComponent('/admin')}`);
+    expect(location()).toBe(`/login?next=${encodeURIComponent('/admin/agents')}`);
   });
 });
 
@@ -129,32 +180,27 @@ describe('signing in', () => {
   it('signs in, then goes where the visitor was heading', async () => {
     const api = mockApi({
       'POST /auth/login': adminSession(),
-      'GET /admin/catalog': {},
-      'GET /admin/summary': SUMMARY,
-      'GET /admin/vms': {
-        items: [],
-        pagination: { page: 1, pageSize: 24, total: 0, totalPages: 0 },
-      },
     });
-    renderAt('/login?next=%2Fadmin%2Fcatalog');
+    renderAt('/login?next=%2Fadmin%2Fappearance');
     await screen.findByRole('heading', { name: 'Sign in' });
     typeCredentials('admin', 'a password');
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(await screen.findByRole('heading', { name: 'Manage the catalog' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Appearance' })).toBeTruthy();
     expect(api.callsTo('POST', '/auth/login')[0]?.body).toEqual({
       username: 'admin',
       password: 'a password',
     });
-    expect(location()).toBe('/admin/catalog');
+    expect(location()).toBe('/admin/appearance');
   });
 
-  it('goes to the dashboard without a target', async () => {
-    mockApi({ 'POST /auth/login': adminSession(), 'GET /admin/summary': SUMMARY });
+  it('goes to the catalog without a target', async () => {
+    mockApi({ 'POST /auth/login': adminSession(), ...ADMIN_CATALOG });
     renderAt('/login');
     await screen.findByRole('heading', { name: 'Sign in' });
     typeCredentials('admin', 'a password');
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Catalog' })).toBeTruthy();
+    expect(location()).toBe('/');
   });
 
   it('shows the generic message for wrong credentials, and clears the password', async () => {
@@ -186,9 +232,9 @@ describe('signing in', () => {
   });
 
   it('skips the form for someone already signed in', async () => {
-    mockApi({ ...signedInAsAdmin, 'GET /admin/summary': SUMMARY });
+    mockApi({ ...signedInAsAdmin, ...ADMIN_CATALOG });
     renderAt('/login');
-    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Catalog' })).toBeTruthy();
   });
 
   it('sends a fresh installation to setup', async () => {
@@ -199,12 +245,12 @@ describe('signing in', () => {
   });
 
   it.each([
-    ['//evil.example', '/admin'],
-    ['https://evil.example', '/admin'],
-    ['/\\evil.example', '/admin'],
-    ['evil', '/admin'],
-    ['', '/admin'],
-    [null, '/admin'],
+    ['//evil.example', '/'],
+    ['https://evil.example', '/'],
+    ['/\\evil.example', '/'],
+    ['evil', '/'],
+    ['', '/'],
+    [null, '/'],
     ['/admin/catalog?q=x', '/admin/catalog?q=x'],
     ['/account', '/account'],
   ])('resolves the redirect target %j to %j', (next, expected) => {
@@ -216,11 +262,10 @@ describe('signing out', () => {
   it('ends the session and returns to the public catalog', async () => {
     const api = mockApi({
       ...signedInAsAdmin,
-      'GET /admin/summary': SUMMARY,
       'POST /auth/logout': new Reply(204, null),
     });
-    renderAt('/admin');
-    await screen.findByRole('heading', { name: 'Dashboard' });
+    renderAt('/admin/appearance');
+    await screen.findByRole('heading', { name: 'Appearance' });
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(await screen.findByRole('heading', { name: 'Catalog' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Sign in' })).toBeTruthy();
@@ -231,12 +276,11 @@ describe('signing out', () => {
   it('forgets the CSRF token', async () => {
     const api = mockApi({
       ...signedInAsAdmin,
-      'GET /admin/summary': SUMMARY,
       'POST /auth/logout': new Reply(204, null),
       'POST /auth/login': apiError(401, 'invalid_credentials', 'Invalid username or password'),
     });
-    renderAt('/admin');
-    await screen.findByRole('heading', { name: 'Dashboard' });
+    renderAt('/admin/appearance');
+    await screen.findByRole('heading', { name: 'Appearance' });
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     fireEvent.click(await screen.findByRole('link', { name: 'Sign in' }));
     await screen.findByRole('heading', { name: 'Sign in' });
@@ -247,9 +291,9 @@ describe('signing out', () => {
   });
 
   it('signs out in this browser even if the server cannot be reached', async () => {
-    mockApi({ ...signedInAsAdmin, 'GET /admin/summary': SUMMARY });
-    renderAt('/admin');
-    await screen.findByRole('heading', { name: 'Dashboard' });
+    mockApi(signedInAsAdmin);
+    renderAt('/admin/appearance');
+    await screen.findByRole('heading', { name: 'Appearance' });
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(await screen.findByRole('link', { name: 'Sign in' })).toBeTruthy();
   });
@@ -269,17 +313,17 @@ describe('first-administrator setup', () => {
     'Confirm password': 'correct horse battery',
   };
 
-  it('creates the administrator and goes to the dashboard', async () => {
+  it('creates the administrator and goes to Admin, where agents are paired first', async () => {
     const api = mockApi({
       'GET /setup/status': { setupRequired: true },
       'POST /setup': new Reply(201, adminSession()),
-      'GET /admin/summary': SUMMARY,
     });
     renderAt('/setup');
     await screen.findByRole('heading', { name: 'Welcome to EmuCat' });
     fill(VALID);
     fireEvent.click(screen.getByRole('button', { name: 'Create administrator' }));
-    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Agents' })).toBeTruthy();
+    expect(location()).toBe('/admin/agents');
     expect(api.callsTo('POST', '/setup')[0]?.body).toEqual({
       setupToken: 'the-token',
       username: 'admin',

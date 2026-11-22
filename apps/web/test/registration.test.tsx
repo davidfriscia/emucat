@@ -656,7 +656,7 @@ describe('the outcome', () => {
     expect(dialog.getByText('Registered VM')).toBeTruthy();
     expect(dialog.getByText('Master version')).toBeTruthy();
     expect(dialog.getByRole('link', { name: VERSION_ID }).getAttribute('href')).toBe(
-      `/admin/vms/qemu/Win98#version-${VERSION_ID}`,
+      `/admin/vms/qemu/Win98/versions#version-${VERSION_ID}`,
     );
     expect(dialog.getByText('Private')).toBeTruthy();
     expect(dialog.getByText(/verified by the agent/)).toBeTruthy();
@@ -826,8 +826,11 @@ describe('the repositories page', () => {
 
   it('is offered to an administrator', async () => {
     mockApi(page());
-    renderAt('/');
-    expect(await screen.findByRole('link', { name: 'Repositories' })).toBeTruthy();
+    renderAt('/admin');
+    const sidebar = within(await screen.findByRole('navigation', { name: 'Admin' }));
+    expect(sidebar.getByRole('link', { name: 'Repositories' }).getAttribute('href')).toBe(
+      '/admin/repositories',
+    );
   });
 
   it('shows the summary, status and agents, and no credentials', async () => {

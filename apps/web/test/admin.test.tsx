@@ -32,23 +32,37 @@ const SUMMARY = {
   media: { total: 5, public: 4, private: 1 },
 };
 
-describe('dashboard', () => {
-  it('shows real counts and explains how VMs get registered', async () => {
-    mockApi({ ...signedInAsAdmin, 'GET /admin/summary': SUMMARY });
-    renderAt('/admin');
+describe('the administrator’s catalog summary', () => {
+  it('shows real counts and explains how VMs get registered, where the dashboard used to', async () => {
+    mockApi({
+      ...signedInAsAdmin,
+      'GET /admin/summary': SUMMARY,
+      'GET /admin/vms': emptyAdminPage,
+    });
+    renderAt('/');
     expect(await screen.findByText('1 public, 2 private')).toBeTruthy();
     expect(screen.getByText('4 public, 1 private, by their VM')).toBeTruthy();
     expect(screen.getByRole('note').textContent).toMatch(/connected EmuCat agent/);
     expect(screen.getByRole('note').textContent).toMatch(/Agents page/);
   });
 
-  it('reports a failure', async () => {
+  it('keeps the catalog when the summary cannot be loaded', async () => {
     mockApi({
       ...signedInAsAdmin,
       'GET /admin/summary': apiError(500, 'internal_error', 'Internal error'),
+      'GET /admin/vms': emptyAdminPage,
     });
+    renderAt('/');
+    expect(
+      await screen.findByRole('heading', { name: 'No registered virtual machines' }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/public, .* private$/)).toBeNull();
+  });
+
+  it('leads /admin to the first destination of the Admin sidebar', async () => {
+    mockApi({ ...signedInAsAdmin, 'GET /admin/agents': { agents: [] } });
     renderAt('/admin');
-    expect(await screen.findByRole('alert')).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/admin/agents'));
   });
 });
 
@@ -72,7 +86,7 @@ describe('catalog management', () => {
 
   it('has an empty state, and no way to create a VM', async () => {
     mockApi({ ...signedInAsAdmin, 'GET /admin/vms': emptyAdminPage });
-    renderAt('/admin/catalog');
+    renderAt('/');
     expect(
       await screen.findByRole('heading', { name: 'No registered virtual machines' }),
     ).toBeTruthy();
@@ -90,7 +104,7 @@ describe('catalog management', () => {
         { ...CARD, vmName: 'Dos', displayName: 'DOS 6.22', visibility: 'public' },
       ]),
     });
-    renderAt('/admin/catalog');
+    renderAt('/');
     const privateCard = (await screen.findByRole('link', { name: 'Windows 98 SE' })).closest(
       'article',
     ) as HTMLElement;
@@ -99,7 +113,11 @@ describe('catalog management', () => {
       .closest('article') as HTMLElement;
     expect(within(privateCard).getByText('Private')).toBeTruthy();
     expect(within(publicCard).getByText('Public')).toBeTruthy();
+    // A private VM has no public page: it opens on its management. A public one opens on its public page.
     expect(screen.getByRole('link', { name: 'Windows 98 SE' }).getAttribute('href')).toBe(VM_PATH);
+    expect(screen.getByRole('link', { name: 'DOS 6.22' }).getAttribute('href')).toBe(
+      '/vms/qemu/Dos',
+    );
   });
 
   it('shows the main image through the authenticated route', async () => {
@@ -107,7 +125,7 @@ describe('catalog management', () => {
       ...signedInAsAdmin,
       'GET /admin/vms': list([{ ...CARD, mainMediaId: MEDIA_ID, mediaCount: 1 }]),
     });
-    renderAt('/admin/catalog');
+    renderAt('/');
     const article = (await screen.findByRole('link', { name: 'Windows 98 SE' })).closest(
       'article',
     ) as HTMLElement;
@@ -118,7 +136,7 @@ describe('catalog management', () => {
 
   it('filters by visibility', async () => {
     const api = mockApi({ ...signedInAsAdmin, 'GET /admin/vms': list([CARD]) });
-    renderAt('/admin/catalog');
+    renderAt('/');
     await screen.findByRole('link', { name: 'Windows 98 SE' });
     fireEvent.change(screen.getByRole('combobox', { name: 'Filter by visibility' }), {
       target: { value: 'private' },
@@ -126,26 +144,34 @@ describe('catalog management', () => {
     await waitFor(() =>
       expect(api.callsTo('GET', '/admin/vms').at(-1)?.query.get('visibility')).toBe('private'),
     );
+    expect(screen.getByTestId('location').textContent).toBe('/?visibility=private');
+  });
+
+  it('keeps the filters of an old link to the catalog management page', async () => {
+    const api = mockApi({ ...signedInAsAdmin, 'GET /admin/vms': list([CARD]) });
+    renderAt('/admin/catalog?visibility=private&q=win');
+    await screen.findByRole('link', { name: 'Windows 98 SE' });
+    expect(screen.getByTestId('location').textContent).toBe('/?visibility=private&q=win');
+    const call = api.callsTo('GET', '/admin/vms').at(-1);
+    expect(call?.query.get('visibility')).toBe('private');
+    expect(call?.query.get('q')).toBe('win');
   });
 });
 
 describe('VM editor', () => {
-  it('uses the full width: actions in the header, then metadata and details, then the panels', async () => {
+  it('opens on General: the VM’s actions, then metadata and details, then Run and verify', async () => {
     mockApi({ ...signedInAsAdmin, [`GET ${VM_PATH}`]: adminVm() });
     renderAt(VM_PATH);
     await screen.findByRole('heading', { level: 1, name: 'Windows 98 SE' });
     expect(document.querySelector('main > .page-wide')).toBeTruthy();
     const actions = within(screen.getByRole('group', { name: 'VM actions' }));
     expect(actions.getByRole('button', { name: /Make (public|private)/ })).toBeTruthy();
-    expect(actions.getByRole('link', { name: 'Manage media' })).toBeTruthy();
+    // Screenshots have their own section: no separate media page is linked any more.
+    expect(screen.queryByRole('link', { name: 'Manage media' })).toBeNull();
     const headings = screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent);
-    expect(headings.slice(0, 5)).toEqual([
-      'Metadata',
-      'Details',
-      'Run and verify',
-      'Local copies and restores',
-      'Version history',
-    ]);
+    expect(headings.slice(0, 3)).toEqual(['Metadata', 'Details', 'Run and verify']);
+    expect(screen.queryByRole('heading', { name: 'Version history' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Notes' })).toBeNull();
   });
 
   it('shows the identity as read-only text', async () => {
@@ -265,20 +291,40 @@ describe('media management', () => {
     adminMedia({ isMain: true, shownAsPublicMain: true }),
     adminMedia({ id: OTHER_MEDIA_ID, originalFilename: 'desktop.png' }),
   ];
+  const SCREENSHOTS = `${VM_PATH}/screenshots`;
   const cardFor = (name: string) =>
     screen.getByRole('heading', { name }).closest('article') as HTMLElement;
 
   it('has an empty state that names no upload button', async () => {
-    mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: [] } });
-    renderAt(MEDIA_PATH);
-    expect(await screen.findByRole('heading', { name: 'No media yet' })).toBeTruthy();
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: [] },
+    });
+    renderAt(SCREENSHOTS);
+    expect(await screen.findByRole('heading', { name: 'No screenshots yet' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /upload/i })).toBeNull();
     expect(document.querySelector('input[type="file"]')).toBeNull();
   });
 
-  it('shows each item’s state through the authenticated image route', async () => {
-    mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: twoItems } });
+  it('leads the media page of earlier releases to Screenshots', async () => {
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: [] },
+    });
     renderAt(MEDIA_PATH);
+    expect(await screen.findByRole('heading', { name: 'No screenshots yet' })).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).toBe(SCREENSHOTS);
+  });
+
+  it('shows each item’s state through the authenticated image route', async () => {
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: twoItems },
+    });
+    renderAt(SCREENSHOTS);
     await screen.findByRole('heading', { name: 'boot.png' });
     const main = cardFor('boot.png');
     expect(within(main).getByText('Main image')).toBeTruthy();
@@ -291,8 +337,12 @@ describe('media management', () => {
   });
 
   it('offers no per-screenshot publication, only the cover and deletion', async () => {
-    const api = mockApi({ ...signedInAsAdmin, [`GET ${MEDIA_PATH}`]: { media: twoItems } });
-    renderAt(MEDIA_PATH);
+    const api = mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${MEDIA_PATH}`]: { media: twoItems },
+    });
+    renderAt(SCREENSHOTS);
     await screen.findByRole('heading', { name: 'desktop.png' });
     for (const name of ['boot.png', 'desktop.png']) {
       const card = within(cardFor(name));
@@ -310,9 +360,10 @@ describe('media management', () => {
   it('says when the main image is not shown because the VM is private', async () => {
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: [adminMedia({ isMain: true })] },
     });
-    renderAt(MEDIA_PATH);
+    renderAt(SCREENSHOTS);
     expect(await screen.findByText(/this VM is private: nobody outside sees it/)).toBeTruthy();
   });
 
@@ -323,10 +374,11 @@ describe('media management', () => {
     ];
     const api = mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: twoItems },
       [`PUT ${VM_PATH}/main-media`]: { media: after },
     });
-    renderAt(MEDIA_PATH);
+    renderAt(SCREENSHOTS);
     await screen.findByRole('heading', { name: 'desktop.png' });
     fireEvent.click(
       within(cardFor('desktop.png')).getByRole('button', { name: 'Set as main image' }),
@@ -342,12 +394,13 @@ describe('media management', () => {
   it('clears the main image', async () => {
     const api = mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: twoItems },
       [`DELETE ${VM_PATH}/main-media`]: {
         media: [adminMedia(), twoItems[1]],
       },
     });
-    renderAt(MEDIA_PATH);
+    renderAt(SCREENSHOTS);
     await screen.findByRole('heading', { name: 'boot.png' });
     fireEvent.click(within(cardFor('boot.png')).getByRole('button', { name: 'Clear main image' }));
     await waitFor(() => expect(screen.queryByText('Main image')).toBeNull());
@@ -357,10 +410,11 @@ describe('media management', () => {
   it('asks for confirmation before deleting, and can back out', async () => {
     const api = mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: twoItems },
       [`DELETE ${VM_PATH}/media/${OTHER_MEDIA_ID}`]: { media: [twoItems[0]] },
     });
-    renderAt(MEDIA_PATH);
+    renderAt(SCREENSHOTS);
     await screen.findByRole('heading', { name: 'desktop.png' });
     const card = within(cardFor('desktop.png'));
 
@@ -384,10 +438,11 @@ describe('media management', () => {
   it('shows a failure and keeps the list', async () => {
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: twoItems },
       [`PUT ${VM_PATH}/main-media`]: apiError(404, 'media_not_found', 'Media not found'),
     });
-    renderAt(MEDIA_PATH);
+    renderAt(SCREENSHOTS);
     await screen.findByRole('heading', { name: 'desktop.png' });
     fireEvent.click(
       within(cardFor('desktop.png')).getByRole('button', { name: 'Set as main image' }),

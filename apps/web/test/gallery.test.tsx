@@ -335,15 +335,24 @@ describe('the cover notice on the administrator’s page', () => {
         return vm;
       },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
+    expect(await screen.findByText(/this VM is private: nobody outside sees it/)).toBeTruthy();
+
+    // Visibility is the VM's, so it is changed under General, and the screenshots follow it.
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', { name: 'General' }),
+    );
     expect(
       await screen.findByText(/Making it public publishes all of its screenshots/),
     ).toBeTruthy();
-    expect(await screen.findByText(/this VM is private: nobody outside sees it/)).toBeTruthy();
-
     fireEvent.click(screen.getByRole('button', { name: 'Make public' }));
     await screen.findByText('The main screenshot is the public catalog’s cover.');
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', {
+        name: 'Screenshots',
+      }),
+    );
     expect(await screen.findByText('Shown as the main image in the public catalog.')).toBeTruthy();
     const [call] = api.callsTo('PUT', `${VM_PATH}/visibility`);
     expect(call?.body).toEqual({ visibility: 'public' });
@@ -358,7 +367,7 @@ describe('the cover notice on the administrator’s page', () => {
       [`GET ${VM_PATH}`]: adminVm({ visibility: 'public', publicCover: 'no_main_image' }),
       [`GET ${VM_PATH}/media`]: { media: [] },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     expect(await screen.findByText(/no main screenshot is selected/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Publish the main screenshot' })).toBeNull();
   });
@@ -369,7 +378,7 @@ describe('the cover notice on the administrator’s page', () => {
       [`GET ${VM_PATH}`]: adminVm({ mainMediaId: MEDIA_ID, publicCover: 'vm_private' }),
       [`GET ${VM_PATH}/media`]: { media },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
     expect(screen.queryByText(/No public cover/)).toBeNull();
   });
@@ -395,9 +404,12 @@ describe('the cover notice on the administrator’s page', () => {
         pagination: { page: 1, pageSize: 24, total: 1, totalPages: 1 },
       },
     });
+    // The catalog management page of earlier releases is the catalog now.
     renderAt('/admin/catalog');
     const link = await screen.findByRole('link', { name: 'Windows 98 SE' });
-    expect(link.getAttribute('href')).toBe(VM_PATH);
+    // A public VM opens on its public page, from which an administrator goes on to manage it.
+    expect(link.getAttribute('href')).toBe('/vms/qemu/Win98');
+    expect(screen.getByTestId('location').textContent).toBe('/');
     expect(screen.getByText('No public cover')).toBeTruthy();
   });
 });
@@ -416,7 +428,7 @@ describe('the administrator’s gallery', () => {
       [`PUT ${VM_PATH}/main-media`]: { media },
       [`DELETE ${VM_PATH}/main-media`]: { media },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
     await screen.findByRole('heading', { name: 'desk.png' });
     return api;

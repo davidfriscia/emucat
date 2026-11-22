@@ -903,3 +903,92 @@ main.container:has(> .page-wide) {
 .clone-dialog {
   max-width: 36rem;
 }
+
+/*
+ * Contextual navigation (docs/architecture.md, "Navigation"): a sidebar beside the content from 992 px, the width
+ * at which the header expands too. Narrower, the sidebar is a row above the content whose menu opens on request.
+ */
+.sidebar-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.sidebar-content {
+  min-width: 0;
+}
+
+.sidebar-header {
+  margin-bottom: 0.75rem;
+}
+
+.sidebar-vm-title {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.sidebar-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  text-align: start;
+}
+
+.sidebar-nav {
+  margin-top: 0.5rem;
+}
+
+.sidebar-link {
+  color: var(--bs-body-color);
+}
+
+.sidebar-link:hover,
+.sidebar-link:focus-visible {
+  background-color: var(--bs-tertiary-bg);
+}
+
+.sidebar-link.active,
+.sidebar-link.active:hover {
+  color: var(--bs-white);
+  background-color: var(--bs-primary);
+  font-weight: 600;
+}
+
+@media (min-width: 992px) {
+  .sidebar-layout {
+    grid-template-columns: 14rem minmax(0, 1fr);
+    gap: 2rem;
+    align-items: start;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 1rem;
+  }
+
+  .sidebar-nav {
+    margin-top: 0;
+  }
+}
+
+/* The administrator's catalog summary, which the dashboard used to show. */
+.catalog-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 2rem;
+}
+
+.catalog-summary dt {
+  font-weight: 400;
+  color: var(--bs-secondary-color);
+}
+
+.catalog-summary dd {
+  margin-bottom: 0;
+}
+
+.catalog-summary .stat-value {
+  font-size: 1.25rem;
+}

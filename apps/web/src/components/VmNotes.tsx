@@ -1,5 +1,6 @@
 import { type VmIdentity, type VmNotes } from '@emucat/contracts';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { UNSAFE_DataRouterContext, useBlocker } from 'react-router';
 import { ApiRequestError, clearVmNotes, fetchVmNotes, saveVmNotes } from '../api';
 import { useAsync } from '../useAsync';
 import { formatTime } from './Agents';
@@ -14,6 +15,30 @@ const MarkdownEditor = lazy(() =>
 const MarkdownView = lazy(() =>
   import('./MarkdownEditor').then((module) => ({ default: module.MarkdownView })),
 );
+
+/**
+ * Asks before leaving the page within the application while the notes have unsaved changes: another section of the
+ * VM, another area, back or forward. Closing or reloading the tab is the browser's own question (`beforeunload`).
+ */
+function LeaveGuard() {
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) => currentLocation.pathname !== nextLocation.pathname,
+  );
+  if (blocker.state !== 'blocked') return null;
+  return (
+    <ConfirmDialog
+      title="Leave without saving your notes?"
+      action="Leave without saving"
+      danger
+      cancelLabel="Keep editing"
+      onClose={() => blocker.reset()}
+      onConfirm={async () => blocker.proceed()}
+    >
+      Your changes to the notes are not saved. Leaving discards them; the notes stay as they were
+      saved.
+    </ConfirmDialog>
+  );
+}
 
 /**
  * A VM's notes: one Markdown document about the VM itself, for administrators only (decision 0053). It belongs to the
@@ -40,6 +65,8 @@ export function VmNotesSection({ vm, title }: { vm: VmIdentity; title: string })
 
   const notes = state.status === 'success' ? state.data : null;
   const dirty = editing && notes !== null && draft !== notes.markdown;
+  // Blocking navigation needs the application's data router; a section shown on its own has none.
+  const canBlock = useContext(UNSAFE_DataRouterContext) !== null;
 
   // Leaving the page with unsaved notes asks first.
   useEffect(() => {
@@ -95,7 +122,7 @@ export function VmNotesSection({ vm, title }: { vm: VmIdentity; title: string })
   };
 
   return (
-    <section className="mt-4 vm-notes" aria-labelledby="vm-notes-heading">
+    <section className="vm-notes" aria-labelledby="vm-notes-heading">
       <div className="d-flex flex-wrap align-items-center gap-2 mb-2">
         <h2 id="vm-notes-heading" className="h5 mb-0">
           Notes
@@ -221,6 +248,7 @@ export function VmNotesSection({ vm, title }: { vm: VmIdentity; title: string })
           </p>
         )
       ) : null}
+      {dirty && canBlock ? <LeaveGuard /> : null}
       {confirming === 'discard' ? (
         <ConfirmDialog
           title="Discard your changes?"

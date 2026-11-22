@@ -1,6 +1,6 @@
 import { PASSWORD_MIN_LENGTH } from '@emucat/contracts';
 import { useCallback, useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import {
   ApiRequestError,
   changePassword,
@@ -189,7 +189,16 @@ export function AccountPage() {
   return (
     <>
       <title>Account · EmuCat</title>
-      <h1 className="h3 mb-4">Account</h1>
+      <h1 className="h3 mb-2">Account</h1>
+      <p className="small text-body-secondary mb-4">
+        The theme is in{' '}
+        {state.session.user.role === 'admin' ? (
+          <Link to="/admin/appearance">Admin › Appearance</Link>
+        ) : (
+          <Link to="/settings">Settings</Link>
+        )}
+        .
+      </p>
       <div className="settings-grid mb-4">
         <section className="card">
           <div className="card-body">

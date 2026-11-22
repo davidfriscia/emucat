@@ -230,7 +230,7 @@ function routes(overrides: Record<string, unknown> = {}) {
 }
 
 async function machineSection() {
-  renderAt(VM_PATH);
+  renderAt(`${VM_PATH}/copies`);
   const heading = await screen.findByRole('heading', { name: 'VirtualBox machine' });
   const section = within(heading.closest('section') as HTMLElement);
   await section.findByText('Linked to');
@@ -402,7 +402,7 @@ describe('linking a machine from the latest discovery', () => {
   const OLD_DISCOVERY_PATH = `/admin/agents/${OLD_AGENT_ID}/discovery`;
 
   async function openLinkDialog(button = 'Change machine…') {
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     fireEvent.click(await screen.findByRole('button', { name: button }));
     return within(await screen.findByRole('dialog'));
   }
@@ -601,7 +601,7 @@ describe('linking a machine from the latest discovery', () => {
       [`GET ${DISCOVERY_PATH}`]: { operation: null },
       [`POST ${MANAGEMENT_PATH}/link`]: operation({ kind: 'link' }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     fireEvent.click(await screen.findByRole('button', { name: 'Link this machine…' }));
     const dialog = within(await screen.findByRole('dialog', { name: 'Link the imported machine' }));
     fireEvent.click(dialog.getByRole('button', { name: 'Link' }));
@@ -625,7 +625,7 @@ describe('importing a version into VirtualBox', () => {
         operation({ state: 'queued', machineUuid: null, machineName: null }),
       ),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     fireEvent.click(await screen.findByRole('button', { name: 'Import Master into VirtualBox' }));
     const dialog = within(
       await screen.findByRole('dialog', { name: 'Import Master into VirtualBox' }),
@@ -664,7 +664,7 @@ describe('importing a version into VirtualBox', () => {
         operation({ state: 'queued', machineUuid: null, machineName: null }),
       ),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     fireEvent.click(await screen.findByRole('button', { name: 'Import Master into VirtualBox' }));
     const dialog = within(
       await screen.findByRole('dialog', { name: 'Import Master into VirtualBox' }),
@@ -687,7 +687,7 @@ describe('importing a version into VirtualBox', () => {
         operation({ state: 'queued', machineUuid: null, machineName: null }),
       ),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     fireEvent.click(await screen.findByRole('button', { name: 'Import Master into VirtualBox' }));
     const dialog = within(
       await screen.findByRole('dialog', { name: 'Import Master into VirtualBox' }),
@@ -714,7 +714,7 @@ describe('importing a version into VirtualBox', () => {
     const api = routes({
       [`GET ${MANAGEMENT_PATH}`]: management({ source: source({ state: 'running' }) }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     fireEvent.click(await screen.findByRole('button', { name: 'Import Master into VirtualBox' }));
     const dialog = within(
       await screen.findByRole('dialog', { name: 'Import Master into VirtualBox' }),
@@ -741,25 +741,20 @@ describe('importing a version into VirtualBox', () => {
         autoLink: { intent: 'link', state: 'linked', linkOperationId: SPARE, error: null },
       }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     const alert = within(await screen.findByText(/Imported, but not linked/)).getByText(
       /Imported, but not linked/,
     ).parentElement as HTMLElement;
     expect(alert.textContent).toMatch(/virtualbox_already_registered/);
     expect(alert.textContent).toMatch(/does not import again/);
-    const optionsBefore = api.callsTo('GET', `${VM_PATH}/execution-options`).length;
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry linking' }));
     await waitFor(() =>
       expect(api.callsTo('POST', `${MANAGEMENT_PATH}/operations/${IMPORT_ID}/link`)).toHaveLength(
         1,
       ),
     );
-    // The run panel hears that the machine changed.
-    await waitFor(() =>
-      expect(api.callsTo('GET', `${VM_PATH}/execution-options`).length).toBeGreaterThan(
-        optionsBefore,
-      ),
-    );
+    // The machine is read again at once: the run panel, under General, reads it from the same poll.
+    await waitFor(() => expect(api.callsTo('GET', MANAGEMENT_PATH).length).toBeGreaterThan(1));
     expect(api.callsTo('POST', `${VM_PATH}/versions/${MASTER}/virtualbox-import`)).toHaveLength(0);
   });
 
@@ -775,7 +770,7 @@ describe('importing a version into VirtualBox', () => {
         ],
       }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     expect(await screen.findByText('Linked automatically')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Retry linking' })).toBeNull();
   });
@@ -786,7 +781,7 @@ describe('importing a version into VirtualBox', () => {
         operations: [operation({ state: 'running', stage: 'downloading' })],
       }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     const button = await screen.findByRole('button', { name: 'Import Master into VirtualBox' });
     await waitFor(() => expect(disabled(button)).toBe(true));
   });
@@ -837,13 +832,19 @@ describe('polling the page of a VirtualBox VM', () => {
       ),
     });
     renderAt(VM_PATH);
-    await screen.findByRole('button', { name: 'Import Master into VirtualBox' });
     await screen.findByText('Earlier sessions');
     await waitFor(() => {
       for (const id of sessions) {
         expect(api.callsTo('GET', `/admin/sessions/${id}/screenshots`)).toHaveLength(1);
       }
     });
+    // The machine is polled by the VM's management as a whole, so another section reads no more of it.
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', {
+        name: 'Version History',
+      }),
+    );
+    await screen.findByRole('button', { name: 'Import Master into VirtualBox' });
     // Long enough for any of the old 1.5-second polls to have fired again.
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     for (const id of sessions) {
@@ -858,7 +859,8 @@ describe('polling the page of a VirtualBox VM', () => {
 /**
  * The traffic of the whole page, measured: every request the page makes, by endpoint, over simulated time. The
  * scenario is the one that made about 600 requests in 224 seconds, 444 of them for the screenshots of three ended
- * sessions: a running session, three ended ones, the machine panel and the version history.
+ * sessions: a running session, three ended ones, the machine panel and the version history. The page is now the VM's
+ * General section, which holds the run panel; the other sections read their own data only when they are opened.
  */
 describe('the requests the page of a VirtualBox VM makes', () => {
   const ENDED = [
@@ -976,26 +978,18 @@ describe('the requests the page of a VirtualBox VM makes', () => {
       'GET /auth/session': 1,
       'GET /ready': 15, // every 15 s
       [`GET ${VM_PATH}`]: 1,
-      [`GET ${VM_PATH}/media`]: 1,
       // The run panel of a running machine: every 10 s.
       [`GET ${VM_PATH}/execution-options`]: 23,
       'GET /admin/sessions': 23,
-      // The machine, once for both panels that show it: every 30 s.
+      // The machine, once for every panel that shows it: every 30 s.
       [`GET ${MANAGEMENT_PATH}`]: 8,
-      // The version history: versions every 30 s, the rest once.
-      [`GET ${VM_PATH}/versions`]: 8,
-      [`GET ${VM_PATH}/workspaces`]: 1,
-      [`GET ${VM_PATH}/restore-options`]: 1,
-      // Remasters: once, since nothing is in progress.
-      [`GET ${VM_PATH}/remasters`]: 1,
-      // The VM's notes: once, and again only after a change made on the page (decision 0053).
-      [`GET ${VM_PATH}/notes`]: 1,
       // The running session's screenshots: every 15 s. Each ended session's: once.
       [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 15,
       ...Object.fromEntries(ENDED.map((id) => [`GET /admin/sessions/${id}/screenshots`, 1])),
     });
-    // Was 601, 444 of them for the three ended sessions. One more since the notes (read once).
-    expect(api.calls).toHaveLength(102);
+    // Was 601, 444 of them for the three ended sessions, when every panel was on one page. General shows only the
+    // run panel: the version history, screenshots and notes are read only in their own sections.
+    expect(api.calls).toHaveLength(89);
   });
 
   it('requests nothing while the tab is hidden, and catches up when it shows', async () => {
@@ -1020,7 +1014,6 @@ describe('the requests the page of a VirtualBox VM makes', () => {
       [`GET ${VM_PATH}/execution-options`]: 1,
       'GET /admin/sessions': 1,
       [`GET ${MANAGEMENT_PATH}`]: 1,
-      [`GET ${VM_PATH}/versions`]: 1,
       [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 1,
     });
   });
@@ -1070,7 +1063,7 @@ describe('a snapshot of a VirtualBox VM', () => {
         id: IMPORT_ID,
       },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     const create = await screen.findByRole('button', {
       name: 'Create snapshot of Xenix 386 from Master',
     });
@@ -1091,7 +1084,7 @@ describe('a snapshot of a VirtualBox VM', () => {
     routes({
       [`GET ${MANAGEMENT_PATH}`]: management({ source: source({ state: 'running' }) }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     const create = await screen.findByRole('button', {
       name: 'Create snapshot of Xenix 386 from Master',
     });

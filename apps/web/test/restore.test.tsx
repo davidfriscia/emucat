@@ -99,7 +99,7 @@ function base(routes: Record<string, unknown> = {}) {
 }
 
 async function openDialog() {
-  renderAt(VM_PATH);
+  renderAt(`${VM_PATH}/copies`);
   fireEvent.click(await screen.findByRole('button', { name: 'Restore…' }));
   return screen.findByRole('dialog', { name: 'Restore Win98' });
 }
@@ -136,7 +136,7 @@ describe('the VM’s page', () => {
         ] as RestoreOptionsResponse['agents'],
       }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     const section = (
       await screen.findByRole('heading', { name: 'Local copies and restores' })
     ).closest('section') as HTMLElement;
@@ -176,20 +176,20 @@ describe('the VM’s page', () => {
         ] as RestoreOptionsResponse['agents'],
       }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     expect(await screen.findByText(/differs from its version/)).toBeTruthy();
   });
 
   it('has no restore for a VM with no master', async () => {
     base({ [`GET ${OPTIONS_PATH}`]: { master: null, versions: [], agents: [] } });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     expect(await screen.findByText('This VM has no master version to restore.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Restore…' })).toBeNull();
   });
 
   it('keeps working when this part cannot be loaded', async () => {
     base({ [`GET ${OPTIONS_PATH}`]: apiError(500, 'internal_error', 'No') });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     expect(await screen.findByText('This information is not available right now.')).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Windows 98 SE' })).toBeTruthy();
   });
@@ -333,7 +333,7 @@ describe('replacing a local copy', () => {
     });
 
   const openReplacement = async () => {
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     fireEvent.click(await screen.findByRole('button', { name: 'Restore…' }));
     return within(await screen.findByRole('dialog', { name: 'Replace the local copy of Win98' }));
   };
@@ -454,7 +454,7 @@ describe('replacing a local copy', () => {
       },
     ];
     base({ [`GET ${OPTIONS_PATH}`]: refused });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     expect(await screen.findByText('Not now: the VM is running there')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Restore…' }) as HTMLButtonElement).disabled).toBe(
       true,
@@ -465,7 +465,7 @@ describe('replacing a local copy', () => {
 describe('an operation', () => {
   const show = async (shown: Partial<RestoreOperation>) => {
     const api = base({ 'GET /admin/restores': { operations: [operation(shown)] } });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     await screen.findByRole('article', { name: 'Restore on Study PC' });
     return api;
   };
@@ -495,7 +495,7 @@ describe('an operation', () => {
         cancelRequested: true,
       }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
     await waitFor(() =>
       expect(api.callsTo('POST', `/admin/restores/${OPERATION_ID}/cancel`)).toHaveLength(1),
@@ -510,7 +510,7 @@ describe('an operation', () => {
   /** A finished restore is a row of the history, with its details in a dialog. */
   const details = async (shown: Partial<RestoreOperation>) => {
     base({ 'GET /admin/restores': { operations: [operation(shown)] } });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     const button = await screen.findByRole('button', {
       name: /Details of the restore on Study PC/,
     });
@@ -580,7 +580,7 @@ describe('an operation', () => {
         ],
       },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     const table = await screen.findByRole('table', { name: 'Restore history, newest first' });
     const rows = within(table).getAllByRole('row').slice(1);
     expect(rows).toHaveLength(2);
@@ -680,7 +680,7 @@ describe('removing a local copy', () => {
     ...overrides,
   });
   const openRemoval = async () => {
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     fireEvent.click(
       await screen.findByRole('button', { name: 'Remove the local copy on Study PC' }),
     );
@@ -766,7 +766,7 @@ describe('removing a local copy', () => {
 
   it('shows why a copy cannot be removed now', async () => {
     base({ [`GET ${OPTIONS_PATH}`]: holding('verified', false) });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     const button = (await screen.findByRole('button', {
       name: 'Remove the local copy on Study PC',
     })) as HTMLButtonElement;
@@ -776,7 +776,7 @@ describe('removing a local copy', () => {
 
   it('offers no removal where there is no copy', async () => {
     base();
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     await screen.findByRole('button', { name: 'Restore…' });
     expect(screen.queryByRole('button', { name: /Remove the local copy/ })).toBeNull();
   });
@@ -794,7 +794,7 @@ describe('removing a local copy', () => {
         ],
       },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/copies`);
     const card = await screen.findByRole('article', {
       name: 'Removal of the local copy on Study PC',
     });

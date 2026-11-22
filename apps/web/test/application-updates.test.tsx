@@ -71,8 +71,8 @@ const UPDATES = 'GET /admin/system/updates';
 
 async function openSettings(routes: Record<string, unknown>) {
   const api = mockApi({ ...signedInAsAdmin, 'GET /info': INFO, ...routes });
-  renderAt('/settings');
-  await screen.findByRole('heading', { name: 'Application updates' });
+  renderAt('/admin/updates');
+  await screen.findByRole('heading', { level: 1, name: 'Application Updates' });
   return api;
 }
 
@@ -89,7 +89,27 @@ describe('Application updates', () => {
     });
     renderAt('/settings');
     await screen.findByRole('heading', { name: 'Settings' });
-    expect(screen.queryByRole('heading', { name: 'Application updates' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: /Application updates/i })).toBeNull();
+  });
+
+  it('is turned away from its direct link for users who are not administrators', async () => {
+    const api = mockApi({
+      'GET /auth/session': { session: adminSession({ role: 'user' }) },
+      'GET /info': INFO,
+    });
+    renderAt('/admin/updates');
+    expect(await screen.findByRole('heading', { name: 'Administrators only' })).toBeTruthy();
+    expect(api.callsTo('GET', '/admin/system/updates')).toEqual([]);
+  });
+
+  it('is the last destination of the Admin sidebar, and marked as the current one', async () => {
+    await openSettings({ [UPDATES]: updates() });
+    const sidebar = within(screen.getByRole('navigation', { name: 'Admin' }));
+    const current = sidebar.getByRole('link', { name: 'Application Updates' });
+    expect(current.getAttribute('aria-current')).toBe('page');
+    expect(sidebar.getAllByRole('link').at(-1)).toBe(current);
+    // What the server runs is shown beside the updates.
+    expect(await screen.findByRole('heading', { name: 'Server' })).toBeTruthy();
   });
 
   it('shows the deployed version, the branch and what is available', async () => {
@@ -244,8 +264,8 @@ describe('Application updates', () => {
       'GET /info': INFO,
       [UPDATES]: () => apiError(502, 'unreachable', 'Bad gateway'),
     });
-    renderAt('/settings');
-    await screen.findByRole('heading', { name: 'Application updates' });
+    renderAt('/admin/updates');
+    await screen.findByRole('heading', { level: 1, name: 'Application Updates' });
     // Refreshed during an update: the server is restarting.
     await screen.findByText(/restarting as part of the update/);
     await act(async () => {

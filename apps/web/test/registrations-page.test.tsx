@@ -60,8 +60,9 @@ function routes(overrides: Record<string, unknown> = {}) {
 describe('the registration history page', () => {
   it('is in the administration menu', async () => {
     mockApi(routes({ 'GET /admin/registrations': { operations: [], nextCursor: null } }));
-    renderAt('/');
-    const link = await screen.findByRole('link', { name: 'Registrations' });
+    renderAt('/admin');
+    const sidebar = within(await screen.findByRole('navigation', { name: 'Admin' }));
+    const link = sidebar.getByRole('link', { name: 'Registrations' });
     expect(link.getAttribute('href')).toBe('/admin/registrations');
   });
 

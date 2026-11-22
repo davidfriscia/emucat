@@ -196,7 +196,7 @@ function base(routes: Record<string, unknown> = {}) {
 }
 
 async function history() {
-  renderAt(VM_PATH);
+  renderAt(`${VM_PATH}/versions`);
   const tree = await screen.findByRole('tree', { name: 'Versions of Win98' });
   return tree;
 }
@@ -255,7 +255,7 @@ describe('the version tree', () => {
     const broken = branchingTree();
     broken.versions = broken.versions.filter((version) => version.id !== SNAP_A);
     base({ [`GET ${VM_PATH}/versions`]: broken });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     expect(
       await screen.findByText(/version history is inconsistent \(unknown parent\)/),
     ).toBeTruthy();
@@ -271,7 +271,7 @@ describe('the version tree', () => {
         versions: [],
       },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     expect(await screen.findByText('This VM has no versions yet.')).toBeTruthy();
   });
 
@@ -426,9 +426,15 @@ describe('running a version', () => {
     fireEvent.click(
       within(c).getByRole('button', { name: 'Run Win98_202601010003 in Remote Snapshot' }),
     );
-    // Nothing starts from the history itself: it only chooses.
+    // Nothing starts from the history itself: it only chooses, and opens General, where the run panel is.
     expect(api.callsTo('POST', `${VM_PATH}/workspaces`)).toHaveLength(0);
-    const heading = screen.getByRole('heading', { name: 'Run and verify' });
+    const heading = await screen.findByRole('heading', { name: 'Run and verify' });
+    expect(screen.getByTestId('location').textContent).toBe(VM_PATH);
+    expect(
+      within(screen.getByRole('navigation', { name: 'VM' }))
+        .getByRole('link', { name: 'General' })
+        .getAttribute('aria-current'),
+    ).toBe('page');
     await waitFor(() => expect(document.activeElement).toBe(heading));
     const panel = within(heading.closest('section') as HTMLElement);
     expect(
@@ -455,8 +461,10 @@ describe('running a version', () => {
         name: 'Run Win98_202601010003 in Remote Volatile',
       }),
     );
-    const panel = within(
-      screen.getByRole('heading', { name: 'Run and verify' }).closest('section') as HTMLElement,
+    let panel = within(
+      (await screen.findByRole('heading', { name: 'Run and verify' })).closest(
+        'section',
+      ) as HTMLElement,
     );
     await waitFor(() =>
       expect((panel.getByLabelText('Version') as HTMLSelectElement).value).toBe(SNAP_C),
@@ -464,10 +472,22 @@ describe('running a version', () => {
     expect(
       (panel.getByRole('radio', { name: 'Remote Volatile' }) as HTMLInputElement).checked,
     ).toBe(true);
+    // Back to the history, through the VM's sidebar, for another choice.
     fireEvent.click(
-      within(items[1] as HTMLElement).getAllByRole('button', {
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', {
+        name: 'Version History',
+      }),
+    );
+    const again = await screen.findByRole('tree', { name: 'Versions of Win98' });
+    fireEvent.click(
+      within(within(again).getAllByRole('treeitem')[1] as HTMLElement).getAllByRole('button', {
         name: 'Run Win98_202601010001 in Remote Snapshot',
       })[0] as HTMLElement,
+    );
+    panel = within(
+      (await screen.findByRole('heading', { name: 'Run and verify' })).closest(
+        'section',
+      ) as HTMLElement,
     );
     await waitFor(() =>
       expect((panel.getByLabelText('Version') as HTMLSelectElement).value).toBe(SNAP_A),
@@ -497,7 +517,7 @@ describe('manual working copies', () => {
       }),
       [`GET /admin/registrations/${registrationOperation().id}`]: snapshotOperation(),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     expect(await screen.findByText('May have unpreserved changes')).toBeTruthy();
     expect(api.callsTo('POST', `/admin/workspaces/${WORKSPACE}/snapshot`)).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: 'Preserve as snapshot…' }));
@@ -515,7 +535,7 @@ describe('manual working copies', () => {
       [`GET ${VM_PATH}/workspaces`]: { workspaces: [workspace()] },
       [`POST /admin/workspaces/${WORKSPACE}/discard`]: workspace({ state: 'discarding' }),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     fireEvent.click(await screen.findByRole('button', { name: 'Discard…' }));
     const dialog = await screen.findByRole('dialog', { name: 'Discard this working copy' });
     expect(within(dialog).getByText(/will be lost/)).toBeTruthy();
@@ -536,7 +556,7 @@ describe('manual working copies', () => {
     base({
       [`GET ${VM_PATH}/workspaces`]: { workspaces: [workspace({ mayHaveChanges: false })] },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     fireEvent.click(await screen.findByRole('button', { name: 'Discard…' }));
     const dialog = await screen.findByRole('dialog', { name: 'Discard this working copy' });
     expect(within(dialog).queryByLabelText(/to confirm/)).toBeNull();
@@ -558,7 +578,7 @@ describe('manual working copies', () => {
         ],
       },
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     expect(await screen.findByText('The agent no longer has this working copy.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Discard…' })).toBeNull();
   });

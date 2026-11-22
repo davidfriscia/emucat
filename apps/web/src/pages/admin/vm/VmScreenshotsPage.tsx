@@ -1,19 +1,14 @@
-import { useCaptureGalleryRefresh } from '../../components/CaptureScreenshot';
-import {
-  adminVmRoute,
-  vmPathParamsSchema,
-  type AdminMediaSyncResponse,
-  type VmIdentity,
-} from '@emucat/contracts';
+import { useCaptureGalleryRefresh } from '../../../components/CaptureScreenshot';
+import type { AdminMediaListResponse, AdminMediaSyncResponse, VmIdentity } from '@emucat/contracts';
 import { useCallback, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router';
-import { ApiRequestError, fetchVmMedia, fetchVmMediaSync } from '../../api';
-import { EmptyState, ErrorState, LoadingState } from '../../components/States';
-import { ReorderScreenshotsDialog } from '../../components/ReorderScreenshots';
-import { VmMediaGrid } from '../../components/VmMediaGrid';
-import { useAsync } from '../../useAsync';
-import { usePolledData } from '../../usePolledData';
-import { NotFoundPage } from '../NotFoundPage';
+import { fetchVmMedia, fetchVmMediaSync } from '../../../api';
+import { ReorderScreenshotsDialog } from '../../../components/ReorderScreenshots';
+import { EmptyState, ErrorState, LoadingState } from '../../../components/States';
+import { VmMediaGrid } from '../../../components/VmMediaGrid';
+import { useAsync } from '../../../useAsync';
+import { usePolledData } from '../../../usePolledData';
+import { PublicCoverNotice } from './VmGeneralPage';
+import { useVmManage } from './VmManageLayout';
 
 const SYNC_POLL_MS = 5_000;
 
@@ -85,9 +80,14 @@ function SyncSummary({ vm }: { vm: VmIdentity }) {
   );
 }
 
-function VmMedia({ identity }: { identity: VmIdentity }) {
+/**
+ * Screenshots: the VM's gallery, its cover, order, tags and deletion, and how the agents' uploads are going.
+ * Screenshots are media of their own (decision 0051): nothing here reads or changes the VM's archives, versions,
+ * verification or transfers.
+ */
+export function VmScreenshotsPage() {
+  const { identity, vm, title, refreshVm } = useVmManage();
   const { emulatorType, vmName } = identity;
-  const vm = { emulatorType, vmName };
   const load = useCallback(
     (signal: AbortSignal) => fetchVmMedia({ emulatorType, vmName }, signal),
     [emulatorType, vmName],
@@ -101,46 +101,35 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
   const [reordered, setReordered] = useState(false);
   const reorderButton = useRef<HTMLButtonElement>(null);
 
-  if (state.status === 'loading') return <LoadingState label="Loading media" />;
-  if (state.status === 'error') {
-    if (state.error instanceof ApiRequestError && state.error.status === 404) {
-      return (
-        <EmptyState
-          title="This virtual machine is not registered"
-          action={
-            <Link to="/admin/catalog" className="btn btn-outline-primary">
-              Back to the catalog
-            </Link>
-          }
-        >
-          It may have a different name, or it may not have been registered yet.
-        </EmptyState>
-      );
-    }
-    return <ErrorState error={state.error} onRetry={reload} />;
-  }
+  // A change to a screenshot can change the VM's cover, and the server is what says how.
+  const mediaChanged = (next: AdminMediaListResponse) => {
+    setData(next);
+    refreshVm();
+  };
 
+  const media = state.status === 'success' ? state.data.media : [];
   return (
-    <>
-      <title>{`Media of ${vmName} · EmuCat`}</title>
-      <nav aria-label="Breadcrumb" className="small mb-3">
-        <Link to={adminVmRoute(vm)}>{vmName}</Link>
-      </nav>
+    <section aria-labelledby="vm-screenshots-heading">
+      <title>{`${title} · Screenshots · Manage · EmuCat`}</title>
       <div className="d-flex flex-wrap align-items-center gap-2 mb-3">
-        <h1 className="h3 mb-0 flex-grow-1">Media</h1>
-        <button
-          ref={reorderButton}
-          type="button"
-          className="btn btn-outline-primary"
-          disabled={state.data.media.length < 2}
-          title={state.data.media.length < 2 ? 'There is nothing to reorder yet' : undefined}
-          onClick={() => {
-            setReordered(false);
-            setReordering(true);
-          }}
-        >
-          Reorder Screenshots
-        </button>
+        <h2 id="vm-screenshots-heading" className="h5 mb-0 flex-grow-1">
+          Screenshots
+        </h2>
+        {state.status === 'success' ? (
+          <button
+            ref={reorderButton}
+            type="button"
+            className="btn btn-outline-primary"
+            disabled={media.length < 2}
+            title={media.length < 2 ? 'There is nothing to reorder yet' : undefined}
+            onClick={() => {
+              setReordered(false);
+              setReordering(true);
+            }}
+          >
+            Reorder Screenshots
+          </button>
+        ) : null}
       </div>
       {reordered ? (
         <div className="alert alert-success" role="status">
@@ -154,21 +143,33 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
         placeholder: another image is never chosen automatically. Images are independent of VM
         versions.
       </p>
-      <SyncSummary vm={vm} />
-      {state.data.media.length === 0 ? (
-        <EmptyState title="No media yet">
+      <div className="mb-3">
+        <PublicCoverNotice vm={vm} />
+      </div>
+      <SyncSummary vm={identity} />
+      {state.status === 'loading' ? <LoadingState label="Loading screenshots" /> : null}
+      {state.status === 'error' ? (
+        <ErrorState
+          title="The screenshots could not be loaded"
+          error={state.error}
+          onRetry={reload}
+        />
+      ) : null}
+      {state.status === 'success' && media.length === 0 ? (
+        <EmptyState title="No screenshots yet">
           Screenshots appear here shortly after the agent finds them in this VM’s directory. They
           are not in the VM’s archive, and nothing here reads or changes the VM itself.
         </EmptyState>
-      ) : (
-        <VmMediaGrid vm={vm} media={state.data.media} onChange={setData} />
-      )}
-      {reordering ? (
+      ) : null}
+      {state.status === 'success' && media.length > 0 ? (
+        <VmMediaGrid vm={identity} media={media} onChange={mediaChanged} showMain />
+      ) : null}
+      {reordering && state.status === 'success' ? (
         <ReorderScreenshotsDialog
-          vm={vm}
-          media={state.data.media}
+          vm={identity}
+          media={media}
           onSaved={(next) => {
-            setData(next);
+            mediaChanged(next);
             setReordered(true);
           }}
           onClose={() => {
@@ -177,12 +178,6 @@ function VmMedia({ identity }: { identity: VmIdentity }) {
           }}
         />
       ) : null}
-    </>
+    </section>
   );
-}
-
-export function VmMediaPage() {
-  const params = vmPathParamsSchema.safeParse(useParams());
-  if (!params.success) return <NotFoundPage />;
-  return <VmMedia identity={params.data} />;
 }

@@ -114,7 +114,11 @@ describe('navigation', () => {
   it('offers Agents to an administrator', async () => {
     mockApi({ ...signedInAsAdmin, ...LIST_ROUTES });
     renderAt('/');
-    expect(await screen.findByRole('link', { name: 'Agents' })).toBeTruthy();
+    fireEvent.click(await screen.findByRole('link', { name: 'Admin' }));
+    const sidebar = within(await screen.findByRole('navigation', { name: 'Admin' }));
+    const agents = sidebar.getByRole('link', { name: 'Agents' });
+    // Admin opens on Agents, the first destination of its sidebar.
+    await waitFor(() => expect(agents.getAttribute('aria-current')).toBe('page'));
   });
 
   it('does not offer Agents to anyone else', async () => {

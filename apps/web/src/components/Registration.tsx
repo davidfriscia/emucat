@@ -11,6 +11,7 @@ import {
   type RegistrationState,
   type RepositorySummary,
 } from '@emucat/contracts';
+import { vmSectionRoute } from '../navigation';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import {
@@ -129,7 +130,7 @@ function VersionReference({ operation }: { operation: RegistrationOperation }) {
       ) : (
         <Link
           className="text-break"
-          to={`${adminVmRoute(operation)}#version-${operation.versionId}`}
+          to={`${vmSectionRoute(operation, 'versions')}#version-${operation.versionId}`}
         >
           {operation.versionId}
         </Link>

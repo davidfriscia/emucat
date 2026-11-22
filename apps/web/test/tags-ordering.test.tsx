@@ -13,6 +13,7 @@ import {
   mockApi,
   OTHER_MEDIA_ID,
   Reply,
+  adminVm,
   renderAt,
   resetApiState,
   signedInAsAdmin,
@@ -233,11 +234,12 @@ describe('reordering screenshots', () => {
     const reordered = [three[1], three[2], three[0]] as AdminMedia[];
     const api = mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: three },
       [`GET ${VM_PATH}/media-sync`]: SYNC,
       [`PUT ${VM_PATH}/media-order`]: { media: reordered },
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     fireEvent.click(await screen.findByRole('button', { name: 'Reorder Screenshots' }));
     const dialog = within(screen.getByRole('dialog', { name: 'Reorder screenshots' }));
     expect(rowNames()).toEqual(['boot.png', 'desktop.png', 'game.png']);
@@ -273,10 +275,11 @@ describe('reordering screenshots', () => {
   it('discards unsaved changes on Cancel', async () => {
     const api = mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: three },
       [`GET ${VM_PATH}/media-sync`]: SYNC,
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     const open = await screen.findByRole('button', { name: 'Reorder Screenshots' });
     fireEvent.click(open);
     let dialog = within(screen.getByRole('dialog', { name: 'Reorder screenshots' }));
@@ -297,6 +300,7 @@ describe('reordering screenshots', () => {
     let release: (value: unknown) => void = () => undefined;
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: three },
       [`GET ${VM_PATH}/media-sync`]: SYNC,
       [`PUT ${VM_PATH}/media-order`]: () =>
@@ -304,7 +308,7 @@ describe('reordering screenshots', () => {
           release = resolve;
         }),
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     fireEvent.click(await screen.findByRole('button', { name: 'Reorder Screenshots' }));
     const dialog = within(screen.getByRole('dialog', { name: 'Reorder screenshots' }));
     fireEvent.click(dialog.getByRole('button', { name: 'Move game.png up' }));
@@ -353,10 +357,11 @@ describe('reordering screenshots', () => {
     });
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: three },
       [`GET ${VM_PATH}/media-sync`]: SYNC,
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     fireEvent.click(await screen.findByRole('button', { name: 'Reorder Screenshots' }));
     const handle = screen.getByRole('button', { name: 'Drag boot.png, at position 1 of 3' });
     handle.focus();
@@ -376,10 +381,11 @@ describe('reordering screenshots', () => {
   it('cannot be opened with fewer than two screenshots', async () => {
     mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: [three[0]] },
       [`GET ${VM_PATH}/media-sync`]: SYNC,
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     const open = (await screen.findByRole('button', {
       name: 'Reorder Screenshots',
     })) as HTMLButtonElement;
@@ -397,12 +403,13 @@ describe('screenshot management', () => {
   it('shows each screenshot’s tags, and edits them in a dialog', async () => {
     const api = mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: three },
       [`GET ${VM_PATH}/media-sync`]: SYNC,
       'GET /admin/tags': { tags: [RETRO] },
       [`PUT ${VM_PATH}/media/${THIRD_ID}/tags`]: { tags: [RETRO, RACING] },
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     expect((await screen.findByRole('list', { name: 'Tags of game.png' })).textContent).toBe(
       '#Racing',
     );
@@ -424,6 +431,7 @@ describe('screenshot management', () => {
     let release: (value: unknown) => void = () => undefined;
     const api = mockApi({
       ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
       [`GET ${MEDIA_PATH}`]: { media: three },
       [`GET ${VM_PATH}/media-sync`]: SYNC,
       [`DELETE ${VM_PATH}/media/${MEDIA_ID}`]: () =>
@@ -431,7 +439,7 @@ describe('screenshot management', () => {
           release = resolve;
         }),
     });
-    renderAt(MEDIA_PATH);
+    renderAt(`${VM_PATH}/screenshots`);
     const card = (await screen.findByRole('heading', { name: 'boot.png' })).closest(
       'article',
     ) as HTMLElement;

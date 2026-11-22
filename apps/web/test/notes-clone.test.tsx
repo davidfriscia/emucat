@@ -143,7 +143,7 @@ describe('VM notes', () => {
     const api = page({
       [`PUT ${NOTES_PATH}`]: (call: { body: { markdown: string } }) => notes(call.body.markdown),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/notes`);
     const section = await notesSection();
     expect(await within(section).findByText(/No notes yet/)).toBeTruthy();
     expect(within(section).getByText(/Private to administrators/)).toBeTruthy();
@@ -199,7 +199,7 @@ describe('VM notes', () => {
 
   it('asks before discarding unsaved changes, and keeps the saved notes', async () => {
     const api = page({ [`GET ${NOTES_PATH}`]: notes('Saved text') });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/notes`);
     const section = await notesSection();
     fireEvent.click(await within(section).findByRole('button', { name: /Edit notes of/ }));
     const area = await within(section).findByRole('textbox');
@@ -220,12 +220,85 @@ describe('VM notes', () => {
 
   it('cancels without asking when nothing changed', async () => {
     page({ [`GET ${NOTES_PATH}`]: notes('Saved text') });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/notes`);
     const section = await notesSection();
     fireEvent.click(await within(section).findByRole('button', { name: /Edit notes of/ }));
     await within(section).findByRole('textbox');
     fireEvent.click(within(section).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(within(section).queryByRole('textbox')).toBeNull());
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('is a section of the VM’s sidebar, and opening it reads the notes without writing anything', async () => {
+    const api = page();
+    renderAt(VM_PATH);
+    const sidebar = within(await screen.findByRole('navigation', { name: 'VM' }));
+    fireEvent.click(sidebar.getByRole('link', { name: 'Notes' }));
+    const section = await notesSection();
+    expect(await within(section).findByText(/No notes yet/)).toBeTruthy();
+    expect(sidebar.getByRole('link', { name: 'Notes' }).getAttribute('aria-current')).toBe('page');
+    expect(api.callsTo('GET', NOTES_PATH)).toHaveLength(1);
+    expect(api.calls.filter((call) => call.path === NOTES_PATH && call.method !== 'GET')).toEqual(
+      [],
+    );
+  });
+
+  it('asks before leaving for another section with unsaved changes, and stays when told to', async () => {
+    const api = page({ [`GET ${VM_PATH}/media-sync`]: { agents: [] } });
+    renderAt(`${VM_PATH}/notes`);
+    const section = await notesSection();
+    fireEvent.click(
+      await within(section).findByRole('button', { name: 'Edit notes of Windows 98 SE' }),
+    );
+    const area = await within(section).findByRole('textbox');
+    fireEvent.input(area, { target: { value: 'Draft' } });
+    await within(section).findByText('Unsaved changes');
+
+    const sidebar = within(screen.getByRole('navigation', { name: 'VM' }));
+    fireEvent.click(sidebar.getByRole('link', { name: 'Screenshots' }));
+    let dialog = within(
+      await screen.findByRole('dialog', { name: 'Leave without saving your notes?' }),
+    );
+    expect(screen.getByTestId('location').textContent).toBe(`${VM_PATH}/notes`);
+    fireEvent.click(dialog.getByRole('button', { name: 'Keep editing' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // Still editing, with the draft.
+    expect((within(section).getByRole('textbox') as HTMLTextAreaElement).value).toBe('Draft');
+
+    // The global header asks too.
+    fireEvent.click(
+      within(screen.getAllByRole('navigation')[0]!).getByRole('link', { name: 'Catalog' }),
+    );
+    dialog = within(
+      await screen.findByRole('dialog', { name: 'Leave without saving your notes?' }),
+    );
+    fireEvent.click(dialog.getByRole('button', { name: 'Keep editing' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    fireEvent.click(sidebar.getByRole('link', { name: 'Screenshots' }));
+    dialog = within(
+      await screen.findByRole('dialog', { name: 'Leave without saving your notes?' }),
+    );
+    fireEvent.click(dialog.getByRole('button', { name: 'Leave without saving' }));
+    await screen.findByRole('heading', { name: 'Screenshots' });
+    expect(screen.getByTestId('location').textContent).toBe(`${VM_PATH}/screenshots`);
+    expect(api.callsTo('PUT', NOTES_PATH)).toEqual([]);
+  });
+
+  it('leaves without asking when nothing changed', async () => {
+    page({ [`GET ${VM_PATH}/media-sync`]: { agents: [] } });
+    renderAt(`${VM_PATH}/notes`);
+    const section = await notesSection();
+    fireEvent.click(
+      await within(section).findByRole('button', { name: 'Edit notes of Windows 98 SE' }),
+    );
+    await within(section).findByRole('textbox');
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', {
+        name: 'Screenshots',
+      }),
+    );
+    await screen.findByRole('heading', { name: 'Screenshots' });
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
@@ -235,7 +308,7 @@ describe('VM notes', () => {
       [`GET ${NOTES_PATH}`]: () => (reads++ === 0 ? notes('Mine') : notes('Theirs', ETAG_TWO)),
       [`PUT ${NOTES_PATH}`]: apiError(412, 'notes_conflict', 'The notes were changed'),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/notes`);
     const section = await notesSection();
     fireEvent.click(await within(section).findByRole('button', { name: /Edit notes of/ }));
     fireEvent.input(await within(section).findByRole('textbox'), {
@@ -261,7 +334,7 @@ describe('VM notes', () => {
           ? apiError(503, 'notes_unavailable', 'The notes directory cannot be written.')
           : notes(''),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/notes`);
     const section = await notesSection();
     expect(await within(section).findByText(/The notes directory cannot be written/)).toBeTruthy();
     fail = false;
@@ -273,7 +346,7 @@ describe('VM notes', () => {
     // The user's choice, as the theme menu saves it.
     localStorage.setItem('emucat.theme', 'dark');
     page({ [`GET ${NOTES_PATH}`]: notes('Dark text') });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/notes`);
     const section = await notesSection();
     await waitFor(() => expect(vditor.state.previews.at(-1)?.options.mode).toBe('dark'));
     fireEvent.click(within(section).getByRole('button', { name: /Edit notes of/ }));
@@ -291,7 +364,7 @@ describe('VM notes', () => {
       [`GET ${NOTES_PATH}`]: notes('To be removed'),
       [`DELETE ${NOTES_PATH}`]: notes(''),
     });
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/notes`);
     const section = await notesSection();
     fireEvent.click(await within(section).findByRole('button', { name: 'Clear…' }));
     fireEvent.click(
@@ -387,7 +460,7 @@ describe('cloning a version', () => {
   }
 
   async function openDialog() {
-    renderAt(VM_PATH);
+    renderAt(`${VM_PATH}/versions`);
     const tree = await screen.findByRole('tree', { name: 'Versions of Win98' });
     fireEvent.click(within(tree).getByRole('button', { name: 'Clone Master into a new VM' }));
     return screen.findByRole('dialog', { name: 'Clone VM' });

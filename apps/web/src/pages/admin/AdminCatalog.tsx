@@ -1,6 +1,6 @@
-import { adminMediaPath, adminVmRoute, vmTitle } from '@emucat/contracts';
+import { adminMediaPath, adminVmRoute, publicVmRoute, vmTitle } from '@emucat/contracts';
 import { useCallback } from 'react';
-import { fetchAdminCatalog } from '../../api';
+import { fetchAdminCatalog, fetchAdminSummary } from '../../api';
 import {
   CatalogControls,
   Pagination,
@@ -12,8 +12,42 @@ import {
 import { EmptyState, ErrorState, LoadingState } from '../../components/States';
 import { useAsync } from '../../useAsync';
 
-/** Every registered VM, public or not. Deliberately offers no way to create one. */
-export function CatalogManagementPage() {
+/** How many VMs and screenshots there are, and how many of them the public sees. */
+function CatalogSummary() {
+  const load = useCallback((signal: AbortSignal) => fetchAdminSummary(signal), []);
+  const { state } = useAsync(load);
+  if (state.status !== 'success') return null;
+  const { vms, media } = state.data;
+  return (
+    <dl className="catalog-summary small mb-3" aria-label="Catalog summary">
+      <div>
+        <dt>Virtual machines</dt>
+        <dd>
+          <span className="stat-value">{vms.total}</span>{' '}
+          <span className="text-body-secondary">
+            {vms.public} public, {vms.private} private
+          </span>
+        </dd>
+      </div>
+      <div>
+        <dt>Media</dt>
+        <dd>
+          <span className="stat-value">{media.total}</span>{' '}
+          <span className="text-body-secondary">
+            {media.public} public, {media.private} private, by their VM
+          </span>
+        </dd>
+      </div>
+    </dl>
+  );
+}
+
+/**
+ * The catalog as an administrator sees it: every registered VM, public or not. A public VM opens on its public page,
+ * whose Manage this VM action leads to its management; a private one has no public page, so it opens there directly.
+ * Deliberately offers no way to create a VM.
+ */
+export function AdminCatalog() {
   const filters = useCatalogFilters();
   const { q, emulatorType, visibility, page, filtered, update } = filters;
   const load = useCallback(
@@ -24,8 +58,9 @@ export function CatalogManagementPage() {
 
   return (
     <>
-      <title>Manage · EmuCat</title>
-      <h1 className="h3 mb-3">Manage the catalog</h1>
+      <title>Catalog · EmuCat</title>
+      <h1 className="h3 mb-3">Catalog</h1>
+      <CatalogSummary />
       <RegistrationNote />
       <CatalogControls filters={filters} showVisibility />
       {state.status === 'loading' ? <LoadingState label="Loading the catalog" /> : null}
@@ -60,7 +95,7 @@ export function CatalogManagementPage() {
             {state.data.items.map((vm) => (
               <VmCard
                 key={`${vm.emulatorType}/${vm.vmName}`}
-                to={adminVmRoute(vm)}
+                to={vm.visibility === 'public' ? publicVmRoute(vm) : adminVmRoute(vm)}
                 title={vmTitle(vm)}
                 emulatorType={vm.emulatorType}
                 summary={vm.summary}

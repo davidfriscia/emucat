@@ -82,8 +82,13 @@ describe('empty states', () => {
 describe('loading and errors', () => {
   it('shows a loading state until the data arrives', async () => {
     let release: (value: unknown) => void = () => undefined;
-    mockApi({ 'GET /catalog/vms': () => new Promise((resolve) => (release = resolve)) });
+    const api = mockApi({
+      'GET /catalog/vms': () => new Promise((resolve) => (release = resolve)),
+    });
     renderAt('/');
+    expect(screen.getByText('Loading the catalog')).toBeTruthy();
+    // The session decides which catalog to show, so the list is asked for once it is known.
+    await waitFor(() => expect(api.callsTo('GET', '/catalog/vms')).toHaveLength(1));
     expect(screen.getByText('Loading the catalog')).toBeTruthy();
     release(page([card()]));
     expect(await screen.findByRole('link', { name: 'Windows 98 SE' })).toBeTruthy();
