@@ -538,7 +538,7 @@ credential).
 
 ## 16. MARS
 
-Test server, branch `develop`, `https://emucat-test.dfri.info`, updates from Settings enabled. The
+Test server, branch `develop`, `https://emucat-test.dfri.info`, updates from Admin › Application Updates enabled. The
 default [`deploy.env.example`](../deploy/config/deploy.env.example) has the MARS values: the web container
 listens on `10.0.0.2:8095` for the reverse proxy, and `app.env.example` has
 `PUBLIC_ORIGIN=https://emucat-test.dfri.info`. Only `EMUCAT_GIT_URL` and `DB_PASSWORD` must be filled in.
@@ -588,7 +588,7 @@ are left as they are; `init` is not needed again.
 '/app/migrations/0001_initial_schema.sql'` (the first MARS update): the API image kept the 0640 modes of
 the exported release, which UID 1000 cannot read. The migration runner reads every file before it
 connects, so nothing reached the database, and no release was recorded. Once a `develop` with fixed
-images is pushed, run `update` again (from Settings or `sudo /opt/emucat/tooling/bin/emucatctl update`):
+images is pushed, run `update` again (from Admin › Application Updates or `sudo /opt/emucat/tooling/bin/emucatctl update`):
 it is again a first deployment on an empty database, builds new images and applies all migrations.
 The failure message's "Restore before retrying" does not apply: there was no backup to restore and
 nothing to undo. Nothing on the host needs a permission change.
@@ -599,11 +599,11 @@ nothing to undo. Nothing on the host needs a permission change.
 `RestrictSUIDSGID=yes` (section 9). Nothing was built, backed up, migrated or restarted, and the previous
 release is still running. The failed attempt left at most a partial copy in `state/builds/<commit>`. Only
 an update of that same commit removes it, so once `develop` has moved on, remove it by hand while no
-update runs: `sudo rm -rf -- /opt/emucat/state/builds/<commit>`. Updates from Settings run the
+update runs: `sudo rm -rf -- /opt/emucat/state/builds/<commit>`. Updates from Admin › Application Updates run the
 _installed_ tooling, so deploying a fixed `develop` does not fix this by itself. Copy a newer
 `origin/develop` the same way as above and run `sudo deploy/bin/emucatctl install` again. It replaces
 `emucatctl`, rewrites the unit (with `RestrictSUIDSGID=yes` still in it) and restarts the service. Then
-run `update` again, from Settings or with `sudo /opt/emucat/tooling/bin/emucatctl update`. Configuration,
+run `update` again, from Admin › Application Updates or with `sudo /opt/emucat/tooling/bin/emucatctl update`. Configuration,
 mirror, releases, backups, media and the database are left as they are.
 
 ## 17. MOON
@@ -624,7 +624,7 @@ key on each host.
 ## 18. Disabling updates in production
 
 `EMUCAT_ADMIN_UPDATES_ENABLED` must be exactly `true` for the Install button to work; any other value,
-including a missing one, disables it. Settings then shows that updates are disabled on this host, and
+including a missing one, disables it. Application Updates then shows that updates are disabled on this host, and
 the deployment service refuses a start request with `403 updates_disabled` whatever the browser sends.
 Status and "Check for updates" still work. Updates remain possible from the command line.
 
@@ -660,24 +660,24 @@ host.
 
 ## 20. Troubleshooting
 
-| Symptom                                              | Look at                                                                                                                                |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Settings: "deployment service unavailable"           | `systemctl status emucat-deployer`, `journalctl -u emucat-deployer`; socket and token permissions; the API's GID (`EMUCAT_SOCKET_GID`) |
-| Settings: "not configured"                           | The API runs without `DEPLOYER_SOCKET` (not under `deploy/compose.yaml`)                                                               |
-| `update` exits 75                                    | Another update holds the lock; `emucatctl status`                                                                                      |
-| "target_changed"                                     | The branch moved after the check; check again                                                                                          |
-| Build or test stage fails                            | `state/operations/<id>.log`; the running release is untouched                                                                          |
-| Backup fails                                         | MariaDB reachable from the host as `emucat-usr`? Disk space in `/opt/emucat/backups`                                                   |
-| API unhealthy after start                            | `emucatctl logs api`: database address, firewall, `bind-address`, migrations                                                           |
-| `cross_origin_rejected` at sign-in                   | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
-| Client addresses are the proxy's                     | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
-| Agents disconnect every minute                       | Proxy WebSocket timeouts (section 15)                                                                                                  |
-| Service restarts, `ERR_UNKNOWN_FILE_EXTENSION` `.ts` | Tooling from before the compiled service; run `install` again from a current checkout (section 16)                                     |
-| Update: `Cannot open: Function not implemented`      | Tooling from before the Git export (section 9); run `install` again from a current checkout (section 16)                               |
-| `install`: "did not answer on its socket"            | `journalctl -u emucat-deployer -n 50`; `check`; is `node` on root's `PATH` the one in the unit's `ExecStart`?                          |
-| Media permission errors                              | `/opt/emucat/data/media` must be owned by `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (david:david, 1000:1000)                                  |
-| An update shows "interrupted"                        | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
-| `rollback-app` exits 3                               | The database is newer than that release; restore a dump or fix forward                                                                 |
+| Symptom                                               | Look at                                                                                                                                |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Application Updates: "deployment service unavailable" | `systemctl status emucat-deployer`, `journalctl -u emucat-deployer`; socket and token permissions; the API's GID (`EMUCAT_SOCKET_GID`) |
+| Application Updates: "not configured"                 | The API runs without `DEPLOYER_SOCKET` (not under `deploy/compose.yaml`)                                                               |
+| `update` exits 75                                     | Another update holds the lock; `emucatctl status`                                                                                      |
+| "target_changed"                                      | The branch moved after the check; check again                                                                                          |
+| Build or test stage fails                             | `state/operations/<id>.log`; the running release is untouched                                                                          |
+| Backup fails                                          | MariaDB reachable from the host as `emucat-usr`? Disk space in `/opt/emucat/backups`                                                   |
+| API unhealthy after start                             | `emucatctl logs api`: database address, firewall, `bind-address`, migrations                                                           |
+| `cross_origin_rejected` at sign-in                    | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
+| Client addresses are the proxy's                      | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
+| Agents disconnect every minute                        | Proxy WebSocket timeouts (section 15)                                                                                                  |
+| Service restarts, `ERR_UNKNOWN_FILE_EXTENSION` `.ts`  | Tooling from before the compiled service; run `install` again from a current checkout (section 16)                                     |
+| Update: `Cannot open: Function not implemented`       | Tooling from before the Git export (section 9); run `install` again from a current checkout (section 16)                               |
+| `install`: "did not answer on its socket"             | `journalctl -u emucat-deployer -n 50`; `check`; is `node` on root's `PATH` the one in the unit's `ExecStart`?                          |
+| Media permission errors                               | `/opt/emucat/data/media` must be owned by `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (david:david, 1000:1000)                                  |
+| An update shows "interrupted"                         | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
+| `rollback-app` exits 3                                | The database is newer than that release; restore a dump or fix forward                                                                 |
 
 `sudo /opt/emucat/tooling/bin/emucatctl check` verifies the configuration, tools, Docker, MariaDB, the
 mirror, the installed service program and that the service answers an authenticated request on its
