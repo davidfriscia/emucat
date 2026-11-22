@@ -146,6 +146,7 @@ function operation(overrides: Partial<RegistrationOperation> = {}): Registration
     acknowledgedByDisplayName: null,
     parentSnapshotName: null,
     versionDeletion: null,
+    cloneSource: null,
     virtualboxUuid: null,
     ...overrides,
   };

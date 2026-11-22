@@ -129,6 +129,7 @@ export function adminVm(overrides: Partial<AdminVmDetail> = {}): AdminVmDetail {
     mediaCount: 0,
     versionCount: 1,
     tags: [],
+    clonedFrom: null,
     createdAt: PAST,
     updatedAt: PAST,
     ...overrides,

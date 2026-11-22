@@ -860,3 +860,46 @@ main.container:has(> .page-wide) {
 .confirm-thumbnail {
   flex: 0 0 5rem;
 }
+
+/* VM notes (decision 0053): the Vditor editor and the rendered notes. */
+.markdown-editor {
+  width: 100%;
+  min-width: 0;
+}
+.markdown-editor .vditor {
+  border-color: var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+}
+.markdown-editor .vditor-toolbar {
+  flex-wrap: wrap;
+}
+.markdown-view {
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.markdown-view table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.markdown-view pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.markdown-view img {
+  max-width: 100%;
+  height: auto;
+}
+@media (max-width: 576px) {
+  /* Side by side is too narrow on a phone: the editor alone, with the preview a tap away. */
+  .markdown-editor .vditor-content .vditor-preview {
+    display: none;
+  }
+  .markdown-editor .vditor-content .vditor-sv {
+    width: 100% !important;
+    flex: 1 1 100%;
+  }
+}
+.clone-dialog {
+  max-width: 36rem;
+}

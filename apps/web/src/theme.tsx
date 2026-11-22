@@ -63,3 +63,21 @@ export function useTheme(): ThemeContextValue {
   if (!value) throw new Error('useTheme must be used inside ThemeProvider');
   return value;
 }
+
+export type MarkdownTheme = 'light' | 'dark';
+
+/** The theme Bootstrap is showing now, which follows the user's choice and the system's. */
+export function useDocumentTheme(): MarkdownTheme {
+  const read = (): MarkdownTheme =>
+    document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'dark' : 'light';
+  const [theme, setTheme] = useState(read);
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(read()));
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-bs-theme'],
+    });
+    return () => observer.disconnect();
+  }, []);
+  return theme;
+}

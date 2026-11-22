@@ -172,6 +172,7 @@ function registration(overrides: Partial<RegistrationOperation> = {}): Registrat
     acknowledgedByDisplayName: null,
     parentSnapshotName: null,
     versionDeletion: null,
+    cloneSource: null,
     virtualboxUuid: MACHINE,
     ...overrides,
   };

@@ -42,6 +42,7 @@ export function registrationOperation(): RegistrationOperation {
     acknowledgedByDisplayName: null,
     parentSnapshotName: null,
     versionDeletion: null,
+    cloneSource: null,
     virtualboxUuid: null,
   };
 }

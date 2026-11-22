@@ -2,6 +2,7 @@ import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from 'vite';
 import { defineConfig } from 'vitest/config';
+import { vditorAssets } from './vditor-assets';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 
@@ -13,7 +14,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     envDir: repositoryRoot,
-    plugins: [react()],
+    plugins: [react(), vditorAssets()],
     server: { host: '127.0.0.1', port: 5173, strictPort: true, proxy },
     preview: { host: '127.0.0.1', port: 4173, strictPort: true, proxy },
     test: {

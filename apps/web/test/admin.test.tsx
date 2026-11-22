@@ -203,6 +203,13 @@ describe('VM editor', () => {
     mockApi({
       ...signedInAsAdmin,
       [`GET ${VM_PATH}`]: adminVm(),
+      [`GET ${VM_PATH}/notes`]: {
+        markdown: '',
+        exists: false,
+        etag: `"${'0'.repeat(64)}"`,
+        updatedAt: null,
+        sizeBytes: 0,
+      },
       [`PATCH ${VM_PATH}`]: (() => {
         const reply = apiError(400, 'validation_failed', 'Request validation failed');
         (reply.body as { error: { details: object[] } }).error.details = [

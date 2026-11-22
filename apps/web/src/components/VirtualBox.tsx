@@ -80,7 +80,8 @@ function Accessibility({ vm }: { vm: VirtualBoxVm }) {
   );
 }
 
-const NAME_ERROR_TEXT: Record<VmNameErrorCode, string> = {
+/** What to do about a name the VM name rules refuse. */
+export const NAME_ERROR_TEXT: Record<VmNameErrorCode, string> = {
   empty: 'Choose a name.',
   invalid_characters: 'Use letters, digits, spaces, dots, hyphens and underscores only.',
   too_long: `Use at most ${VM_NAME_MAX_LENGTH} characters.`,

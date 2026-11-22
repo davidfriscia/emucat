@@ -23,6 +23,7 @@ import {
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
 import { DeleteSnapshotDialog, deletionReasonText } from './Cleanup';
+import { CloneProgress, CloneVmDialog } from './Clone';
 import { ConfirmDialog } from './Dialogs';
 import { VmLaunchDialog, WORKSPACE_STATE_TEXT, type RunPreselection } from './Execution';
 import {
@@ -98,8 +99,11 @@ function VersionItem({
   onEditDetails,
   onEditTags,
   onPromote,
+  onClone,
 }: {
   entry: VersionTreeEntry;
+  /** Opens the dialog that clones this version into a new VM (decision 0052). */
+  onClone: (node: VersionNode) => void;
   onEditDetails: (node: VersionNode) => void;
   onEditTags: (node: VersionNode) => void;
   onPromote: (node: VersionNode) => void;
@@ -392,6 +396,16 @@ function VersionItem({
               >
                 Tags…
               </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-secondary theme-button"
+                disabled={!node.available}
+                aria-label={`Clone ${nameOf(node)} into a new VM`}
+                aria-haspopup="dialog"
+                onClick={() => onClone(node)}
+              >
+                Clone VM…
+              </button>
               {node.kind === 'snapshot' ? (
                 <button
                   type="button"
@@ -426,6 +440,7 @@ function VersionItem({
               onEditDetails={onEditDetails}
               onEditTags={onEditTags}
               onPromote={onPromote}
+              onClone={onClone}
             />
           ))}
         </ul>
@@ -647,6 +662,8 @@ function VersionHistory({
   const [tagging, setTagging] = useState<VersionNode | null>(null);
   const [promoting, setPromoting] = useState<VersionNode | null>(null);
   const [remastering, setRemastering] = useState(false);
+  const [cloning, setCloning] = useState<VersionNode | null>(null);
+  const [clones, setClones] = useState<string[]>([]);
   const [startedRemaster, setStartedRemaster] = useState<string | null>(null);
   const runToken = useRef(0);
 
@@ -750,6 +767,9 @@ function VersionHistory({
       {followed.map((remasterId) => (
         <RemasterProgress key={remasterId} remasterId={remasterId} onChanged={refresh} />
       ))}
+      {clones.map((operationId) => (
+        <CloneProgress key={operationId} operationId={operationId} onFinished={refresh} />
+      ))}
       <FormError error={retryError} />
       {!built.ok ? (
         <div className="alert alert-danger small" role="alert">
@@ -802,6 +822,7 @@ function VersionHistory({
               onEditDetails={setEditing}
               onEditTags={setTagging}
               onPromote={setPromoting}
+              onClone={setCloning}
             />
           </ul>
         </>
@@ -932,6 +953,19 @@ function VersionHistory({
             setStartedRemaster(operation.id);
             refresh();
             if (isVirtualBox) notifyVirtualBoxChanged(identity);
+          }}
+        />
+      ) : null}
+      {cloning ? (
+        <CloneVmDialog
+          vm={identity}
+          title={title ?? vmName}
+          node={cloning}
+          onClose={() => setCloning(null)}
+          onStarted={(operation) => {
+            setCloning(null);
+            setClones((current) => [operation.id, ...current]);
+            refresh();
           }}
         />
       ) : null}

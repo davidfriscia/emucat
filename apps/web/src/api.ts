@@ -1,4 +1,11 @@
 import {
+  cloneOptionsResponseSchema,
+  vmNotesSchema,
+  type CloneOptionsResponse,
+  type CloneVmRequest,
+  type VmNotes,
+} from '@emucat/contracts';
+import {
   createTagResponseSchema,
   entityTagsResponseSchema,
   tagListResponseSchema,
@@ -200,11 +207,13 @@ interface RequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;
   signal?: AbortSignal | undefined;
+  /** Only the few a route documents, such as `if-match`. */
+  headers?: Record<string, string>;
 }
 
 async function send(path: string, options: RequestOptions): Promise<Response> {
   const { method = 'GET', body, signal } = options;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...options.headers };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (method !== 'GET' && csrfToken) headers[CSRF_HEADER] = csrfToken;
 
@@ -1107,5 +1116,53 @@ export function deleteFromVirtualBox(
   return requestJson(`${virtualBoxPath(vm)}/delete`, virtualBoxOperationSchema, {
     method: 'POST',
     body: request,
+  });
+}
+
+// Cloning a version into a new VM (decision 0052)
+
+export function fetchCloneOptions(
+  vm: VmIdentity,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<CloneOptionsResponse> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${versionId}/clone-options`,
+    cloneOptionsResponseSchema,
+    { signal },
+  );
+}
+
+export function cloneVm(
+  vm: VmIdentity,
+  versionId: string,
+  request: CloneVmRequest,
+): Promise<RegistrationOperation> {
+  return requestJson(
+    `${relative(adminVmApiPath(vm))}/versions/${versionId}/clone`,
+    registrationOperationSchema,
+    { method: 'POST', body: request },
+  );
+}
+
+// Per-VM Markdown notes (decision 0053)
+
+export function fetchVmNotes(vm: VmIdentity, signal?: AbortSignal): Promise<VmNotes> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/notes`, vmNotesSchema, { signal });
+}
+
+/** Saves the whole document, if the notes are still the ones `etag` names. An empty document removes them. */
+export function saveVmNotes(vm: VmIdentity, markdown: string, etag: string): Promise<VmNotes> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/notes`, vmNotesSchema, {
+    method: 'PUT',
+    body: { markdown },
+    headers: { 'if-match': etag },
+  });
+}
+
+export function clearVmNotes(vm: VmIdentity, etag: string): Promise<VmNotes> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/notes`, vmNotesSchema, {
+    method: 'DELETE',
+    headers: { 'if-match': etag },
   });
 }

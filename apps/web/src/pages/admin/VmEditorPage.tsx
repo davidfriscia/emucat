@@ -24,6 +24,8 @@ import {
   VmExecutionSection,
   type RunPreselection,
 } from '../../components/Execution';
+import { ClonedFrom } from '../../components/Clone';
+import { VmNotesSection } from '../../components/VmNotes';
 import { VmRestoreSection } from '../../components/Restore';
 import { VmVersionsSection } from '../../components/Versions';
 import {
@@ -303,7 +305,8 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
                 {vm.mediaCount === 1 ? '1 image' : `${vm.mediaCount} images`},{' '}
                 {vm.mainMediaId ? 'a main image is selected' : 'no main image is selected'}
               </dd>
-              <dt>Registered</dt>
+              {vm.clonedFrom ? <ClonedFrom provenance={vm.clonedFrom} /> : null}
+              <dt>{vm.clonedFrom ? 'Created' : 'Registered'}</dt>
               <dd>{new Date(vm.createdAt).toLocaleString()}</dd>
               <dt>Updated</dt>
               <dd>{new Date(vm.updatedAt).toLocaleString()}</dd>
@@ -332,6 +335,7 @@ function VmEditor({ identity }: { identity: VmIdentity }) {
           <VmVersionsSection vm={identity} title={vmTitle(vm)} onRun={run} />
         </div>
       )}
+      <VmNotesSection vm={identity} title={vmTitle(vm)} />
       <section className="mt-4" aria-labelledby="vm-screenshots-heading">
         <h2 id="vm-screenshots-heading" className="h5">
           Screenshots

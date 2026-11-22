@@ -988,12 +988,14 @@ describe('the requests the page of a VirtualBox VM makes', () => {
       [`GET ${VM_PATH}/restore-options`]: 1,
       // Remasters: once, since nothing is in progress.
       [`GET ${VM_PATH}/remasters`]: 1,
+      // The VM's notes: once, and again only after a change made on the page (decision 0053).
+      [`GET ${VM_PATH}/notes`]: 1,
       // The running session's screenshots: every 15 s. Each ended session's: once.
       [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 15,
       ...Object.fromEntries(ENDED.map((id) => [`GET /admin/sessions/${id}/screenshots`, 1])),
     });
-    // Was 601, 444 of them for the three ended sessions.
-    expect(api.calls).toHaveLength(101);
+    // Was 601, 444 of them for the three ended sessions. One more since the notes (read once).
+    expect(api.calls).toHaveLength(102);
   });
 
   it('requests nothing while the tab is hidden, and catches up when it shows', async () => {
