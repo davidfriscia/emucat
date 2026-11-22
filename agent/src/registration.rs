@@ -156,6 +156,8 @@ struct Inner {
 pub struct AgentOperations {
     inner: Arc<Inner>,
     virtualbox: Arc<crate::virtualbox_registration::VirtualBoxRegistrations>,
+    /// Clones of a version into a new VM (decision 0052).
+    clones: Arc<crate::vm_clone::VmClones>,
     /// Imports into VirtualBox and deletions from it (decision 0046).
     management: Arc<crate::virtualbox_management::VirtualBoxManagement>,
     /// Screenshots of running VirtualBox machines (decision 0046).
@@ -240,6 +242,18 @@ impl AgentOperations {
                 staging_dir: config.staging_dir.clone(),
                 repositories: Arc::clone(&config.repositories),
                 retry_delay: config.retry_delay,
+            },
+            outbound.clone(),
+            Arc::clone(&running),
+            stopping.clone(),
+        )?;
+        let clones = crate::vm_clone::VmClones::load(
+            crate::vm_clone::VmClonesConfig {
+                state_dir: config.state_dir.clone(),
+                staging_dir: config.staging_dir.clone(),
+                repositories: Arc::clone(&config.repositories),
+                retry_delay: config.retry_delay,
+                limits: config.restore.limits,
             },
             outbound.clone(),
             Arc::clone(&running),
@@ -337,6 +351,7 @@ impl AgentOperations {
         Ok(Arc::new(Self {
             inner,
             virtualbox,
+            clones,
             management,
             virtualbox_captures,
             monitor,
@@ -373,12 +388,14 @@ impl AgentOperations {
                 .collect()
         };
         operations.extend(self.virtualbox.sync_entries());
+        operations.extend(self.clones.sync_entries());
         let mut messages = vec![Message::AgentRegistrationSync(RegistrationSync {
             operations,
             snapshots: true,
             virtualbox: self.monitor.is_some(),
             virtualbox_management: self.monitor.is_some() && self.management.available(),
             virtualbox_operations: self.management.sync_entries(),
+            clones: true,
         })];
         messages.push(self.restores.sync_message());
         // Leftovers of a removed copy are deleted again on each connection, off the connection's task.
@@ -399,6 +416,7 @@ impl AgentOperations {
     pub fn pending_reports(&self) -> Vec<Message> {
         let mut reports = self.pending_registration_reports();
         reports.extend(self.virtualbox.pending_reports());
+        reports.extend(self.clones.pending_reports());
         reports.extend(self.management.pending_reports());
         reports.extend(self.virtualbox_captures.reports());
         reports.extend(self.restores.pending_reports());
@@ -475,6 +493,14 @@ impl AgentOperations {
             Message::ServerRegistrationAck(ack) if self.virtualbox.owns(ack.operation_id) => {
                 self.virtualbox.acknowledged(ack);
             }
+            // Clones too (decision 0052).
+            Message::ServerRegistrationCancel(cancel) if self.clones.owns(cancel.operation_id) => {
+                self.clones.cancel(cancel.operation_id);
+            }
+            Message::ServerRegistrationAck(ack) if self.clones.owns(ack.operation_id) => {
+                self.clones.acknowledged(ack);
+            }
+            Message::ServerCloneRequest(request) => self.clones.start(request),
             Message::ServerRegistrationCancel(cancel) => self.inner.cancel(&cancel),
             Message::ServerRegistrationAck(ack) => self.inner.acknowledged(ack),
             Message::ServerVirtualBoxRegistrationRequest(request) => self.virtualbox.start(request),
@@ -682,6 +708,7 @@ impl AgentOperations {
             .copied()
             .collect();
         open.extend(self.virtualbox.open_operations());
+        open.extend(self.clones.open_operations());
         open.extend(self.management.open_operations());
         open
     }

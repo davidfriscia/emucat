@@ -77,5 +77,6 @@ pub mod virtualbox_capture;
 pub mod virtualbox_management;
 pub mod virtualbox_monitor;
 pub mod virtualbox_registration;
+pub mod vm_clone;
 pub mod workspaces;
 pub mod zip_directory;

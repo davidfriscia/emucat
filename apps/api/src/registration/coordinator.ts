@@ -9,6 +9,7 @@ import {
   isRegistrationTerminal,
   isRetryableCleanup,
   registrationRecovery,
+  type CloneRequestPayload,
   type CreateRegistrationRequest,
   type RegistrationAckPayload,
   type RegistrationCleanupPayload,
@@ -33,6 +34,7 @@ import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql
 import type { DiscoveryRecord } from '../agents/discovery.js';
 import { lockUsableVersion } from '../cleanup/version-deletions.js';
 import { ApiError } from '../errors.js';
+import { commitCloneIn } from '../clones/commit.js';
 import { filesystemOnly } from '../virtualbox/policy.js';
 import { recordHealthResult } from './repositories.js';
 
@@ -44,6 +46,8 @@ export interface AgentLink {
   isSnapshotCapable(agentId: string): boolean;
   /** Whether this connection's agent said it can export and run VirtualBox machines (decision 0045). */
   isVirtualBoxCapable(agentId: string): boolean;
+  /** Whether this connection's agent said it can clone versions into new VMs (decision 0052). */
+  isCloneCapable?(agentId: string): boolean;
   activeConnectionId(agentId: string): string | null;
   latestDiscovery(agentId: string): DiscoveryRecord | null;
   send(agentId: string, message: Pick<ServerMessage, 'type' | 'payload'>): boolean;
@@ -82,6 +86,12 @@ interface OperationRow extends RowDataPacket {
   import_size_bytes: number | string | null;
   import_sha256: string | null;
   import_source_name: string | null;
+  clone_source_vm_name: string | null;
+  clone_source_version_id: string | null;
+  clone_source_archive_key: string | null;
+  clone_source_archive_sha256: string | null;
+  clone_source_archive_size_bytes: number | string | null;
+  clone_source_manifest_sha256: string | null;
   archive_key: string;
   progress_done_bytes: number | string | null;
   progress_total_bytes: number | string | null;
@@ -113,6 +123,9 @@ const OPERATION_QUERY = `
          op.archive_key,
          op.parent_version_id, op.snapshot_name, op.workspace_id, op.request_id,
          op.import_size_bytes, op.import_sha256, op.import_source_name,
+         op.clone_source_vm_name, op.clone_source_version_id, op.clone_source_archive_key,
+         op.clone_source_archive_sha256, op.clone_source_archive_size_bytes,
+         op.clone_source_manifest_sha256,
          op.progress_done_bytes, op.progress_total_bytes,
          op.archive_size_bytes, op.archive_sha256, op.manifest_version, op.manifest_sha256,
          op.file_count, op.total_uncompressed_bytes, op.local_copy,
@@ -206,6 +219,10 @@ function toOperation(row: OperationRow, online: boolean): RegistrationOperation 
     acknowledgedByDisplayName: row.acknowledged_by_display_name,
     parentSnapshotName: row.parent_snapshot_name,
     versionDeletion: row.version_deletion,
+    cloneSource:
+      row.clone_source_vm_name && row.clone_source_version_id
+        ? { vmName: row.clone_source_vm_name, versionId: row.clone_source_version_id }
+        : null,
   };
 }
 
@@ -218,7 +235,51 @@ type RequestMessage =
   | {
       type: 'server.virtualbox_registration_request';
       payload: VirtualBoxRegistrationRequestPayload;
-    };
+    }
+  | { type: 'server.clone_request'; payload: CloneRequestPayload };
+
+/** The columns of a clone that go to its agent. Absent on every other mode's rows. */
+type CloneColumns = Partial<
+  Pick<
+    OperationRow,
+    | 'clone_source_vm_name'
+    | 'clone_source_version_id'
+    | 'clone_source_archive_key'
+    | 'clone_source_archive_sha256'
+    | 'clone_source_archive_size_bytes'
+    | 'clone_source_manifest_sha256'
+  >
+>;
+
+/**
+ * A clone's command (decision 0052): the source version's archive, which the agent verifies against what was
+ * registered, and the new VM's identities. Both keys are derived again by the agent, which refuses any other.
+ */
+export function cloneRequestFor(
+  row: Pick<
+    OperationRow,
+    'id' | 'emulator_type' | 'vm_name' | 'repository_id' | 'version_id' | 'archive_key'
+  > &
+    CloneColumns,
+): { type: 'server.clone_request'; payload: CloneRequestPayload } {
+  return {
+    type: 'server.clone_request',
+    payload: {
+      operationId: row.id,
+      emulatorType: row.emulator_type,
+      repositoryId: row.repository_id,
+      source: {
+        vmName: row.clone_source_vm_name ?? '',
+        versionId: row.clone_source_version_id ?? '',
+        archiveKey: row.clone_source_archive_key ?? '',
+        archiveSizeBytes: Number(row.clone_source_archive_size_bytes),
+        archiveSha256: row.clone_source_archive_sha256 ?? '',
+        manifestSha256: row.clone_source_manifest_sha256 ?? null,
+      },
+      target: { vmName: row.vm_name, versionId: row.version_id, archiveKey: row.archive_key },
+    },
+  };
+}
 
 /**
  * What goes to the agent for an operation, from its row. Snapshot fields only when there are any. A VirtualBox
@@ -237,8 +298,11 @@ function requestFor(
     | 'archive_key'
     | 'parent_version_id'
     | 'workspace_id'
-  >,
+  > &
+    CloneColumns,
 ): RequestMessage {
+  // Before the emulator: a clone of any type is the same command, and reads no machine and no directory.
+  if (row.mode === 'clone') return cloneRequestFor(row);
   if (row.emulator_type === 'virtualbox') {
     return {
       type: 'server.virtualbox_registration_request',
@@ -309,6 +373,7 @@ const FAILURE_TEXT: Record<string, string> = {
   repository_not_authorized: 'This agent is no longer allowed to use this repository.',
   hash_mismatch:
     'The agent reported an archive other than the one it declared when the import began.',
+  clone_unavailable: 'The agent no longer says that it can clone VMs. Nothing was created.',
 };
 
 /**
@@ -356,7 +421,7 @@ export class RegistrationCoordinator {
     if (!this.onVirtualBoxRegistered) return;
     const [rows] = await this.pool.execute<RowDataPacket[]>(
       `SELECT agent_id FROM registration_operations
-       WHERE id = ? AND emulator_type = 'virtualbox' AND mode <> 'import'`,
+       WHERE id = ? AND emulator_type = 'virtualbox' AND mode NOT IN ('import', 'clone')`,
       [operationId],
     );
     const agentId = rows[0]?.agent_id as string | undefined;
@@ -1159,7 +1224,15 @@ export class RegistrationCoordinator {
     );
     for (const row of active) {
       if (listed.has(row.id)) continue;
-      if (row.state === 'queued' && row.emulator_type === 'virtualbox' && !payload.virtualbox) {
+      if (row.state === 'queued' && row.mode === 'clone' && payload.clones !== true) {
+        // Replaced by an agent that cannot clone. Nothing was done, and the name is free again.
+        await this.markFailed(row.id, 'clone_unavailable');
+      } else if (
+        row.state === 'queued' &&
+        row.mode !== 'clone' &&
+        row.emulator_type === 'virtualbox' &&
+        !payload.virtualbox
+      ) {
         // The agent was replaced by one that cannot export VirtualBox machines. Nothing was done.
         await this.markFailed(row.id, 'virtualbox_unavailable');
       } else if (row.state === 'queued') {
@@ -1437,6 +1510,10 @@ export class RegistrationCoordinator {
     }
     if (row.mode === 'import') {
       await this.commitImportIn(connection, row);
+      return committed;
+    }
+    if (row.mode === 'clone') {
+      await commitCloneIn(connection, row);
       return committed;
     }
     if (row.mode === 'remaster') {

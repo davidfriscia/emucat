@@ -18,6 +18,7 @@ import { DEFAULT_PAIRING_RATE_LIMITS } from '../src/routes/agent-pairing.js';
 import { DEFAULT_AUTH_RATE_LIMITS } from '../src/routes/auth.js';
 import type { BrowserDependencies } from '../src/routes/browser.js';
 import { fileMediaStorage } from '../src/storage/media-storage.js';
+import { NotesStorage } from '../src/notes/storage.js';
 import { createTestDatabase, type TestDatabase } from './test-database.js';
 
 export const SETUP_TOKEN = 'test-setup-token-with-plenty-of-characters';
@@ -54,6 +55,7 @@ export async function startBrowserApp(
   const baseDependencies = (): BrowserDependencies => ({
     pool,
     storage: fileMediaStorage(storageRoot),
+    notes: new NotesStorage(join(storageRoot, 'notes')),
     media: DEFAULT_MEDIA_POLICY,
     passwords: createPasswordHasher({ memoryCost: 1024, timeCost: 1, parallelism: 1 }),
     setupToken: createSetupToken(SETUP_TOKEN),

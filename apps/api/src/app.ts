@@ -70,6 +70,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
             isRegistrationCapable: (agentId) => hub.isRegistrationCapable(agentId),
             isSnapshotCapable: (agentId) => hub.isSnapshotCapable(agentId),
             isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
+            isCloneCapable: (agentId) => hub.isCloneCapable(agentId),
             activeConnectionId: (agentId) => hub.activeConnectionId(agentId),
             latestDiscovery: (agentId) => hub.discovery.get(agentId),
             send: (agentId, message) => hub.sendToAgent(agentId, message),

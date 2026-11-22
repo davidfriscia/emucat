@@ -172,8 +172,16 @@
       "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f6b",
       "hostPlatform": "windows",
       "emulators": [
-        { "emulatorType": "86box", "status": "not_configured", "truncated": false },
-        { "emulatorType": "qemu", "status": "ok", "truncated": false }
+        {
+          "emulatorType": "86box",
+          "status": "not_configured",
+          "truncated": false
+        },
+        {
+          "emulatorType": "qemu",
+          "status": "ok",
+          "truncated": false
+        }
       ],
       "vms": [
         {
@@ -2005,6 +2013,174 @@
         "sessionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e8002",
         "vmName": "xenix-386",
         "machineUuid": "*"
+      }
+    }
+  ],
+  "cloneServerMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6710",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.clone_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6700",
+        "emulatorType": "86box",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6703",
+        "source": {
+          "vmName": "Windows 95",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701",
+          "archiveKey": "archives/86box/windows 95/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701.zip",
+          "archiveSizeBytes": 123456789,
+          "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "target": {
+          "vmName": "Windows 95 - Office",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702",
+          "archiveKey": "archives/86box/windows 95 - office/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702.zip"
+        }
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6711",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.clone_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6704",
+        "emulatorType": "virtualbox",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6703",
+        "source": {
+          "vmName": "xenix-386",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701",
+          "archiveKey": "archives/virtualbox/xenix-386/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701.ova",
+          "archiveSizeBytes": 4096,
+          "archiveSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "manifestSha256": null
+        },
+        "target": {
+          "vmName": "xenix-copy",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702",
+          "archiveKey": "archives/virtualbox/xenix-copy/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702.ova"
+        }
+      }
+    }
+  ],
+  "cloneAgentMessages": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6712",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "agent.registration_sync",
+      "payload": {
+        "operations": [
+          {
+            "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6700",
+            "phase": "running"
+          }
+        ],
+        "snapshots": true,
+        "clones": true
+      }
+    }
+  ],
+  "cloneRefusedByTheAgent": [
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6720",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.clone_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6700",
+        "emulatorType": "86box",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6703",
+        "source": {
+          "vmName": "Windows 95",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701",
+          "archiveKey": "archives/86box/windows 95/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701.zip",
+          "archiveSizeBytes": 123456789,
+          "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "target": {
+          "vmName": "Windows 95 - Office",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702",
+          "archiveKey": "archives/86box/windows 95 - office/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702.zip",
+          "path": "C:\\Windows"
+        }
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6721",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.clone_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6700",
+        "emulatorType": "86box",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6703",
+        "source": {
+          "vmName": "Windows 95",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701",
+          "archiveKey": "archives/86box/windows 95/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701.zip",
+          "archiveSizeBytes": 123456789,
+          "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "target": {
+          "vmName": "../evil",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702",
+          "archiveKey": "archives/86box/windows 95 - office/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702.zip"
+        }
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6722",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.clone_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6700",
+        "emulatorType": "dosbox",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6703",
+        "source": {
+          "vmName": "Windows 95",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701",
+          "archiveKey": "archives/86box/windows 95/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701.zip",
+          "archiveSizeBytes": 123456789,
+          "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "target": {
+          "vmName": "Windows 95 - Office",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702",
+          "archiveKey": "archives/86box/windows 95 - office/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702.zip"
+        }
+      }
+    },
+    {
+      "protocolVersion": 1,
+      "id": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6723",
+      "sentAt": "2026-01-31T15:30:00Z",
+      "type": "server.clone_request",
+      "payload": {
+        "operationId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6700",
+        "emulatorType": "86box",
+        "repositoryId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6703",
+        "source": {
+          "vmName": "Windows 95",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701",
+          "archiveKey": "archives/86box/windows 95/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6701.zip",
+          "archiveSizeBytes": 123456789,
+          "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "localPath": "D:\\vms"
+        },
+        "target": {
+          "vmName": "Windows 95 - Office",
+          "versionId": "018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702",
+          "archiveKey": "archives/86box/windows 95 - office/018f47a0-7c2b-4f7e-9a3d-1b2c3d4e6702.zip"
+        }
       }
     }
   ]

@@ -67,17 +67,18 @@ ENV NODE_ENV=production \
     API_PORT=4000 \
     LOG_PRETTY=false \
     STORAGE_PATH=/data/storage \
+    NOTES_PATH=/data/notes \
     EMUCAT_BUILD_COMMIT=${EMUCAT_COMMIT} \
     EMUCAT_BUILD_TIME=${EMUCAT_BUILD_TIME}
 # Unprivileged: UID/GID 1000 (the base image's `node` account), the homelab's application identity.
 # Compose sets the same IDs from the host account that owns the media (EMUCAT_APP_USER). The application
 # files stay root-owned, so the process cannot change them.
-RUN mkdir -p /data/storage && chown 1000:1000 /data/storage
+RUN mkdir -p /data/storage /data/notes && chown 1000:1000 /data/storage /data/notes
 WORKDIR /app
 COPY --from=prod --chown=root:root /prod/api ./
 USER 1000:1000
 EXPOSE 4000
-VOLUME ["/data/storage"]
+VOLUME ["/data/storage", "/data/notes"]
 # Readiness, not just liveness: healthy means the database answers and the schema matches this build.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=4 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:4000/api/v1/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]

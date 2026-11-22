@@ -178,6 +178,8 @@ interface Connection {
   executionCapabilities: ExecutionSyncPayload['capabilities'] | null;
   /** Whether `agent.registration_sync` said this agent can create snapshots. */
   snapshotCapable: boolean;
+  /** Whether `agent.registration_sync` said this agent can clone versions into new VMs (decision 0052). */
+  cloneCapable: boolean;
   /** Whether `agent.restore_sync` listed working copies, which only agents that keep them do. */
   workspacesSupported: boolean;
   /** Whether `agent.registration_sync` said this agent can export and run VirtualBox machines. */
@@ -293,6 +295,10 @@ export class AgentHub {
     return this.active.get(agentId)?.snapshotCapable ?? false;
   }
 
+  isCloneCapable(agentId: string): boolean {
+    return this.active.get(agentId)?.cloneCapable ?? false;
+  }
+
   workspacesSupported(agentId: string): boolean {
     return this.active.get(agentId)?.workspacesSupported ?? false;
   }
@@ -356,6 +362,7 @@ export class AgentHub {
       restoreCapabilities: null,
       executionCapabilities: null,
       snapshotCapable: false,
+      cloneCapable: false,
       workspacesSupported: false,
       virtualboxCapable: false,
       virtualboxManagementCapable: false,
@@ -693,6 +700,7 @@ export class AgentHub {
         case 'agent.registration_sync':
           connection.registrationCapable = true;
           connection.snapshotCapable = message.payload.snapshots === true;
+          connection.cloneCapable = message.payload.clones === true;
           connection.virtualboxCapable = message.payload.virtualbox === true;
           connection.virtualboxManagementCapable =
             connection.virtualboxCapable && message.payload.virtualboxManagement === true;

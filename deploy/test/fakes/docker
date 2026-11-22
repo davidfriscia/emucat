@@ -59,9 +59,9 @@ case ${1:-} in
   compose)
     shift
     # The host paths Compose would mount, so that tests can check where they point.
-    printf 'EMUCAT_APP_ENV_FILE=%s EMUCAT_DEPLOYER_TOKEN_FILE=%s EMUCAT_MEDIA_DIR=%s EMUCAT_SOCKET_DIR=%s\n' \
+    printf 'EMUCAT_APP_ENV_FILE=%s EMUCAT_DEPLOYER_TOKEN_FILE=%s EMUCAT_MEDIA_DIR=%s EMUCAT_NOTES_DIR=%s EMUCAT_SOCKET_DIR=%s\n' \
       "${EMUCAT_APP_ENV_FILE:-}" "${EMUCAT_DEPLOYER_TOKEN_FILE:-}" "${EMUCAT_MEDIA_DIR:-}" \
-      "${EMUCAT_SOCKET_DIR:-}" >>"$fake/compose-env"
+      "${EMUCAT_NOTES_DIR:-}" "${EMUCAT_SOCKET_DIR:-}" >>"$fake/compose-env"
     while (($#)); do
       case $1 in
         --project-name | --project-directory | --file) shift 2 ;;

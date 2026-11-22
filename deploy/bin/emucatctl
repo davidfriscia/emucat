@@ -146,7 +146,7 @@ load_config() {
   readonly INGRESS="http://$host:$EMUCAT_HTTP_PORT"
 
   # Everything Compose substitutes into compose.yaml. The three file and directory paths are derived.
-  export EMUCAT_PROJECT EMUCAT_ENVIRONMENT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR \
+  export EMUCAT_PROJECT EMUCAT_ENVIRONMENT EMUCAT_APP_ENV_FILE EMUCAT_DEPLOYER_TOKEN_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR \
     EMUCAT_SOCKET_DIR EMUCAT_SOCKET_GID EMUCAT_APP_UID EMUCAT_APP_GID EMUCAT_BIND_ADDRESS EMUCAT_HTTP_PORT \
     EMUCAT_TRUSTED_PROXIES EMUCAT_DB_HOST_GATEWAY EMUCAT_EDGE_SUBNET EMUCAT_INTERNAL_SUBNET EMUCAT_DATABASE_SUBNET \
     EMUCAT_API_MEMORY_LIMIT
@@ -159,6 +159,7 @@ load_config() {
 #   config/      deploy.env, app.env, deployer.token, deploy_key, known_hosts
 #   state/       current release, operations and their logs, the lock, build exports, the account's home
 #   data/media/  screenshots and other media, owned by the API container's UID
+#   data/notes/  per-VM Markdown notes, owned by the API container's UID
 #   backups/     database dumps
 layout_paths() {
   readonly TOOLING=$EMUCAT_ROOT/tooling
@@ -177,6 +178,7 @@ layout_paths() {
   readonly EMUCAT_APP_ENV_FILE=$CONFIG_DIR/app.env
   readonly EMUCAT_DEPLOYER_TOKEN_FILE=$CONFIG_DIR/deployer.token
   readonly EMUCAT_MEDIA_DIR=$DATA_DIR/media
+  readonly EMUCAT_NOTES_DIR=$DATA_DIR/notes
 }
 
 load_app_database() {
@@ -641,6 +643,8 @@ cmd_update() {
   [[ -d $REPO ]] || fail repository_missing "No repository mirror at $REPO; run emucatctl install"
   [[ -f $EMUCAT_APP_ENV_FILE ]] || fail configuration_invalid "$EMUCAT_APP_ENV_FILE does not exist"
   [[ -d $EMUCAT_MEDIA_DIR ]] || fail configuration_invalid "The media directory does not exist"
+  [[ -d $EMUCAT_NOTES_DIR && ! -L $EMUCAT_NOTES_DIR ]] ||
+    fail configuration_invalid "The notes directory $EMUCAT_NOTES_DIR does not exist; run emucatctl install from this release"
   [[ -n $EMUCAT_SOCKET_GID ]] || fail configuration_invalid "The socket group $EMUCAT_SOCKET_GROUP does not exist"
   [[ -n $EMUCAT_APP_UID && -n $EMUCAT_APP_GID ]] ||
     fail configuration_invalid "The application account $EMUCAT_APP_USER:$EMUCAT_APP_GROUP does not exist"
@@ -931,6 +935,9 @@ cmd_check() {
   check_item "media directory $EMUCAT_MEDIA_DIR" test -d "$EMUCAT_MEDIA_DIR"
   check_item "media directory owned by $EMUCAT_APP_USER:$EMUCAT_APP_GROUP ($EMUCAT_APP_UID:$EMUCAT_APP_GID)" \
     test "$(stat -c %u:%g -- "$EMUCAT_MEDIA_DIR" 2>/dev/null)" = "$EMUCAT_APP_UID:$EMUCAT_APP_GID"
+  check_item "notes directory $EMUCAT_NOTES_DIR" test -d "$EMUCAT_NOTES_DIR" -a ! -L "$EMUCAT_NOTES_DIR"
+  check_item "notes directory owned by $EMUCAT_APP_USER:$EMUCAT_APP_GROUP ($EMUCAT_APP_UID:$EMUCAT_APP_GID)" \
+    test "$(stat -c %u:%g -- "$EMUCAT_NOTES_DIR" 2>/dev/null)" = "$EMUCAT_APP_UID:$EMUCAT_APP_GID"
   check_item "$EMUCAT_APP_USER is not a member of $EMUCAT_SOCKET_GROUP on the host (only the container is)" \
     not_in_group "$EMUCAT_APP_USER" "$EMUCAT_SOCKET_GROUP"
   check_item "deployment service socket" test -S "$EMUCAT_SOCKET_DIR/deployer.sock"
@@ -1012,6 +1019,20 @@ create_layout() {
     else
       # Existing media is never changed automatically.
       warn "$EMUCAT_MEDIA_DIR holds files but is not owned by $media_owner; fix it by hand (see docs/deployment.md)"
+    fi
+  fi
+  # The VM notes (decision 0053) belong to the same account, with the same rules: created if missing, an empty
+  # one handed over, and existing notes never changed automatically.
+  [[ ! -L $EMUCAT_NOTES_DIR ]] || abort "$EMUCAT_NOTES_DIR must be a directory, not a link"
+  if [[ ! -d $EMUCAT_NOTES_DIR ]]; then
+    install -d -o "$EMUCAT_APP_USER" -g "$EMUCAT_APP_GROUP" -m 0750 "$EMUCAT_NOTES_DIR"
+  elif [[ $(stat -c %u:%g -- "$EMUCAT_NOTES_DIR") != "$EMUCAT_APP_UID:$EMUCAT_APP_GID" ]]; then
+    if [[ -z $(ls -A -- "$EMUCAT_NOTES_DIR") ]]; then
+      chown -- "$media_owner" "$EMUCAT_NOTES_DIR"
+      chmod 0750 -- "$EMUCAT_NOTES_DIR"
+      say "Gave the empty $EMUCAT_NOTES_DIR to $media_owner"
+    else
+      warn "$EMUCAT_NOTES_DIR holds files but is not owned by $media_owner; fix it by hand (see docs/deployment.md)"
     fi
   fi
 }

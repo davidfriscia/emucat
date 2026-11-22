@@ -22,6 +22,8 @@ const envSchema = z.object({
   // Required, with no default: there are no built-in credentials.
   DB_PASSWORD: z.string().min(1),
   STORAGE_PATH: z.string().min(1).default('var/storage'),
+  // Per-VM Markdown notes (decision 0053): the directory that holds <emulator>/<vm>/<vm> - notes.md.
+  NOTES_PATH: z.string().min(1).default('var/notes'),
   MEDIA_MAX_UPLOAD_BYTES: z.coerce
     .number()
     .int()
@@ -95,6 +97,7 @@ export interface Config {
     password: string;
   };
   storagePath: string;
+  notesPath: string;
   media: MediaPolicy;
   cookieSecure: boolean;
   sessionIdleTtlSeconds: number;
@@ -141,6 +144,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     storagePath: isAbsolute(values.STORAGE_PATH)
       ? values.STORAGE_PATH
       : resolve(REPOSITORY_ROOT, values.STORAGE_PATH),
+    notesPath: isAbsolute(values.NOTES_PATH)
+      ? values.NOTES_PATH
+      : resolve(REPOSITORY_ROOT, values.NOTES_PATH),
     media: {
       ...DEFAULT_MEDIA_POLICY,
       maxUploadBytes: values.MEDIA_MAX_UPLOAD_BYTES,

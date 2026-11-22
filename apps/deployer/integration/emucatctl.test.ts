@@ -401,6 +401,7 @@ describe('layout', () => {
           `EMUCAT_APP_ENV_FILE=${join(h.root, 'config/app.env')}`,
           `EMUCAT_DEPLOYER_TOKEN_FILE=${join(h.root, 'config/deployer.token')}`,
           `EMUCAT_MEDIA_DIR=${join(h.root, 'data/media')}`,
+          `EMUCAT_NOTES_DIR=${join(h.root, 'data/notes')}`,
           `EMUCAT_SOCKET_DIR=${h.socketDir}`,
         ].join(' '),
       );

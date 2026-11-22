@@ -63,11 +63,20 @@ export function createHost(): Host {
   const configDir = join(root, 'config');
   const fake = join(configDir, 'fake');
   const media = join(root, 'data/media');
+  const notes = join(root, 'data/notes');
   const backups = join(root, 'backups');
   const socketDir = join(dir, 'run');
   const remote = join(dir, 'remote.git');
   const work = join(dir, 'work');
-  for (const path of [configDir, fake, media, backups, socketDir, join(root, 'state/operations')]) {
+  for (const path of [
+    configDir,
+    fake,
+    media,
+    notes,
+    backups,
+    socketDir,
+    join(root, 'state/operations'),
+  ]) {
     mkdirSync(path, { recursive: true });
   }
   // Data that must survive everything.

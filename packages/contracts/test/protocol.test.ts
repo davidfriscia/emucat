@@ -175,3 +175,24 @@ describe('restore states', () => {
     expect(restoreRecovery('some_code_from_a_newer_agent')).toBeNull();
   });
 });
+
+describe('clone messages (decision 0052)', () => {
+  const all = fixture<Record<string, { type: string }[]>>('wire-examples');
+
+  it('accepts the shared examples, each in the right direction', () => {
+    for (const example of all.cloneServerMessages ?? []) {
+      expect(serverMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(true);
+      expect(agentMessageSchema.safeParse(example).success).toBe(false);
+    }
+    for (const example of all.cloneAgentMessages ?? []) {
+      expect(agentMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(true);
+    }
+  });
+
+  it('refuses a command that names a path, an unsafe name or an unknown type', () => {
+    expect(all.cloneRefusedByTheAgent?.length).toBeGreaterThan(0);
+    for (const example of all.cloneRefusedByTheAgent ?? []) {
+      expect(serverMessageSchema.safeParse(example).success, JSON.stringify(example)).toBe(false);
+    }
+  });
+});

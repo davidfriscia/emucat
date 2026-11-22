@@ -23,6 +23,10 @@ import type { MediaStorage } from '../storage/media-storage.js';
 import type { RemoteSessionOptions, WorkspaceCoordinator } from '../workspaces/coordinator.js';
 import { registerAdminAgentRoutes } from './admin-agents.js';
 import { registerAdminCatalogRoutes } from './admin-catalog.js';
+import { registerAdminCloneRoutes } from './admin-clones.js';
+import { registerAdminNotesRoutes } from './admin-notes.js';
+import { CloneCoordinator } from '../clones/coordinator.js';
+import type { NotesStorage } from '../notes/storage.js';
 import { registerAdminTagRoutes } from './admin-tags.js';
 import { registerAdminCleanupRoutes } from './admin-cleanup.js';
 import { registerAdminExecutionRoutes } from './admin-execution.js';
@@ -43,6 +47,8 @@ import { registerPublicCatalogRoutes } from './public-catalog.js';
 export interface BrowserDependencies {
   pool: Pool;
   storage: MediaStorage;
+  /** Per-VM Markdown notes (decision 0053). Without it, the notes routes answer 503 notes_unavailable. */
+  notes?: NotesStorage | undefined;
   /** Limits on screenshot uploads and on decoding them. */
   media: MediaPolicy;
   passwords: PasswordHasher;
@@ -111,6 +117,26 @@ export async function registerBrowserRoutes(
     cleanup.remasters ?? null,
   );
   registerAdminCleanupRoutes(api, dependencies, cleanup.removals, cleanup.deletions);
+  registerAdminCloneRoutes(
+    api,
+    dependencies,
+    new CloneCoordinator(
+      dependencies.pool,
+      {
+        isOnline: (agentId) => hub.isOnline(agentId),
+        isRegistrationCapable: (agentId) => hub.isRegistrationCapable(agentId),
+        isSnapshotCapable: (agentId) => hub.isSnapshotCapable(agentId),
+        isVirtualBoxCapable: (agentId) => hub.isVirtualBoxCapable(agentId),
+        isCloneCapable: (agentId) => hub.isCloneCapable(agentId),
+        activeConnectionId: (agentId) => hub.activeConnectionId(agentId),
+        latestDiscovery: (agentId) => hub.discovery.get(agentId),
+        send: (agentId, message) => hub.sendToAgent(agentId, message),
+      },
+      registrations,
+      api.log,
+    ),
+  );
+  registerAdminNotesRoutes(api, dependencies);
   registerAdminSystemRoutes(api, dependencies);
   registerAdminVirtualBoxRoutes(api, dependencies, virtualbox);
 }

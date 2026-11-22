@@ -230,6 +230,7 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
       [`${ROOT}/state/home`]: [deploy.uid, deploy.gid, 0o700],
       [`${ROOT}/data`]: [0, 0, 0o755],
       [`${ROOT}/data/media`]: [1000, 1000, 0o750],
+      [`${ROOT}/data/notes`]: [1000, 1000, 0o750],
       [`${ROOT}/backups`]: [deploy.uid, deploy.gid, 0o750],
     };
     const checkLayout = () => {
@@ -420,7 +421,8 @@ describe('fresh installation under /opt/emucat', { skip: !isRoot && 'needs root'
         line,
         'EMUCAT_APP_ENV_FILE=/opt/emucat/config/app.env ' +
           'EMUCAT_DEPLOYER_TOKEN_FILE=/opt/emucat/config/deployer.token ' +
-          'EMUCAT_MEDIA_DIR=/opt/emucat/data/media EMUCAT_SOCKET_DIR=/run/emucat-deployer',
+          'EMUCAT_MEDIA_DIR=/opt/emucat/data/media EMUCAT_NOTES_DIR=/opt/emucat/data/notes ' +
+          'EMUCAT_SOCKET_DIR=/run/emucat-deployer',
       );
     }
 

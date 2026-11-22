@@ -254,6 +254,11 @@ export class RemasterCoordinator implements RemasterCommitter {
              AND (base_version_id IN (${list}) OR source_version_id IN (${list}))`,
           [...ids, ...ids],
         ],
+        // A clone of another VM reading one of these archives (decision 0052).
+        [
+          `registration_operations WHERE active_marker = 1 AND clone_source_version_id IN (${list})`,
+          ids,
+        ],
         [`vm_sessions WHERE active_marker = 1 AND source_version_id IN (${list})`, ids],
         [`vm_verifications WHERE active_marker = 1 AND version_id IN (${list})`, ids],
         [`local_copy_removals WHERE active_marker = 1 AND expected_version_id IN (${list})`, ids],

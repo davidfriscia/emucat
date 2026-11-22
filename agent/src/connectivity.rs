@@ -491,7 +491,8 @@ async fn run_session<F: Future<Output = ()>>(
                         tracing::warn!(%message_type, "Refused an invalid message from the server");
                         if let (true, Some(operation_id), Some(operations)) = (
                             message_type == "server.registration_request"
-                                || message_type == "server.virtualbox_registration_request",
+                                || message_type == "server.virtualbox_registration_request"
+                                || message_type == "server.clone_request",
                             operation_id,
                             &settings.operations,
                         ) {
@@ -621,6 +622,7 @@ async fn run_session<F: Future<Output = ()>>(
                         | Message::ServerLocalCopyRemoveAck(_)
                         | Message::ServerArchiveDelete(_)
                         | Message::ServerVirtualBoxRegistrationRequest(_)
+                        | Message::ServerCloneRequest(_)
                         | Message::ServerVirtualBoxControl(_)
                         | Message::ServerVirtualBoxWatch(_)
                         | Message::ServerVirtualBoxImport(_)

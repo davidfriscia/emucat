@@ -156,6 +156,9 @@ pub enum Message {
     ServerVirtualBoxRegistrationRequest(VirtualBoxRegistrationRequest),
     #[serde(rename = "agent.virtualbox_registration_result")]
     AgentVirtualBoxRegistrationResult(VirtualBoxRegistrationResult),
+    /// Clone one version into a new VM (decision 0052). Answered with the registration messages.
+    #[serde(rename = "server.clone_request")]
+    ServerCloneRequest(crate::vm_clone::CloneRequest),
     #[serde(rename = "server.virtualbox_control")]
     ServerVirtualBoxControl(VirtualBoxControl),
     #[serde(rename = "agent.virtualbox_control_result")]
@@ -390,6 +393,10 @@ pub struct RegistrationSync {
     /// The imports and deletions this agent has journals for.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub virtualbox_operations: Vec<VirtualBoxOperationSyncEntry>,
+    /// This agent can clone a version into a new VM (`server.clone_request`, decision 0052). An older server
+    /// ignores it, and never sends a clone to an agent that does not say it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clones: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -907,6 +914,7 @@ fn is_known_type(message_type: &str) -> bool {
             | "agent.registration_cleanup"
             | "agent.repository_health_result"
             | "server.registration_request"
+            | "server.clone_request"
             | "server.registration_cancel"
             | "server.registration_ack"
             | "server.repository_health_request"

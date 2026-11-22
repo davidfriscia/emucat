@@ -7,6 +7,7 @@ import {
   type AdminSummaryResponse,
   type AdminVmCard,
   type AdminVmDetail,
+  type VmCloneProvenance,
   type EmulatorType,
   type MediaVariant,
   type Pagination,
@@ -436,8 +437,45 @@ export async function getAdminVm(pool: Pool, vm: VmIdentity): Promise<AdminVmDet
     mediaCount: Number(row.media_count),
     versionCount: Number(row.version_count),
     tags: tags.get(vmKey(identityOf(row))) ?? [],
+    clonedFrom: await cloneProvenanceOf(pool, identityOf(row)),
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+/**
+ * Where a VM was cloned from (decision 0052), or `null` for a VM that is not a clone. The record is the values copied
+ * when it was cloned; only `sourceExists` looks at the catalog now, so that a page links to a source that is still
+ * there and shows a deleted one's name as text.
+ */
+export async function cloneProvenanceOf(
+  pool: Pool,
+  vm: VmIdentity,
+): Promise<VmCloneProvenance | null> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT p.source_vm_name, p.source_display_name, p.source_version_id, p.source_version_kind,
+            p.source_snapshot_name, p.source_version_title, p.cloned_at, u.display_name AS cloned_by,
+            EXISTS (SELECT 1 FROM virtual_machines AS source
+                    WHERE source.emulator_type = p.emulator_type AND source.vm_name = p.source_vm_name)
+              AS source_exists
+     FROM vm_clone_provenance AS p
+     LEFT JOIN users AS u ON u.id = p.cloned_by_user_id
+     WHERE p.emulator_type = ? AND p.vm_name = ?`,
+    [vm.emulatorType, vm.vmName],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    sourceEmulatorType: vm.emulatorType,
+    sourceVmName: row.source_vm_name as string,
+    sourceDisplayName: (row.source_display_name as string | null) ?? null,
+    sourceVersionId: row.source_version_id as string,
+    sourceVersionKind: row.source_version_kind as 'master' | 'snapshot',
+    sourceSnapshotName: (row.source_snapshot_name as string | null) ?? null,
+    sourceVersionTitle: (row.source_version_title as string | null) ?? null,
+    clonedAt: (row.cloned_at as Date).toISOString(),
+    clonedByDisplayName: (row.cloned_by as string | null) ?? null,
+    sourceExists: Boolean(Number(row.source_exists)),
   };
 }
 

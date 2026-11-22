@@ -651,3 +651,53 @@ fn the_registration_sync_of_an_agent_that_predates_management_says_so() {
     assert!(!sync.virtualbox_management);
     assert!(sync.virtualbox_operations.is_empty());
 }
+
+#[test]
+fn clone_messages_match_the_contracts_in_both_directions() {
+    let wire: Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    for key in ["cloneServerMessages", "cloneAgentMessages"] {
+        let examples = wire[key].as_array().unwrap();
+        assert!(!examples.is_empty());
+        for example in examples {
+            let envelope: Envelope = serde_json::from_value(example.clone())
+                .unwrap_or_else(|error| panic!("{example}: {error}"));
+            let round_trip = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(round_trip["type"], example["type"]);
+            assert_eq!(round_trip["payload"], example["payload"], "{example}");
+        }
+    }
+    // The keys the server sends are the ones the agent derives itself.
+    for example in wire["cloneServerMessages"].as_array().unwrap() {
+        let request: emucat_agent::vm_clone::CloneRequest =
+            serde_json::from_value(example["payload"].clone()).unwrap();
+        emulator_check(&request);
+    }
+}
+
+fn emulator_check(request: &emucat_agent::vm_clone::CloneRequest) {
+    emucat_agent::vm_clone::check_request(request)
+        .unwrap_or_else(|failure| panic!("{}: {}", failure.code, failure.message));
+}
+
+#[test]
+fn the_agent_refuses_clone_commands_that_say_too_much() {
+    let wire: Value = serde_json::from_str(WIRE_EXAMPLES).unwrap();
+    let examples = wire["cloneRefusedByTheAgent"].as_array().unwrap();
+    assert!(!examples.is_empty());
+    for example in examples {
+        assert!(
+            serde_json::from_value::<Envelope>(example.clone()).is_err(),
+            "{example}"
+        );
+        match decode(&example.to_string()) {
+            Decoded::InvalidPayload {
+                message_type,
+                operation_id,
+            } => {
+                assert_eq!(message_type, "server.clone_request");
+                assert!(operation_id.is_some());
+            }
+            other => panic!("{example}: {other:?}"),
+        }
+    }
+}

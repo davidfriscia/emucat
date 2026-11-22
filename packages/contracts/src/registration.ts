@@ -10,9 +10,17 @@ import { vmNameSchema } from './vm-name.js';
  * local check has passed again. See decision 0015. Snapshot archives a registered VM again, as a new
  * immutable version whose parent is the version its local files came from. See decision 0037. Import makes
  * an existing OVA file the master of a new VirtualBox catalog VM, from the agent's command line, and never touches
- * VirtualBox. See decision 0049.
+ * VirtualBox. See decision 0049. Clone makes a new, independent VM whose master is the exact content of one version
+ * of another VM, written again under the new identity by an agent. See decision 0052.
  */
-export const REGISTRATION_MODES = ['copy', 'transfer', 'snapshot', 'remaster', 'import'] as const;
+export const REGISTRATION_MODES = [
+  'copy',
+  'transfer',
+  'snapshot',
+  'remaster',
+  'import',
+  'clone',
+] as const;
 export const registrationModeSchema = z.enum(REGISTRATION_MODES);
 export type RegistrationMode = z.infer<typeof registrationModeSchema>;
 
@@ -114,6 +122,9 @@ export const REGISTRATION_ERROR_CODES = [
   // From an OVA import on the agent's command line (decision 0049).
   'ova_invalid',
   'import_abandoned',
+  // From a clone (decision 0052).
+  'clone_unavailable',
+  'source_archive_invalid',
   // From local cleanup, after the master exists.
   'cleanup_identity_mismatch',
   'cleanup_content_changed',
@@ -190,6 +201,10 @@ const RECOVERY: Partial<Record<string, string>> = {
     'The file is not an OVA that can be imported. Nothing was registered. Check the message, and the file.',
   import_abandoned:
     'The agent’s command line stopped before the archive was registered. Nothing was registered. Run the same import-ova command again.',
+  clone_unavailable:
+    'The agent cannot clone VMs: update it to this release, or choose another agent. Nothing was created.',
+  source_archive_invalid:
+    'The source version’s archive is not what was registered, so nothing was cloned. Check the repository, and verify the source version.',
   cleanup_identity_mismatch:
     'The master is registered and safe. The directory is no longer the one that was archived, so it was kept. Decide what to do with it yourself.',
   cleanup_content_changed:
@@ -331,6 +346,11 @@ export const registrationSyncPayloadSchema = z.object({
   virtualboxManagement: z.boolean().optional(),
   /** The imports and deletions this agent has journals for. */
   virtualboxOperations: z.array(virtualBoxOperationSyncEntrySchema).max(256).optional(),
+  /**
+   * Whether this agent can clone a version into a new VM (`server.clone_request`, decision 0052). Older agents do
+   * not say, and are never sent one.
+   */
+  clones: z.boolean().optional(),
 });
 export type RegistrationSyncPayload = z.infer<typeof registrationSyncPayloadSchema>;
 
@@ -583,6 +603,14 @@ export const registrationOperationSchema = z.object({
    * 0041). The operation stays as history; only the version is gone, or going.
    */
   versionDeletion: z.enum(['deleting', 'deleted']).nullable().default(null),
+  /** For a clone (decision 0052): the VM and version it copies. `null` for every other mode. */
+  cloneSource: z
+    .object({
+      vmName: z.string(),
+      versionId: z.uuid(),
+    })
+    .nullable()
+    .default(null),
 });
 export type RegistrationOperation = z.infer<typeof registrationOperationSchema>;
 

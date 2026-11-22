@@ -11,7 +11,7 @@
 #   shares, plus a network used to reach MariaDB on the host.
 # - The web ingress is bound to one configurable address, loopback by default, for the external proxy.
 # - No container is privileged, none gets the Docker socket, and the only host paths mounted are the media
-#   directory, the deployment-service socket directory (read-only) and one token file.
+#   directory, the VM notes directory, the deployment-service socket directory (read-only) and one token file.
 
 name: ${EMUCAT_PROJECT:-emucat}
 
@@ -45,6 +45,7 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: '4000'
       STORAGE_PATH: /data/storage
+      NOTES_PATH: /data/notes
       LOG_PRETTY: 'false'
       EMUCAT_ENVIRONMENT: ${EMUCAT_ENVIRONMENT:?set EMUCAT_ENVIRONMENT}
       # Only the web container can connect, so it is the only proxy believed.
@@ -63,6 +64,11 @@ services:
       - type: bind
         source: ${EMUCAT_MEDIA_DIR:?set EMUCAT_MEDIA_DIR (EMUCAT_ROOT/data/media)}
         target: /data/storage
+      # Per-VM Markdown notes (decision 0053): EMUCAT_ROOT/data/notes, beside the media and owned by the same
+      # account. It must exist: `emucatctl install` creates it, and a missing one is refused, never created as root.
+      - type: bind
+        source: ${EMUCAT_NOTES_DIR:?set EMUCAT_NOTES_DIR (EMUCAT_ROOT/data/notes); run emucatctl install from this release}
+        target: /data/notes
       # A directory holding only the socket, so that a restarted service's new socket is seen.
       - type: bind
         source: ${EMUCAT_SOCKET_DIR:-/run/emucat-deployer}

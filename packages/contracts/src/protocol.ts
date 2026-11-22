@@ -13,6 +13,7 @@ import {
   localCopyRemovePayloadSchema,
   localCopyRemoveResultPayloadSchema,
 } from './cleanup.js';
+import { cloneRequestPayloadSchema } from './clone.js';
 import {
   discoveryErrorPayloadSchema,
   discoveryRequestPayloadSchema,
@@ -321,6 +322,10 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   envelopeSchema.extend({
     type: z.literal('server.virtualbox_registration_request'),
     payload: virtualBoxRegistrationRequestPayloadSchema,
+  }),
+  envelopeSchema.extend({
+    type: z.literal('server.clone_request'),
+    payload: cloneRequestPayloadSchema,
   }),
   envelopeSchema.extend({
     type: z.literal('server.virtualbox_control'),

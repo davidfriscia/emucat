@@ -17,6 +17,7 @@ import { databaseReadiness } from './readiness.js';
 import { DEFAULT_PAIRING_RATE_LIMITS } from './routes/agent-pairing.js';
 import { announceSetupToken, DEFAULT_AUTH_RATE_LIMITS } from './routes/auth.js';
 import type { BrowserDependencies } from './routes/browser.js';
+import { NotesStorage } from './notes/storage.js';
 import { fileMediaStorage } from './storage/media-storage.js';
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
   const browser: BrowserDependencies = {
     pool,
     storage: fileMediaStorage(config.storagePath),
+    notes: new NotesStorage(config.notesPath),
     media: config.media,
     passwords: createPasswordHasher(),
     setupToken: createSetupToken(config.setupToken),

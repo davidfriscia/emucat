@@ -71,9 +71,9 @@ until docker exec "$db_container" healthcheck.sh --connect --innodb_initialized 
 sed "s/CHANGE_ME/$app_password/" "$repo/deploy/sql/bootstrap.sql" |
   docker exec -i "$db_container" mariadb -uroot "-p$root_password"
 
-# The installed layout, in miniature: EMUCAT_ROOT/config and EMUCAT_ROOT/data/media.
+# The installed layout, in miniature: EMUCAT_ROOT/config, EMUCAT_ROOT/data/media and EMUCAT_ROOT/data/notes.
 root=$work/opt/emucat
-mkdir -p "$root/config" "$root/data/media" "$work/socket"
+mkdir -p "$root/config" "$root/data/media" "$root/data/notes" "$work/socket"
 printf 'smoke-test-deployer-token-0123456789abcdef\n' >"$root/config/deployer.token"
 setup_token=smoke-setup-token-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 cat >"$root/config/app.env" <<EOF
@@ -89,9 +89,10 @@ EOF
 
 http_port=$((40000 + RANDOM % 10000))
 export EMUCAT_PROJECT=$project EMUCAT_RELEASE=smoke-$id EMUCAT_ENVIRONMENT=smoke
-export EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_SOCKET_DIR EMUCAT_DEPLOYER_TOKEN_FILE
+export EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR EMUCAT_SOCKET_DIR EMUCAT_DEPLOYER_TOKEN_FILE
 EMUCAT_APP_ENV_FILE=$(host_path "$root/config/app.env")
 EMUCAT_MEDIA_DIR=$(host_path "$root/data/media")
+EMUCAT_NOTES_DIR=$(host_path "$root/data/notes")
 EMUCAT_SOCKET_DIR=$(host_path "$work/socket")
 EMUCAT_DEPLOYER_TOKEN_FILE=$(host_path "$root/config/deployer.token")
 # The socket group (any GID other than the application's) and the application account, david:david on the
@@ -129,7 +130,7 @@ check "no EACCES reading the migrations" lacks "$migrate$migrate_again" 'EACCES'
 check "a second migration run is a no-op (retrying is safe)" has "$migrate_again" 'Database is up to date'
 check "the migration container runs as 1000:1000" \
   test "$(compose run --rm --no-deps -T api sh -c 'echo $(id -u):$(id -g)' 2>/dev/null | tr -d '\r')" = 1000:1000
-for variable in EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_DEPLOYER_TOKEN_FILE; do
+for variable in EMUCAT_APP_ENV_FILE EMUCAT_MEDIA_DIR EMUCAT_NOTES_DIR EMUCAT_DEPLOYER_TOKEN_FILE; do
   check "Compose has no default for $variable (no fallback outside EMUCAT_ROOT)" bash -c \
     "! env -u $variable docker compose --file '$repo/deploy/compose.yaml' config --quiet 2>/dev/null"
 done
@@ -170,9 +171,9 @@ check "no container is privileged" test "$(inspect "$api" '{{.HostConfig.Privile
 check "all capabilities dropped" has "$(inspect "$api" '{{.HostConfig.CapDrop}}')" 'ALL'
 mounts=$(inspect "$api" '{{range .Mounts}}{{.Destination}}:{{.RW}} {{end}}')
 check "no Docker socket in the API" bash -c "! grep -q docker.sock <<<'$mounts'"
-check "API mounts only media, the socket directory and its token, the last two read-only" \
+check "API mounts only media, notes, the socket directory and its token, the last two read-only" \
   test "$(tr ' ' '\n' <<<"$mounts" | grep -v '^$' | sort | tr '\n' ' ')" = \
-  "/data/storage:true /run/emucat-deployer:false /run/secrets/deployer_token:false "
+  "/data/notes:true /data/storage:true /run/emucat-deployer:false /run/secrets/deployer_token:false "
 check "the API port is not published" test -z "$(inspect "$api" '{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}{{$p}}{{end}}{{end}}')"
 check "the ingress is bound to the configured address only" \
   has "$(docker port "$web")" "127.0.0.1:$http_port"
@@ -199,6 +200,14 @@ check "media files the API writes belong to UID/GID 1000" \
   test "$(docker exec "$(compose ps -q api)" stat -c %u:%g /data/storage/survives.txt)" = 1000:1000
 check "media survives replacing the containers" \
   test "$(docker exec "$(compose ps -q api)" node -e "process.stdout.write(require('fs').readFileSync('/data/storage/survives.txt','utf8'))")" = kept
+docker exec "$(compose ps -q api)" node -e "require('fs').mkdirSync('/data/notes/qemu/Win98',{recursive:true});require('fs').writeFileSync('/data/notes/qemu/Win98/Win98 - notes.md','# kept')"
+compose up --detach --wait --wait-timeout 120 --force-recreate >/dev/null
+check "notes written by the API are on the host, under data/notes" \
+  test "$(cat "$root/data/notes/qemu/Win98/Win98 - notes.md")" = '# kept'
+check "notes files the API writes belong to UID/GID 1000" \
+  test "$(stat -c %u:%g "$root/data/notes/qemu/Win98/Win98 - notes.md")" = 1000:1000
+check "notes survive replacing the containers" \
+  test "$(docker exec "$(compose ps -q api)" cat '/data/notes/qemu/Win98/Win98 - notes.md')" = '# kept'
 check "the API cannot write outside its mounts" \
   bash -c "! docker exec '$(compose ps -q api)' node -e \"require('fs').writeFileSync('/app/x','x')\" 2>/dev/null"
 

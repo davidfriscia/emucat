@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { vmCloneProvenanceSchema } from './clone.js';
 import { API_PREFIX } from './api.js';
 import { emulatorTypeSchema, type EmulatorType } from './emulator.js';
 import { tagSchema } from './tags.js';
@@ -215,6 +216,8 @@ export const adminVmDetailSchema = z.strictObject({
   mediaCount: z.number().int().nonnegative(),
   versionCount: z.number().int().nonnegative(),
   tags: z.array(tagSchema).default([]),
+  /** Where this VM was cloned from, as information only (decision 0052). `null` for a VM that is not a clone. */
+  clonedFrom: vmCloneProvenanceSchema.nullable().default(null),
   createdAt: timestampSchema,
   updatedAt: timestampSchema,
 });

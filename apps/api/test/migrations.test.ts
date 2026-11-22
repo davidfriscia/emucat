@@ -732,7 +732,11 @@ describe('upgrading to screenshot order and tags (0019)', () => {
     const main = await insertMedia('Old', true, null, '2026-05-01 00:00:00');
     const alone = await insertMedia('Other', false, null, '2026-02-01 00:00:00');
 
-    const result = await migrate(scratch.options);
+    // Only up to 0019, so that later migrations do not change what this upgrade is shown to do.
+    const upgrade = (await loadMigrations()).find((item) => item.version.startsWith('0019'));
+    if (!upgrade) throw new Error('Migration 0019 is missing');
+    await writeFile(join(directory, `${upgrade.version}.sql`), upgrade.sql);
+    const result = await migrate(scratch.options, directory);
     expect(result.applied).toEqual(['0019_media_order_and_tags']);
 
     const [rows] = await upgradePool.query<RowDataPacket[]>(
@@ -760,6 +764,119 @@ describe('upgrading to screenshot order and tags (0019)', () => {
       );
       expect(Number(found[0]?.n), table).toBe(0);
     }
-    await expect(migrate(scratch.options)).resolves.toMatchObject({ applied: [] });
+    await expect(migrate(scratch.options, directory)).resolves.toMatchObject({ applied: [] });
+  });
+});
+
+describe('upgrading to VM clones (0020)', () => {
+  let scratch: TestDatabase;
+  let directory: string;
+  let upgradePool: Pool;
+
+  beforeAll(async () => {
+    scratch = await createTestDatabase();
+    directory = await mkdtemp(join(tmpdir(), 'emucat-migrations-'));
+    for (const migration of (await loadMigrations()).filter((item) => item.version < '0020')) {
+      await writeFile(join(directory, `${migration.version}.sql`), migration.sql);
+    }
+    await migrate(scratch.options, directory);
+    upgradePool = mysql.createPool(scratch.options);
+  });
+
+  afterAll(async () => {
+    await upgradePool?.end();
+    await scratch?.drop();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('keeps every existing operation as it was, and makes clones say exactly what they copy', async () => {
+    const agentId = randomUUID();
+    const repositoryId = randomUUID();
+    await upgradePool.execute(
+      "INSERT INTO agents (id, name, paired_at) VALUES (?, 'A', UTC_TIMESTAMP(3))",
+      [agentId],
+    );
+    await upgradePool.execute(
+      "INSERT INTO repositories (id, name, kind, config, enabled) VALUES (?, 'NAS', 'sftp', '{}', TRUE)",
+      [repositoryId],
+    );
+    const copy = randomUUID();
+    await upgradePool.execute(
+      `INSERT INTO registration_operations (id, agent_id, repository_id, emulator_type, vm_name, mode, state,
+         version_id, archive_key) VALUES (?, ?, ?, 'qemu', 'Old', 'copy', 'failed', ?, 'k')`,
+      [copy, agentId, repositoryId, randomUUID()],
+    );
+
+    const upgrade = (await loadMigrations()).find((item) => item.version.startsWith('0020'));
+    if (!upgrade) throw new Error('Migration 0020 is missing');
+    await writeFile(join(directory, `${upgrade.version}.sql`), upgrade.sql);
+    expect((await migrate(scratch.options, directory)).applied).toEqual(['0020_vm_clones']);
+
+    const [rows] = await upgradePool.query<RowDataPacket[]>(
+      'SELECT mode, clone_source_vm_name FROM registration_operations WHERE id = ?',
+      [copy],
+    );
+    expect(rows[0]).toEqual({ mode: 'copy', clone_source_vm_name: null });
+
+    const insertClone = (values: Record<string, unknown>) => {
+      const row = {
+        id: randomUUID(),
+        agent_id: agentId,
+        repository_id: repositoryId,
+        request_id: randomUUID(),
+        emulator_type: 'qemu',
+        vm_name: 'Copy',
+        mode: 'clone',
+        version_id: randomUUID(),
+        archive_key: 'archives/qemu/copy/x.zip',
+        clone_source_vm_name: 'Old',
+        clone_source_version_id: randomUUID(),
+        clone_source_archive_key: 'archives/qemu/old/y.zip',
+        clone_source_archive_sha256: 'a'.repeat(64),
+        clone_source_archive_size_bytes: 1,
+        ...values,
+      };
+      const columns = Object.keys(row);
+      return upgradePool.execute(
+        `INSERT INTO registration_operations (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
+        Object.values(row) as string[],
+      );
+    };
+    // Each of these is missing what a clone must say, or says what it must not.
+    for (const broken of [
+      { clone_source_version_id: null },
+      { clone_source_archive_sha256: 'not a hash' },
+      { request_id: null },
+      { clone_source_vm_name: 'copy' },
+      { virtualbox_uuid: randomUUID() },
+    ]) {
+      await expect(insertClone(broken), JSON.stringify(broken)).rejects.toThrow(/CONSTRAINT/);
+    }
+    // A copy cannot carry a clone's source.
+    await expect(
+      upgradePool.execute(
+        `INSERT INTO registration_operations (id, agent_id, repository_id, emulator_type, vm_name, mode,
+           version_id, archive_key, clone_source_vm_name) VALUES (?, ?, ?, 'qemu', 'X', 'copy', ?, 'k2', 'Old')`,
+        [randomUUID(), agentId, repositoryId, randomUUID()],
+      ),
+    ).rejects.toThrow(/CONSTRAINT/);
+    // A VirtualBox clone names no machine, and is allowed.
+    await insertClone({ emulator_type: 'virtualbox', vm_name: 'VB-Copy', archive_key: 'k3' });
+    await insertClone({ state: 'failed' });
+
+    // The provenance only refers to the clone itself, and goes with it.
+    await upgradePool.execute(
+      "INSERT INTO virtual_machines (emulator_type, vm_name) VALUES ('qemu', 'Copy')",
+    );
+    await upgradePool.execute(
+      `INSERT INTO vm_clone_provenance (emulator_type, vm_name, source_vm_name, source_version_id,
+         source_version_kind, operation_id) VALUES ('qemu', 'Copy', 'Gone', ?, 'snapshot', ?)`,
+      [randomUUID(), randomUUID()],
+    );
+    await upgradePool.execute("DELETE FROM virtual_machines WHERE vm_name = 'Copy'");
+    const [left] = await upgradePool.query<RowDataPacket[]>(
+      'SELECT COUNT(*) AS n FROM vm_clone_provenance',
+    );
+    expect(Number(left[0]?.n)).toBe(0);
   });
 });

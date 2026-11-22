@@ -52,6 +52,8 @@ export interface World {
 
 export interface Capabilities {
   snapshots?: boolean;
+  /** Whether the agent says it can clone versions (decision 0052). Yes unless false. */
+  clones?: boolean;
   workspaces?: string[] | null;
   modes?: string[];
   /** Whether the agent says it replaces a persistent copy safely. */
@@ -121,6 +123,7 @@ export async function resync(w: World, capabilities: Capabilities = {}): Promise
     envelope('agent.registration_sync', {
       operations: [],
       ...(capabilities.snapshots === false ? {} : { snapshots: true }),
+      ...(capabilities.clones === false ? {} : { clones: true }),
     }),
   );
   agent.send(

@@ -242,6 +242,8 @@ export class VersionDeletionCoordinator {
         [id, id],
       ],
       ['registration_operations WHERE active_marker = 1 AND parent_version_id = ?', [id]],
+      // A clone reading this version's archive (decision 0052).
+      ['registration_operations WHERE active_marker = 1 AND clone_source_version_id = ?', [id]],
       [
         'vm_workspaces WHERE active_marker = 1 AND (base_version_id = ? OR source_version_id = ?)',
         [id, id],
