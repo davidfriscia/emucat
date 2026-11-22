@@ -96,7 +96,8 @@ modes, and every `install` puts those of the directories and of `config/` back:
 │   ├── builds/                                           0750  temporary source exports during an update
 │   └── home/                                             0700  the deployment account's home (Docker, Git)
 ├── data/                    root:root                    0755
-│   └── media/               david:david (1000:1000)      0750  screenshots and other media (persistent)
+│   ├── media/               david:david (1000:1000)      0750  screenshots and other media (persistent)
+│   └── notes/               david:david (1000:1000)      0750  per-VM Markdown notes (persistent)
 └── backups/                 emucat-deploy:emucat-deploy  0750  database dumps, 0640 each
 ```
 
@@ -302,7 +303,8 @@ Compose file it was tested with.
   → host).
 - Both containers: read-only root file system, `cap_drop: ALL`, `no-new-privileges`, an init process,
   `tmpfs` for `/tmp`, memory and PID limits. Not privileged.
-- The API mounts exactly: `/opt/emucat/data/media` (read-write), the socket directory (read-only) and
+- The API mounts exactly: `/opt/emucat/data/media` (read-write), `/opt/emucat/data/notes` (read-write, the
+  per-VM Markdown notes of [decision 0053](decisions/0053-vm-notes.md)), the socket directory (read-only) and
   `/opt/emucat/config/deployer.token` (a Compose secret). **No Docker socket, no host root, nothing else
   from `config/`.** These paths have no defaults in `compose.yaml`: `emucatctl` always passes them.
 - The web container publishes `EMUCAT_BIND_ADDRESS:EMUCAT_HTTP_PORT` and waits for a healthy API.
@@ -477,8 +479,21 @@ sudo gunzip -c /opt/emucat/backups/<dump>.sql.gz | mariadb -u emucat-usr -p emuc
 sudo /opt/emucat/tooling/bin/emucatctl rollback-app --to <the commit that matches the dump>
 ```
 
-Media is not in the dumps. Back up `/opt/emucat/data/media` and `/opt/emucat/backups` (and, separately and
-securely, `/opt/emucat/config`) with the host's usual file backups.
+Media and notes are not in the dumps. Back up `/opt/emucat/data/media`, `/opt/emucat/data/notes` and
+`/opt/emucat/backups` (and, separately and securely, `/opt/emucat/config`) with the host's usual file backups. A notes
+file is plain Markdown at `data/notes/<emulator>/<vm name>/<vm name> - notes.md`, and is the only copy of those notes.
+
+### Upgrading to the release with VM notes
+
+That release adds `data/notes` and a Compose variable for it (`EMUCAT_NOTES_DIR`), and the installed tooling is
+what exports it. An `update` run by older tooling stops before changing anything, with `set EMUCAT_NOTES_DIR`. Run
+`install` once from a checkout of the new release, then update as usual:
+
+```bash
+sudo deploy/bin/emucatctl install                 # from the new checkout: creates data/notes, owned by the app account
+sudo /opt/emucat/tooling/bin/emucatctl check      # "notes directory ... owned by ..." passes
+sudo /opt/emucat/tooling/bin/emucatctl update
+```
 
 ## 13. Rolling back, and its limits
 

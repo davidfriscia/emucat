@@ -24,5 +24,9 @@ pointer and keyboard sensors and screen reader announcements; `react-select` (it
 Both are styled with Bootstrap's own CSS variables, so they follow the light and dark themes. See
 [0050](0050-media-order-deletion-and-tags.md). No other drag-and-drop or tag input library is used.
 
+**Markdown notes.** [Vditor](https://github.com/Vanessa219/vditor) 4.0.1 edits and renders VM notes, and
+[DOMPurify](https://github.com/cure53/DOMPurify) 3.4.17 sanitizes what it renders. Vditor's run-time files are served by
+EmuCat itself, never from its default CDN. See [0053](0053-vm-notes.md) and [Third-party software](../../README.md#third-party-software).
+
 **Local ports.** MariaDB publishes on host port 3307 and the API uses 4000, because 3306 and 3000 are
 commonly taken on developer machines. All of them are configurable.

@@ -57,6 +57,10 @@ WebSocket endpoint.
 | `src/routes/admin-registrations.ts` | Registrations and repositories, for administrators              |
 | `src/registration/coordinator.ts`   | The registration state machine and all its SQL                  |
 | `src/registration/repositories.ts`  | SQL for repositories and which agents may use them              |
+| `src/clones/`                       | Cloning a version into a new VM: validation, dispatch, commit   |
+| `src/routes/admin-clones.ts`        | The clone routes                                                |
+| `src/notes/storage.ts`              | Per-VM Markdown notes on disk, safely and atomically            |
+| `src/routes/admin-notes.ts`         | The notes routes                                                |
 | `src/workspaces/coordinator.ts`     | Drives remote sessions: prepare, run, publish, clean up         |
 | `src/routes/admin-system.ts`        | Version, and application updates relayed to the deployer        |
 | `src/deployment/client.ts`          | The deployment service client, over its Unix socket             |
@@ -102,6 +106,7 @@ builds and tests on Linux so that portability stays honest.
 | `media`        | Watched paths, safe scanning and reading                                | The watcher              |
 | `media_queue`  | The durable record of what has to reach the server, and the media spool | Uploading                |
 | `media_sync`   | Watcher, reconciliation, upload to the API                              | Archive transfers        |
+| `vm_clone`     | Clones a version's archive into a new VM's, verified, and publishes it  |                          |
 | `state`        | State types, local source version                                       | Fuller persistence       |
 
 ## Principles
@@ -111,7 +116,8 @@ builds and tests on Linux so that portability stays honest.
 - **The archive is authoritative.** A VM's ZIP archive defines its contents. The database has no
   hardware configuration, disk inventory or emulator settings.
 - **Explicit entry to the catalog.** A VM appears only through agent discovery followed by user
-  registration. There is no other way in, and nothing is registered automatically.
+  registration, an OVA import, or an administrator's clone of an existing version. Nothing is registered
+  automatically. A clone keeps only informational provenance of its source ([decision 0052](decisions/0052-vm-clones.md)).
 - **Don't trust a cached copy.** A local VM can change while its agent is offline, so a verification
   only counts if it happened after the latest connection.
 - **Private by default.** VMs are private until explicitly made public, and their media are public
@@ -143,6 +149,7 @@ Everything comes from the environment, and nothing developer-specific is built i
 | ---------------------------------------- | ------------------------------------------------------------------------- |
 | Database, API address, logging           | `.env` ([`.env.example`](../.env.example))                                |
 | Media storage path                       | `STORAGE_PATH` in `.env`                                                  |
+| VM notes directory                       | `NOTES_PATH` in `.env` ([decision 0053](decisions/0053-vm-notes.md))      |
 | Sessions, cookies, setup token, proxies  | `.env`. See [authentication](authentication.md)                           |
 | Repository metadata                      | MariaDB, through the Repositories page                                    |
 | Repository access, private key location  | Each agent's configuration. See the [repository guide](repositories.md)   |
@@ -174,6 +181,28 @@ A restore onto an agent that already holds the VM is an explicit replacement. Th
 
 Screenshots are not in archives, and are not restored: they stay on the server, and keep arriving through the API from a VM once it is held locally.
 See decisions [0021](decisions/0021-restore-lifecycle.md) to [0024](decisions/0024-local-archive-cache.md), and [0040](decisions/0040-temporary-remote-sessions.md#replacing-a-persistent-local-copy).
+
+## Cloning
+
+A clone moves archive bytes between agent and repository only, like a registration or a restore:
+
+```
+Browser ─► API ─► MariaDB          validates, reserves the new name (registration_operations, mode 'clone')
+            ▲
+            │ WebSocket            server.clone_request: source version + new identities; reports back
+            ▼
+          Agent ◄──────────────── repository: source archive downloaded, verified against its registered hash
+            │  staging/clone-{op}/  ZIP rewritten with a manifest naming the new VM, every file re-hashed
+            └────────────────────► repository: published at archives/<type>/<new name>/<new version>
+```
+
+The commit creates the VM, its master and its provenance in one transaction. See [decision 0052](decisions/0052-vm-clones.md).
+
+## VM notes
+
+Notes are Markdown files under `NOTES_PATH`, read and written only by the API, through paths derived from catalog
+identities, without following links, and replaced atomically with an `ETag` check. The browser edits them with Vditor,
+whose own files are served from this origin. See [decision 0053](decisions/0053-vm-notes.md).
 
 ## Running VMs
 

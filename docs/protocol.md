@@ -391,6 +391,28 @@ Milestone 7, decisions [0037](decisions/0037-snapshots-as-registrations.md), [00
 4. `server.workspace_discard` asks for a working copy's removal. The agent refuses while anything runs or works on the VM, and answers once; a lost request or answer is reconciled from the next `agent.restore_sync`.
 5. A restore with `replace` replaces the persistent copy: the agent advertises `replaceLocal` in its restore capabilities, checks that nothing runs, that the directory is the one its lineage record names and is that `expectedVersionId`, and, unless `discardLocalChanges`, that it matches that version's manifest. It then publishes with a journaled, no-replace swap (`.emucat-replaced-{operation}` beside the VM) that a restart completes or rolls back.
 
+## Clones
+
+Decision [0052](decisions/0052-vm-clones.md). A clone is a registration operation with `mode: "clone"` for the new
+VM; only its command is new.
+
+1. `agent.registration_sync` says `clones: true` on an agent that can clone. The server sends `server.clone_request`
+   to no other, and fails a queued clone whose agent comes back without it (`clone_unavailable`).
+2. `server.clone_request` names `operationId`, `emulatorType` (`86box`, `qemu` or `virtualbox`), `repositoryId`, the
+   `source` (`vmName`, `versionId`, `archiveKey`, `archiveSizeBytes`, `archiveSha256`, `manifestSha256` or `null`)
+   and the `target` (`vmName`, `versionId`, `archiveKey`). No path and no address; an extra field fails to decode and
+   is answered as invalid. The agent derives both keys itself and refuses any other (`invalid_request`).
+3. Progress is `agent.registration_progress` (`validating`, `archiving` while it downloads, writes and checks the
+   clone, `uploading`, `verifying`); a failure is `agent.registration_error` (`source_archive_invalid`,
+   `archive_exists`, `hash_mismatch`, `insufficient_staging_space`, the repository's codes, `cancelled`,
+   `agent_restarted`).
+4. The result is `agent.registration_result` with the new manifest for a ZIP, or `agent.virtualbox_registration_result`
+   for an OVA. The server answers `server.registration_ack` as for any registration; `committed` never carries
+   `removeLocal`, and the agent's cleanup report is always `preserved`. A `rejected` answer with `deletePublished`
+   deletes only the clone's own object, at the key it was issued.
+5. `server.registration_cancel` stops a clone before publication; the agent removes its staging files and staging
+   object.
+
 ## Storage cleanup
 
 Milestone 7, [decision 0041](decisions/0041-storage-cleanup.md). Both commands name identities only, and the agent refuses either with any extra field.

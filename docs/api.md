@@ -141,8 +141,31 @@ over a Unix socket. Without one (`DEPLOYER_SOCKET` unset) the update routes answ
 
 There is no parameter for a branch, a Git ref, a repository or a command.
 
-**There is no route that creates a VM**, and none that changes `emulator_type` or `vm_name`. A VM enters the
-catalog only through agent discovery followed by [an explicit registration](#registrations), which keeps it private.
+**There is no route that changes `emulator_type` or `vm_name`.** A VM enters the catalog through agent discovery
+followed by [an explicit registration](#registrations), an [OVA import](#agent-ova-imports), or [a clone](#clones) of a
+version of an existing VM. Each new VM is private.
+
+`GET /admin/vms/:emulatorType/:vmName` includes `clonedFrom`: `null`, or where the VM was cloned from
+(`sourceEmulatorType`, `sourceVmName`, `sourceDisplayName`, `sourceVersionId`, `sourceVersionKind`,
+`sourceSnapshotName`, `sourceVersionTitle`, `clonedAt`, `clonedByDisplayName`, and `sourceExists`, whether a VM of
+that name is in the catalog now). It is information only ([decision 0052](decisions/0052-vm-clones.md)).
+
+### VM notes
+
+One Markdown document per VM, private to administrators ([decision 0053](decisions/0053-vm-notes.md)). Shapes are in
+[`notes.ts`](../packages/contracts/src/notes.ts). No public route returns notes, and no other response includes them.
+
+| Method and path                                 | Purpose                                                                                    |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `GET /admin/vms/:emulatorType/:vmName/notes`    | `{ markdown, exists, etag, updatedAt, sizeBytes }`, and the `ETag` header. No file is `""` |
+| `PUT /admin/vms/:emulatorType/:vmName/notes`    | `{ markdown }` with `If-Match: <etag>`: replaces the whole document. `""` removes the file |
+| `DELETE /admin/vms/:emulatorType/:vmName/notes` | With `If-Match: <etag>`: removes the notes                                                 |
+
+The `ETag` is the quoted SHA-256 of the content. A save without `If-Match` answers `428 precondition_required`; one
+whose tag no longer matches, `412 notes_conflict`, and nothing changes. Notes are at most 1 MiB of UTF-8 without NUL
+(`413 notes_too_large`, or `400`). `404 vm_not_found` for a VM that is not registered. `503 notes_unavailable` when the
+server has no notes directory or cannot write it; `500 notes_storage_unsafe` when a link was found where the notes are
+kept, and nothing is read or written through it. No response contains a filesystem path.
 
 ## Agent media
 
@@ -374,6 +397,25 @@ Administrators only, with the same-origin and CSRF rules as everything else here
 A snapshot's parent must be the version the agent's copy came from. Creating one answers 404 with `version_not_found` (also for a version of another VM), and 409 with `agent_offline`, `agent_cannot_snapshot`, `agent_revoked`, `local_copy_missing`, `local_copy_unsafe`, `snapshot_parent_unknown`, `snapshot_parent_mismatch`, `repository_disabled`, `repository_not_authorized`, `vm_running` (any active session, `unknown` included), `operation_in_progress` or `request_id_reused`. A repeated `requestId` returns the same operation. Its progress, cancellation and reconciliation are the registration routes'.
 
 Starting a remote session answers 404 `version_not_found`, and 409 with `request_id_reused`, `execution_mode_unavailable` (the agent does not run the mode), `remote_session_pending` (one is still active for this VM on that agent, a failed publication included), `session_active`, or the reasons `execution-options` lists. A repeated `requestId` returns the same session. Everything after that is driven by the server ([decision 0040](decisions/0040-temporary-remote-sessions.md)): the restore into a temporary copy, the launch, then on exit the cleanup, or for Remote Snapshot the publication and then the cleanup. Retrying answers 409 `workspace_unavailable` unless the publication failed. Resuming answers 400 `confirmation_mismatch`, and 409 `workspace_unavailable` unless it is held, or `vm_running` if the agent says it runs again. Launching or preserving a remote session answers 409 `workspace_purpose_mismatch`. Discarding answers 400 `confirmation_required` (a held session, a failed publication, or a manual copy that may hold changes), and 409 with `vm_running` (any active session of the VM on that agent, `unknown` included), `operation_in_progress` (any operation on that agent) or `workspace_unavailable`. Snapshots also answer 409 `snapshot_lineage_unverified` for a copy discovery saw disappear and come back, until a verification proves what it is.
+
+### Clones
+
+[Decision 0052](decisions/0052-vm-clones.md). Shapes are in [`clone.ts`](../packages/contracts/src/clone.ts).
+
+| Method and path                                                          | What it does                                                                                                                                                             |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/clone-options` | The source version, `refusal` (`version_deleted`, `repository_disabled`, `remaster_in_progress`, or `null`), and every agent of its repository with whether it can clone |
+| `POST /admin/vms/:emulatorType/:vmName/versions/:versionId/clone`        | `{ agentId, vmName, requestId }`: clones the version into a new VM `vmName` of the same type. 202, with the registration operation (`mode: "clone"`)                     |
+
+The new name follows the [VM name rules](domain-model.md#vm-names) (`400` otherwise) and must be free among VMs of
+that type, ignoring case: `409 vm_already_registered` for an existing VM (the message names its spelling), or
+`409 registration_in_progress` while another operation is creating it. Also `404 version_not_found` (also for a
+version of another VM), `404 agent_not_found`, and 409 with `agent_offline`, `agent_cannot_clone`, `agent_revoked`,
+`repository_not_authorized`, `agent_busy`, `repository_disabled`, `version_deleted`, `remaster_in_progress` or
+`request_id_reused`. A repeated `requestId` returns the same clone. Progress, cancellation and history are the
+registration routes' (`GET /admin/registrations/:operationId`, whose `cloneSource` names the source). The clone is
+committed with its master, and ends `succeeded`; the source is never changed. While a clone runs, its source version
+cannot be deleted (`snapshot_in_use`) or removed by a remaster (`version_in_use`).
 
 ### Remasters
 

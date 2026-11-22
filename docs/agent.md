@@ -409,6 +409,19 @@ The temporary copies of remote sessions, and Milestone 7's manual working copies
 
 A restore that replaces the persistent copy extracts the new version into staging, renames the current directory to `.emucat-replaced-{operation}` beside it, renames the new one into place, records its lineage and only then deletes the old one. Each step is journaled: after a crash the agent finishes a swap whose new directory is in place, moves the old directory back if the new one is not, and otherwise leaves both alone and reports it. See [the launcher guide](launcher.md#replacing-a-persistent-copy).
 
+## Cloning a version
+
+An administrator can clone any version of a VM into a new VM ([decision 0052](decisions/0052-vm-clones.md)). The agent
+chosen for it downloads the version's archive from the repository into `staging/clone-<operation>/`, refuses it unless
+its size and SHA-256 are the ones registered, and writes the clone there: for 86Box and QEMU a new ZIP with every
+entry copied as it is and the manifest naming the new VM, checked as a restore would check it and with every file
+decompressed and hashed; for VirtualBox the OVA as it is. It then uploads, verifies and publishes it at the new VM's
+own key, exactly as a registration does. It never writes to a VM directory, never touches the source's archive, and
+removes its staging directory when it is done. The journal is in `state/clones`.
+
+A ZIP clone needs room for twice the archive in the staging directory while it runs (`insufficient_staging_space`
+otherwise). An agent says it can clone with `clones: true` in its registration sync; older agents are never asked.
+
 ## Removing local copies and deleting archives
 
 When an administrator removes this agent's persistent copy of a VM, the agent finds it from its own base path, as a plain directory with the VM's name, and checks again that nothing runs or works on it, that it is the version the page showed, and, unless the administrator acknowledged discarding changes, that it matches that version and that every screenshot has reached the server. It then renames it to `.emucat-removing-{operation}` in the same base path, forgets its lineage and manifest, and deletes it; links and junctions inside are removed, never followed. Each step is journaled under `local-removals` in the state directory, so a removal a crash interrupted is resolved on the next start: nothing was removed, or the moved-aside directory is deleted. Files that cannot be deleted yet are retried at each start and connection; the copy is already gone for every purpose. Nothing else is ever deleted from a base path this way.

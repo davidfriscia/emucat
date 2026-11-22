@@ -10,6 +10,7 @@ one, with **Copy** or **Transfer**: the agent builds a standalone ZIP with a man
 repository, verifies its SHA-256 there, and publishes it immutably, after which the server records one private master.
 Screenshots synchronize by themselves from registered VMs to the server, and are public exactly while their VM is: see [the media guide](docs/media.md). Administrators arrange each VM's screenshots in a saved order, delete screenshots for good (the agent's file is left alone and not imported again), and tag VMs, masters, snapshots and screenshots from one tag catalog; the catalog search finds a VM by its own tags and its children's ([decision 0050](docs/decisions/0050-media-order-deletion-and-tags.md)).
 An administrator can **restore** any version onto an agent, launch a VM, stop it, and verify a local copy. A **snapshot** archives an agent's copy again as a new immutable version whose parent is the version that copy came from, so history branches; the version tree is shown to administrators only. **Remote Volatile** runs any version from a temporary copy and discards every change when the emulator exits; **Remote Snapshot** does the same, then publishes the result automatically as a new snapshot whose parent is exactly the version that ran. Neither needs or touches the agent's persistent copy, which a restore can now **replace** with any version, explicitly and safely. An administrator can also **remove** one agent's persistent copy, and **permanently delete** a leaf snapshot that nothing uses, from the repository ([decision 0041](docs/decisions/0041-storage-cleanup.md)). See [the launcher guide](docs/launcher.md#remote-modes) and [known limitations](#known-limitations).
+An administrator can **clone** any master or snapshot into a new, independent VM ([decision 0052](docs/decisions/0052-vm-clones.md)), and keep private **Markdown notes** for each VM, edited with Vditor and stored as files under `data/notes` ([decision 0053](docs/decisions/0053-vm-notes.md)).
 
 | Part                                       | Technology                                       |
 | ------------------------------------------ | ------------------------------------------------ |
@@ -202,6 +203,11 @@ No server has been installed from it yet.
 - **QEMU VMs need a recognized launcher.** A VM whose only script is named otherwise, such as `run.sh`, is reported as
   having no marker. See [the agent guide](docs/agent.md#what-counts-as-a-vm).
 - **No media upload from a browser.** Screenshots only come from agents. Orphaned media files are reported at startup and removed by hand.
+- **No catalog VM deletion.** Versions and local copies can be removed, but a VM itself cannot be deleted yet. Clones
+  and notes are built for it: a clone never depends on its source, and a VM's notes file is removed with
+  `NotesStorage.deleteForVm` when that lifecycle exists.
+- **Diagrams in notes stay code.** Vditor's Mermaid, MathJax and other diagram renderers are not shipped; formulas
+  (KaTeX) and code highlighting are.
 - **Single role.** Only administrators exist in practice, and there is no user management.
 - **No password recovery** other than editing the database. See
   [authentication](docs/authentication.md#if-you-lose-the-password).
@@ -211,6 +217,20 @@ No server has been installed from it yet.
   [decision 0034](docs/decisions/0034-deployment-and-admin-updates.md).
 - **The artwork has not had a designer's review**, and there are no raster icons. See
   [brand guidelines](docs/brand.md#outstanding-work).
+
+## Third-party software
+
+EmuCat uses open-source packages, each under its own license; `pnpm licenses list` and `cargo tree` list them all.
+Two are shipped to browsers as files of their own, and are credited here:
+
+| Package                                                                    | Used for                         | License                                                                        |
+| -------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------ |
+| [Vditor](https://github.com/Vanessa219/vditor) 4.0.1, © 2019-present B3log | The Markdown editor for VM notes | [MIT](https://github.com/Vanessa219/vditor/blob/master/LICENSE)                |
+| [DOMPurify](https://github.com/cure53/DOMPurify) 3.4.17, © Cure53          | Sanitizing rendered notes        | [MPL-2.0 or Apache-2.0](https://github.com/cure53/DOMPurify/blob/main/LICENSE) |
+
+Vditor's files published under `/vendor/vditor` are its own distribution, unchanged. They include
+[Lute](https://github.com/88250/lute) (Mulan PSL v2), [highlight.js](https://github.com/highlightjs/highlight.js)
+(BSD-3-Clause, its `LICENSE` is published with it) and [KaTeX](https://github.com/KaTeX/KaTeX) (MIT).
 
 ## License
 

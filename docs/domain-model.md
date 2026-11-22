@@ -24,7 +24,9 @@ A VM is identified by `(emulator_type, vm_name)`.
 - Identity never changes. Renaming a directory makes it a different VM.
 - `display_name` is the catalog title, and can be changed freely. Without one, the title is `vm_name`.
 
-A VM enters the catalog only through agent discovery followed by user registration. A directory is a
+A VM enters the catalog through agent discovery followed by user registration, an OVA import from an agent's command
+line ([0049](decisions/0049-ova-repository-import.md)), or a clone of a version of another VM
+([0052](decisions/0052-vm-clones.md), [below](#clones)). A directory is a
 candidate when its root contains, as a regular file:
 
 | Emulator | Marker                                                                                           |
@@ -230,6 +232,27 @@ history it was confirmed against, the previous and new masters, and for a local 
 (`mode = 'remaster'`). Its deletion manifest is the `vm_version_deletions` rows that name it. At most one is
 `exporting` per VM. See [decision 0048](decisions/0048-master-and-snapshot-lifecycle.md).
 
+## Clones
+
+A clone is a new VM whose master is the exact content of one version (master or snapshot) of another VM of the same
+emulator type. It is a `registration_operations` row with `mode = 'clone'` for the **new** VM, which reserves the name
+(ignoring case) while it runs, and copies what the source was as values (`clone_source_*`, never foreign keys). An agent
+downloads the source archive, writes it again under the new identity (a ZIP's manifest names the VM, so its entries
+are copied and its manifest rewritten; an OVA is copied as it is), verifies it and publishes it at the new VM's own
+key. The commit creates the VM (private), its master, and one `vm_clone_provenance` row.
+
+A clone shares nothing operational with its source: no archive, version, tag, screenshot, note, session, agent state
+or link. `vm_clone_provenance` records the source VM's name and title, the source version's ID, kind, snapshot name and
+title, who cloned it and when. It refers only to the clone (and is deleted with it), so it stays readable after the
+source is gone. See [decision 0052](decisions/0052-vm-clones.md).
+
+## Notes
+
+Each VM has at most one Markdown notes file, `NOTES_PATH/<emulator>/<vm name>/<vm name> - notes.md`, in the registered
+spelling of the identity. The file is the only copy: no table holds notes, and a missing file is empty notes. Notes
+belong to the identity, so no version operation touches them, and a clone starts with none. Administrators only. See
+[decision 0053](decisions/0053-vm-notes.md).
+
 ## Working copies
 
 A `vm_workspaces` row is a working copy of one VM on one agent, with a `purpose`: `remote_volatile` or `remote_snapshot` for a remote session, or `manual` for one prepared by hand in Milestone 7. A remote session moves through `preparing`, `ready`, `running`, then `held` when its emulator was not accounted for, `publishing` and `publish_failed` for Remote Snapshot, `discarding`, and ends `discarded`, `failed` or `lost`; manual ones keep their old lifecycle. It records the version chosen (`base_version_id`, a Remote Snapshot's parent), its session, its current publication attempt and their count, the version it published, and when an administrator abandoned it. Restores, snapshots and sessions that concern it name it. A restore that replaced a persistent copy records `replace_existing`, the version replaced and whether local changes were discarded. See decisions [0038](decisions/0038-remote-snapshot-working-copies.md) and [0040](decisions/0040-temporary-remote-sessions.md).
@@ -259,6 +282,7 @@ A `vm_workspaces` row is a working copy of one VM on one agent, with a `purpose`
 | `vm_workspaces`           | Remote sessions and working copies       | `id`                                        |
 | `vm_version_deletions`    | Versions being deleted, and deleted      | `version_id`                                |
 | `vm_remaster_operations`  | Remasters, kept after they end           | `id`                                        |
+| `vm_clone_provenance`     | Where a cloned VM came from, as text     | `(emulator_type, vm_name)`                  |
 | `system_bootstrap`        | That first-run setup has happened        | `id`, always 1                              |
 | `schema_migrations`       | Migration history, managed by the runner | `version`                                   |
 
