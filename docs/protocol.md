@@ -357,6 +357,21 @@ The agent runs the check described in [the repository guide](repositories.md#7-t
 that repository, without anything secret. The server compares them with its own record, and reports a difference. An answer
 counts only for the check in progress, from the agent it was asked of. A check that gets no answer in two minutes fails.
 
+Since [decision 0055](decisions/0055-server-repository-access.md) the result also says which way the agent reached
+the repository: `transport: "sftp"` or `"relay"`. An agent of an earlier release leaves it out, which the server reads
+as unknown. An agent with `transport = "relay"` has no SFTP settings at all and reports `configuration: null`; the
+server then skips the comparison.
+
+### Repository relay
+
+An agent that cannot reach a repository (`Unreachable` on SFTP only, never an authentication, host-key, permission
+or integrity failure) performs the same repository operations over HTTPS through the server, with its bearer
+credential: the routes are in the [API reference](api.md#agent-repository-relay) and the flows in
+[decision 0055](decisions/0055-server-repository-access.md). Nothing on the WebSocket changes: the server sends the
+same commands with the same keys, and the agent's progress and results are the same. The first repository operation
+of a job decides the transport, and the job keeps it. A server without the relay answers its routes with `404`, and
+the agent reports its SFTP error.
+
 ## Restore
 
 A command that restores a master. As with every other command, it names identities and never a place: there is no field for a path or a host, the agent refuses a request with any extra field, it recomputes the key from the VM and the version,
@@ -394,7 +409,11 @@ Milestone 7, decisions [0037](decisions/0037-snapshots-as-registrations.md), [00
 ## Clones
 
 Decision [0052](decisions/0052-vm-clones.md). A clone is a registration operation with `mode: "clone"` for the new
-VM; only its command is new.
+VM.
+
+**Since [decision 0055](decisions/0055-server-repository-access.md) the server makes every clone itself** and sends
+no `server.clone_request`. The messages below are kept so that the protocol stays compatible: an agent still
+advertises `clones: true` and still answers a clone request, but a current server never sends one.
 
 1. `agent.registration_sync` says `clones: true` on an agent that can clone. The server sends `server.clone_request`
    to no other, and fails a queued clone whose agent comes back without it (`clone_unavailable`).

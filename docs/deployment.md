@@ -90,14 +90,18 @@ modes, and every `install` puts those of the directories and of `config/` back:
 │   ├── app.env              root:emucat-deploy           0640  the API's environment, including DB_PASSWORD
 │   ├── deployer.token       root:emucat-socket           0640  shared secret of the API and the deployment service
 │   ├── deploy_key           emucat-deploy:emucat-deploy  0600  read-only GitHub deploy key (and deploy_key.pub)
-│   └── known_hosts          root:emucat-deploy           0640  the verified host key of github.com
+│   ├── known_hosts          root:emucat-deploy           0640  the verified host key of github.com
+│   └── repository-ssh/      david:david (1000:1000)      0711  the server's own repository key (decision 0055):
+│                                                               id_ed25519 (0600), known_hosts, optional passphrase;
+│                                                               mounted read-only at /run/secrets/repository-ssh
 ├── state/                   emucat-deploy:emucat-deploy  0750  current release, operations and logs, lock
 │   ├── operations/                                       0750  one .events and one .log file per update
 │   ├── builds/                                           0750  temporary source exports during an update
 │   └── home/                                             0700  the deployment account's home (Docker, Git)
 ├── data/                    root:root                    0755
 │   ├── media/               david:david (1000:1000)      0750  screenshots and other media (persistent)
-│   └── notes/               david:david (1000:1000)      0750  per-VM Markdown notes (persistent)
+│   ├── notes/               david:david (1000:1000)      0750  per-VM Markdown notes (persistent)
+│   └── transfers/           david:david (1000:1000)      0750  relay and clone staging (decision 0055); temporary
 └── backups/                 emucat-deploy:emucat-deploy  0750  database dumps, 0640 each
 ```
 
@@ -230,7 +234,8 @@ the earlier layout (`EMUCAT_APP_ENV_FILE`, `EMUCAT_DEPLOYER_TOKEN_FILE`, `EMUCAT
 | `EMUCAT_SOCKET_DIR`                             | `/run/emucat-deployer`; must match the unit's `RuntimeDirectory`               |
 | `EMUCAT_BIND_ADDRESS`, `EMUCAT_HTTP_PORT`       | Where the web container listens for the proxy (MARS: `10.0.0.2`, `8095`)       |
 | `EMUCAT_TRUSTED_PROXIES`                        | Addresses whose `X-Forwarded-For` is believed, as the web container sees them  |
-| `EMUCAT_*_SUBNET`                               | The three Docker networks; change only on a collision                          |
+| `EMUCAT_*_SUBNET`                               | The four Docker networks; change only on a collision                           |
+| `EMUCAT_REPOSITORY_SUBNET`                      | The API's outbound network to repositories, `172.31.251.0/24` by default       |
 | `EMUCAT_DB_HOST_GATEWAY`, `EMUCAT_HOST_DB_HOST` | How containers and the host reach MariaDB                                      |
 | `EMUCAT_VERIFY`                                 | Run type checks and database-free tests while building                         |
 | `EMUCAT_KEEP_RELEASES`                          | Images of this many releases are kept for `rollback-app`                       |
@@ -261,6 +266,34 @@ Variables the API gained in this milestone (all optional outside Docker):
 | `EMUCAT_ENVIRONMENT`                       | Environment label (default `development`)                                          |
 | `EMUCAT_BUILD_COMMIT`, `EMUCAT_BUILD_TIME` | Baked into the image at build time                                                 |
 | `DEPLOYER_SOCKET`, `DEPLOYER_TOKEN_FILE`   | The deployment service. Both or neither; without them updates are "not configured" |
+
+The server's own repository connection and the relay ([decision 0055](decisions/0055-server-repository-access.md)).
+The first four are set by `compose.yaml` from `EMUCAT_ROOT/config/repository-ssh` and `data/transfers`; the
+`REPOSITORY_SSH_*` paths only when `id_ed25519` exists there when the containers start. The rest go in
+`app.env`, optional. Both are read when the API container is created, so provision the key and edit `app.env`
+**before** `update`. A change made afterwards takes effect at the next update; to apply it at once, stop the API
+(`sudo docker stop emucat-api-1`) and run `update` again: with the API not running it does a complete update of the
+same commit (build from cache, backup, no migration, new containers).
+
+| Variable                                 | Default                  | Meaning                                                                     |
+| ---------------------------------------- | ------------------------ | --------------------------------------------------------------------------- |
+| `REPOSITORY_SSH_PRIVATE_KEY_PATH`        | unset                    | The server's key. Unset: no server connection, no clones, no relay          |
+| `REPOSITORY_SSH_KNOWN_HOSTS_PATH`        | unset                    | OpenSSH `known_hosts` with the repositories' host keys. Required with a key |
+| `REPOSITORY_SSH_PASSPHRASE_FILE`         | unset                    | A file holding the key's passphrase, if it has one                          |
+| `TRANSFER_STAGING_PATH`                  | `var/transfers`          | Staging; `/data/transfers` in the container                                 |
+| `REPOSITORY_SSH_CONNECT_TIMEOUT_SECONDS` | `15`                     | TCP and SSH handshake                                                       |
+| `REPOSITORY_SSH_REQUEST_TIMEOUT_SECONDS` | `60`                     | One SFTP request without progress                                           |
+| `TRANSFER_RELAY_ENABLED`                 | `true`                   | Whether agents may send and fetch archives through the server               |
+| `TRANSFER_CHUNK_BYTES`                   | `8388608` (8 MiB)        | One upload request. 256 KiB to 64 MiB; below the proxies' body limits       |
+| `TRANSFER_MAX_STAGING_BYTES`             | `107374182400` (100 GiB) | What staging may hold in all                                                |
+| `TRANSFER_MIN_FREE_BYTES`                | `2147483648` (2 GiB)     | Free space staging must leave on its file system                            |
+| `TRANSFER_MAX_CONCURRENT`                | `4`                      | Relayed transfers and clones at once                                        |
+| `TRANSFER_INACTIVITY_TIMEOUT_SECONDS`    | `86400`                  | An idle unfinished transfer is discarded after this                         |
+| `TRANSFER_RETENTION_SECONDS`             | `3600`                   | How long a finished transfer's bytes stay, for repeated reads               |
+
+Upgrading an existing installation to this release needs `emucatctl install` from the new checkout **before**
+`update`: the installed tooling of earlier releases neither creates `data/transfers` and `config/repository-ssh`
+nor passes them to Compose. The complete procedure is the [MARS runbook](runbook-0055-mars.md).
 
 ## 6. Docker images
 
@@ -515,7 +548,7 @@ is an nginx example for MARS. The proxy must:
 - send everything (`/` and `/api/`) to `EMUCAT_BIND_ADDRESS:EMUCAT_HTTP_PORT`;
 - pass the browser's `Host` and set `X-Forwarded-Proto https`;
 - **overwrite** `X-Forwarded-For` with the client address (`$remote_addr`), not append to it;
-- allow request bodies of at least 80 MB (screenshot uploads);
+- allow request bodies of at least 80 MB (screenshot uploads, and relay chunks of `TRANSFER_CHUNK_BYTES`);
 - pass WebSocket upgrades (next section).
 
 The web container believes `X-Forwarded-For` only from `EMUCAT_TRUSTED_PROXIES`. A proxy on the same host
@@ -639,13 +672,13 @@ host.
 
 ## 19. Security boundaries
 
-| Component          | Can                                                                 | Cannot                                                      |
-| ------------------ | ------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Browser (admin)    | Ask for status, a check, an update to the commit it was shown, logs | Choose a branch, ref, repository, command or script         |
-| API container      | Talk to the socket with the token; read/write media; reach MariaDB  | Use Docker, a host shell, host files, Git credentials, sudo |
-| Web container      | Serve files, proxy to the API                                       | Reach MariaDB or the socket                                 |
-| Deployment service | Run `emucatctl update/check-update` for the configured branch       | Accept arbitrary commands; listen on the network            |
-| `emucat-deploy`    | Docker (root-equivalent), its state, backups, the mirror            | Change the root-owned tooling or the configuration files    |
+| Component          | Can                                                                                                                              | Cannot                                                      |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Browser (admin)    | Ask for status, a check, an update to the commit it was shown, logs                                                              | Choose a branch, ref, repository, command or script         |
+| API container      | Talk to the socket with the token; read/write media; reach MariaDB; read its own repository key; write `data/transfers`; SSH out | Use Docker, a host shell, host files, Git credentials, sudo |
+| Web container      | Serve files, proxy to the API                                                                                                    | Reach MariaDB or the socket                                 |
+| Deployment service | Run `emucatctl update/check-update` for the configured branch                                                                    | Accept arbitrary commands; listen on the network            |
+| `emucat-deploy`    | Docker (root-equivalent), its state, backups, the mirror                                                                         | Change the root-owned tooling or the configuration files    |
 
 - The privilege to deploy lives only in the deployment service and `emucatctl`, which is why that
   account must be guarded like root. The application containers run unprivileged, as non-root users, with
@@ -660,24 +693,27 @@ host.
 
 ## 20. Troubleshooting
 
-| Symptom                                               | Look at                                                                                                                                |
-| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Application Updates: "deployment service unavailable" | `systemctl status emucat-deployer`, `journalctl -u emucat-deployer`; socket and token permissions; the API's GID (`EMUCAT_SOCKET_GID`) |
-| Application Updates: "not configured"                 | The API runs without `DEPLOYER_SOCKET` (not under `deploy/compose.yaml`)                                                               |
-| `update` exits 75                                     | Another update holds the lock; `emucatctl status`                                                                                      |
-| "target_changed"                                      | The branch moved after the check; check again                                                                                          |
-| Build or test stage fails                             | `state/operations/<id>.log`; the running release is untouched                                                                          |
-| Backup fails                                          | MariaDB reachable from the host as `emucat-usr`? Disk space in `/opt/emucat/backups`                                                   |
-| API unhealthy after start                             | `emucatctl logs api`: database address, firewall, `bind-address`, migrations                                                           |
-| `cross_origin_rejected` at sign-in                    | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
-| Client addresses are the proxy's                      | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
-| Agents disconnect every minute                        | Proxy WebSocket timeouts (section 15)                                                                                                  |
-| Service restarts, `ERR_UNKNOWN_FILE_EXTENSION` `.ts`  | Tooling from before the compiled service; run `install` again from a current checkout (section 16)                                     |
-| Update: `Cannot open: Function not implemented`       | Tooling from before the Git export (section 9); run `install` again from a current checkout (section 16)                               |
-| `install`: "did not answer on its socket"             | `journalctl -u emucat-deployer -n 50`; `check`; is `node` on root's `PATH` the one in the unit's `ExecStart`?                          |
-| Media permission errors                               | `/opt/emucat/data/media` must be owned by `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (david:david, 1000:1000)                                  |
-| An update shows "interrupted"                         | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
-| `rollback-app` exits 3                                | The database is newer than that release; restore a dump or fix forward                                                                 |
+| Symptom                                                 | Look at                                                                                                                                |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Application Updates: "deployment service unavailable"   | `systemctl status emucat-deployer`, `journalctl -u emucat-deployer`; socket and token permissions; the API's GID (`EMUCAT_SOCKET_GID`) |
+| Application Updates: "not configured"                   | The API runs without `DEPLOYER_SOCKET` (not under `deploy/compose.yaml`)                                                               |
+| `update` exits 75                                       | Another update holds the lock; `emucatctl status`                                                                                      |
+| "target_changed"                                        | The branch moved after the check; check again                                                                                          |
+| Build or test stage fails                               | `state/operations/<id>.log`; the running release is untouched                                                                          |
+| Backup fails                                            | MariaDB reachable from the host as `emucat-usr`? Disk space in `/opt/emucat/backups`                                                   |
+| API unhealthy after start                               | `emucatctl logs api`: database address, firewall, `bind-address`, migrations                                                           |
+| `cross_origin_rejected` at sign-in                      | `PUBLIC_ORIGIN` must equal the browser's address; the proxy must pass `Host`                                                           |
+| Client addresses are the proxy's                        | `EMUCAT_TRUSTED_PROXIES` must contain the address the proxy connects from                                                              |
+| Agents disconnect every minute                          | Proxy WebSocket timeouts (section 15)                                                                                                  |
+| Service restarts, `ERR_UNKNOWN_FILE_EXTENSION` `.ts`    | Tooling from before the compiled service; run `install` again from a current checkout (section 16)                                     |
+| Update: `Cannot open: Function not implemented`         | Tooling from before the Git export (section 9); run `install` again from a current checkout (section 16)                               |
+| `install`: "did not answer on its socket"               | `journalctl -u emucat-deployer -n 50`; `check`; is `node` on root's `PATH` the one in the unit's `ExecStart`?                          |
+| Media permission errors                                 | `/opt/emucat/data/media` must be owned by `EMUCAT_APP_USER:EMUCAT_APP_GROUP` (david:david, 1000:1000)                                  |
+| An update shows "interrupted"                           | The update process died (reboot, OOM). Check `status`; run `update` again                                                              |
+| `rollback-app` exits 3                                  | The database is newer than that release; restore a dump or fix forward                                                                 |
+| `update`: "transfer staging directory … does not exist" | Tooling from before decision 0055; run `install` again from a current checkout ([runbook](runbook-0055-mars.md))                       |
+| Test Server Connection fails at "host key"              | `config/repository-ssh/known_hosts` lacks the address the server uses (with `[host]:port` for a port other than 22)                    |
+| Relay or clone: `transfer_staging_full`                 | `df -h /opt/emucat/data`, `du -sh /opt/emucat/data/transfers`; `TRANSFER_MAX_STAGING_BYTES`, `TRANSFER_MIN_FREE_BYTES`                 |
 
 `sudo /opt/emucat/tooling/bin/emucatctl check` verifies the configuration, tools, Docker, MariaDB, the
 mirror, the installed service program and that the service answers an authenticated request on its

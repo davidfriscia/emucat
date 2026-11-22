@@ -12,13 +12,26 @@ computers through a local agent.
                      │
                  Agent (Rust) ──▶ Local VM directories, emulators
                      │
-                     └──────────────▶ SSH/SFTP archive repository, directly
+                     └──────────────▶ SSH/SFTP archive repository, directly (preferred)
+
+  API ──SFTP, its own key (optional)──▶ the same repository: clones, View Archive Contents, the relay
 ```
 
-The API is the control plane and never carries an archive: there is no route for one. Archive bytes go straight between
-agent and repository, and the API records what the agent verified. Screenshots take the other path, from the agent over authenticated
-HTTP(S) to the API and server media storage, and never through the archive repository. See
-[decision 0012](decisions/0012-direct-agent-repository.md) and [the media guide](media.md).
+The API is the control plane. Archive bytes normally go straight between agent and repository, and the API records
+what the agent verified ([decision 0012](decisions/0012-direct-agent-repository.md)). Since
+[decision 0055](decisions/0055-server-repository-access.md) the server may also have **its own SFTP connection** to a
+repository, with a dedicated key and strict `known_hosts` checks. It uses it for three things only:
+
+- **Server-side clones.** The server copies one version's archive into a new VM itself; no agent takes part.
+- **View Archive Contents.** It reads an archive's central directory and manifest, without downloading or changing it.
+- **The HTTPS relay**, for an agent that cannot reach a repository at all: the agent sends or fetches the archive in
+  resumable, hashed chunks over its authenticated HTTPS connection, the server stages it under `data/transfers`, and
+  moves it to or from the repository over its own connection, with the same staging keys, verification and
+  no-overwrite publication. An agent prefers its own SFTP connection and never falls back on an authentication,
+  host-key, permission or integrity failure.
+
+Screenshots take another path, from the agent over authenticated HTTP(S) to the API and server media storage, and
+never through the archive repository ([the media guide](media.md)).
 
 ## Components
 

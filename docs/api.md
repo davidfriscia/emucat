@@ -400,19 +400,21 @@ Starting a remote session answers 404 `version_not_found`, and 409 with `request
 
 ### Clones
 
-[Decision 0052](decisions/0052-vm-clones.md). Shapes are in [`clone.ts`](../packages/contracts/src/clone.ts).
+Decisions [0052](decisions/0052-vm-clones.md) and [0055](decisions/0055-server-repository-access.md). Shapes are in
+[`clone.ts`](../packages/contracts/src/clone.ts). The server makes the clone itself, over its own repository
+connection; no agent takes part.
 
-| Method and path                                                          | What it does                                                                                                                                                             |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/clone-options` | The source version, `refusal` (`version_deleted`, `repository_disabled`, `remaster_in_progress`, or `null`), and every agent of its repository with whether it can clone |
-| `POST /admin/vms/:emulatorType/:vmName/versions/:versionId/clone`        | `{ agentId, vmName, requestId }`: clones the version into a new VM `vmName` of the same type. 202, with the registration operation (`mode: "clone"`)                     |
+| Method and path                                                          | What it does                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/clone-options` | The source version and `refusal` (`version_deleted`, `repository_disabled`, `remaster_in_progress`, `server_repository_unavailable`, or `null`)                                                                               |
+| `POST /admin/vms/:emulatorType/:vmName/versions/:versionId/clone`        | `{ vmName, requestId }`: clones the version into a new VM `vmName` of the same type. 202, with the registration operation (`mode: "clone"`, `performedBy: "server"`, no agent). An `agentId` from an older browser is ignored |
 
 The new name follows the [VM name rules](domain-model.md#vm-names) (`400` otherwise) and must be free among VMs of
 that type, ignoring case: `409 vm_already_registered` for an existing VM (the message names its spelling), or
 `409 registration_in_progress` while another operation is creating it. Also `404 version_not_found` (also for a
-version of another VM), `404 agent_not_found`, and 409 with `agent_offline`, `agent_cannot_clone`, `agent_revoked`,
-`repository_not_authorized`, `agent_busy`, `repository_disabled`, `version_deleted`, `remaster_in_progress` or
-`request_id_reused`. A repeated `requestId` returns the same clone. Progress, cancellation and history are the
+version of another VM), and 409 with `repository_disabled`, `version_deleted`, `remaster_in_progress`,
+`server_repository_unavailable` (the server has no key or `known_hosts` of its own) or `request_id_reused`. A
+repeated `requestId` returns the same clone. Progress, cancellation and history are the
 registration routes' (`GET /admin/registrations/:operationId`, whose `cloneSource` names the source). The clone is
 committed with its master, and ends `succeeded`; the source is never changed. While a clone runs, its source version
 cannot be deleted (`snapshot_in_use`) or removed by a remaster (`version_in_use`).
@@ -466,7 +468,52 @@ Administrators only, with the session and CSRF token. No response holds a creden
 | `PUT /admin/repositories/:repositoryId`                               | Replaces those details, and forgets earlier checks                                              |
 | `PUT /admin/repositories/:repositoryId/agents/:agentId`               | Allows an agent to use it                                                                       |
 | `DELETE /admin/repositories/:repositoryId/agents/:agentId`            | Stops allowing it. A running registration then fails at its commit                              |
-| `POST /admin/repositories/:repositoryId/agents/:agentId/health-check` | Asks the agent to test it. 202. The result appears in the list                                  |
+| `POST /admin/repositories/:repositoryId/agents/:agentId/health-check` | Asks the agent to test it. 202. The result appears in the list, with the `transport` it used    |
+| `POST /admin/repositories/:repositoryId/server-test`                  | Test Server Connection: the server tests its own connection, step by step, and records it       |
+
+`POST` and `PUT` also take optional `serverHost` and `serverPort`: where the server reaches the same SSH server, if
+not at `host` and `port`. Each repository in the list has `serverAccess` (the last Test Server Connection), and each
+agent its last `transport` (`sftp`, `relay` or `null`).
+
+### Archive contents
+
+[Decision 0055](decisions/0055-server-repository-access.md), administrators only, read through the server's own
+repository connection. Nothing is downloaded to the browser.
+
+| Route                                                                      | What it does                                                                                                                    |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive`         | Summary: format, size, SHA-256, entry and file counts, whether the manifest is the registered one                               |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive/entries` | One directory: `view` (`logical` or `physical`), `path`, optional `q` (search below it), `offset`, `limit` (at most 500). Paged |
+
+Refusals: `404 version_not_found`, `409 server_repository_unavailable`, `409 version_deleted`, and
+`404 archive_path_not_found`, `409 archive_view_unavailable` (no manifest for the VM files view, as in an OVA), and
+`422 archive_malformed` / `archive_too_large` for an archive the server will not read.
+
+## Agent repository relay
+
+[Decision 0055](decisions/0055-server-repository-access.md). Under `/agent/repositories/:repositoryId`, with the
+agent's bearer credential and `x-emucat-protocol-version`; never from a browser. Every key is checked against the
+agent's own active operations and the catalog: there is no listing, and no route takes a server path.
+
+| Route                                     | What it does                                                                                              |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `GET …/relay`                             | Whether the relay is available here, and its `chunkBytes`                                                 |
+| `POST …/stat`, `…/free-space`, `…/health` | As the agent's own SFTP operations, done by the server                                                    |
+| `POST …/verify`                           | `{ key, sizeBytes, sha256 }`: the server hashes the repository object; repeat until done                  |
+| `POST …/publish`                          | `{ stagingKey, finalKey }`: hard link, never overwriting. 204                                             |
+| `POST …/delete`                           | Only the agent's own staging object or its own operation's archive                                        |
+| `POST …/uploads`                          | `{ key, sizeBytes, sha256 }`: starts, or resumes, an upload to a staging key. Status with `missingChunks` |
+| `GET …/uploads/:transferId`               | The upload's status                                                                                       |
+| `PUT …/uploads/:transferId/chunks/:index` | One chunk, with `x-emucat-chunk-sha256`. Exactly `chunkBytes`, but the last                               |
+| `POST …/uploads/:transferId/complete`     | Checks the whole file, then publishes it to the repository's staging key                                  |
+| `DELETE …/uploads/:transferId`            | Cancels it, and removes its staged bytes                                                                  |
+| `POST …/downloads`                        | `{ key }`: stages a version archive or the agent's own operation's object                                 |
+| `GET …/downloads/:transferId`             | Status; `ready` with `sizeBytes` and `sha256`                                                             |
+| `GET …/downloads/:transferId/content`     | The bytes, with `Range: bytes=n-` support (206) and `x-emucat-sha256`                                     |
+
+Refusals besides the usual: `relay_disabled`, `server_repository_unavailable`, `transfer_staging_full`,
+`transfer_busy` (retryable), `chunk_conflict`, `hash_mismatch`, `transfer_not_found`, `transfer_expired`,
+`transfer_too_large`, and `403 repository_not_authorized` for a key outside the agent’s own operations.
 
 ## Browser pages
 

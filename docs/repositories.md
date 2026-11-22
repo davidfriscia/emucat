@@ -1,8 +1,11 @@
 # Setting up an SSH repository
 
-A repository is where VM archives are stored. Agents reach it directly over SSH and SFTP, so archives never pass through the
-EmuCat server. Nothing here assumes a particular NAS. Replace `nas.example.lan`, `/srv/emucat` and the paths with your own.
-The reasoning is in decisions [0012](decisions/0012-direct-agent-repository.md) and [0013](decisions/0013-ssh-provider.md).
+A repository is where VM archives are stored. Agents reach it directly over SSH and SFTP whenever they can. The EmuCat
+server can have its own connection to it too, for clones, View Archive Contents and a relay for agents that cannot
+reach it ([section 8](#8-the-servers-own-connection)). Nothing here assumes a particular NAS. Replace
+`nas.example.lan`, `/srv/emucat` and the paths with your own. The reasoning is in decisions
+[0012](decisions/0012-direct-agent-repository.md), [0013](decisions/0013-ssh-provider.md) and
+[0055](decisions/0055-server-repository-access.md).
 
 **What you need on the server:** OpenSSH with SFTP, and a filesystem with hard links. EmuCat needs no shell, and uses no
 `sudo`. **What you need on the agent's computer:** the `emucat-agent` executable, and OpenSSH's `ssh-keygen`, which Windows
@@ -124,6 +127,68 @@ Or choose **Test connection** on the Repositories page, which runs the same chec
 proves the connection, the host key, your key, that the root can be read and written, and that a hard link refuses to overwrite.
 It uses a uniquely named test object under `archives/.staging`, removes it again, and never touches an archive.
 
+## 8. The server's own connection
+
+Optional, and separate from the agents' keys ([decision 0055](decisions/0055-server-repository-access.md)). Without it,
+everything works as before except clones (which the server makes), View Archive Contents and the relay. With it:
+
+1. **A dedicated key for the server.** Generate it on the EmuCat host, never on an agent, and never reuse an agent's:
+
+   ```bash
+   sudo ssh-keygen -t ed25519 -N '' -C emucat-server@mars -f /opt/emucat/config/repository-ssh/id_ed25519
+   sudo chown david:david /opt/emucat/config/repository-ssh/id_ed25519 /opt/emucat/config/repository-ssh/id_ed25519.pub
+   sudo chmod 600 /opt/emucat/config/repository-ssh/id_ed25519
+   ```
+
+   Its owner must be the application account the API runs as (`EMUCAT_APP_USER`, `david` here), mode `0600`. The
+   directory is created by `emucatctl install`. With a passphrase, give it to `ssh-keygen` instead of `-N ''`, and
+   put it alone on one line in `/opt/emucat/config/repository-ssh/passphrase`, same owner, mode `0600`.
+
+2. **Authorize it** in the same restricted account's `authorized_keys` as the agents' keys (section 3), one line of its
+   own, so that it can be revoked on its own. The `restrict` options of section 3 apply to it too.
+
+3. **Trust the repository's host key** in `/opt/emucat/config/repository-ssh/known_hosts`, after checking the
+   fingerprint out of band (section 4). Use the address the server will connect to:
+
+   ```bash
+   ssh-keyscan -p 22 -t ed25519 nas.example.lan | sudo tee /opt/emucat/config/repository-ssh/known_hosts >/dev/null
+   sudo chown david:david /opt/emucat/config/repository-ssh/known_hosts
+   sudo chmod 644 /opt/emucat/config/repository-ssh/known_hosts
+   sudo ssh-keygen -lf /opt/emucat/config/repository-ssh/known_hosts   # must be the fingerprint you checked
+   ```
+
+   For a port other than 22, the line starts with `[nas.example.lan]:2222`, as `ssh-keyscan -p 2222` writes it.
+
+4. **Tell EmuCat if the server reaches the NAS at another address.** On the Repositories page, **Edit**, then
+   _Server host_ and _Server port_. Empty means the same as the agents' host and port. The user and remote root are
+   always the same.
+
+5. **Test Server Connection** on the Repositories page. It checks, step by step, the key and `known_hosts`, name
+   resolution, the TCP connection, the host key, authentication, the remote root, writing, reading back, publication
+   that cannot overwrite, and that its test objects are gone. Each failed step says what to do.
+
+**Host authentication and user authentication are different things.** The host key (`known_hosts`) proves to the
+EmuCat server that it is talking to _your_ NAS and not something in between; the server refuses an unknown or
+changed one, always, and there is no setting to accept one automatically. The user key (`id_ed25519` and the NAS's
+`authorized_keys`) proves to the NAS that the connection comes from the EmuCat server. Both are needed.
+
+### Agents that cannot reach the repository
+
+An agent tries its own SFTP connection first. If the repository cannot be reached at all (no route, refused, timed
+out), it sends or fetches the archive through the EmuCat server instead, which needs the server's own connection
+above. An authentication failure, a host-key problem, a permission or integrity failure is never sent around through
+the server: it is reported, and needs fixing. To choose per repository, set `transport` in the agent's section:
+
+```toml
+[repositories."018f47a0-7c2b-4f7e-9a3d-1b2c3d4e5f61"]
+transport = "auto"     # the default: SFTP, the relay only when SFTP cannot reach the repository
+# transport = "sftp"   # never the relay
+# transport = "relay"  # never SFTP: leave out host, username, remote_root, private_key_path and host keys
+```
+
+The Repositories page shows, for each agent, whether its last check reached the repository directly or through the
+relay.
+
 ## What ends up on the server
 
 ```
@@ -153,24 +218,33 @@ SSH protects the transfer itself, so a LAN is fine. The EmuCat connection is sep
 [agent guide](agent.md). The repository's account should have no other purpose. If an agent's computer is lost, remove the key
 from `authorized_keys`, and [revoke the agent](agent.md#revoking).
 
+The server's key ([section 8](#8-the-servers-own-connection)) is a file on the EmuCat host only: never in the
+database, the web app, an image, a log or Git. If the host is compromised, remove its line from `authorized_keys`;
+the agents' keys are unaffected. Relayed archives are protected by HTTPS between agent and server, and by SSH between
+server and repository, and are verified by SHA-256 at every step.
+
 A future HTTPS provider is planned for repositories without SSH. It would use the same keys, versions and verification.
 
 ## Troubleshooting
 
-| What you see                   | What it means                                                  | What to do                                                              |
-| ------------------------------ | -------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `repository_not_configured`    | The agent has no section with this UUID                        | Add it, and restart the agent                                           |
-| `repository_config_mismatch`   | The agent's host, port, user or root differ from the web app's | Make them the same in both                                              |
-| `host_key_unknown`             | The key is not in the agent's trusted set                      | Check the fingerprint on the server, then add it                        |
-| `host_key_changed`             | The server has a different key than the one trusted            | **Find out why first.** After a reinstall, update the fingerprint       |
-| `ssh_authentication_failed`    | The server refused the key                                     | Check `authorized_keys` and its permissions, and the server's log       |
-| `repository_unreachable`       | No connection, or it timed out                                 | Check the host, the port, the firewall, and that `sshd` is running      |
-| `repository_permission_denied` | The account cannot write there                                 | The remote root must be owned by the account, not the chroot's own root |
-| `publication_unsupported`      | Hard links do not work there                                   | Use a filesystem that has them. FAT and some network mounts do not      |
-| `insufficient_remote_space`    | The repository's disk or quota is full                         | Free up space. Registering again is safe                                |
-| `insufficient_staging_space`   | The staging disk may be too small for this VM                  | Free up space, or point `storage.staging_dir` at a larger disk          |
-| `hash_mismatch`                | What was stored differs from what was sent                     | Nothing was registered. Check the repository's disk                     |
-| Cannot load the private key    | Wrong path, or a wrong or missing passphrase                   | Check `private_key_path`, and run `repository-passphrase` again         |
+| What you see                    | What it means                                                  | What to do                                                              |
+| ------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `repository_not_configured`     | The agent has no section with this UUID                        | Add it, and restart the agent                                           |
+| `repository_config_mismatch`    | The agent's host, port, user or root differ from the web app's | Make them the same in both                                              |
+| `host_key_unknown`              | The key is not in the agent's trusted set                      | Check the fingerprint on the server, then add it                        |
+| `host_key_changed`              | The server has a different key than the one trusted            | **Find out why first.** After a reinstall, update the fingerprint       |
+| `ssh_authentication_failed`     | The server refused the key                                     | Check `authorized_keys` and its permissions, and the server's log       |
+| `repository_unreachable`        | No connection, or it timed out                                 | Check the host, the port, the firewall, and that `sshd` is running      |
+| `repository_permission_denied`  | The account cannot write there                                 | The remote root must be owned by the account, not the chroot's own root |
+| `publication_unsupported`       | Hard links do not work there                                   | Use a filesystem that has them. FAT and some network mounts do not      |
+| `insufficient_remote_space`     | The repository's disk or quota is full                         | Free up space. Registering again is safe                                |
+| `insufficient_staging_space`    | The staging disk may be too small for this VM                  | Free up space, or point `storage.staging_dir` at a larger disk          |
+| `hash_mismatch`                 | What was stored differs from what was sent                     | Nothing was registered. Check the repository's disk                     |
+| Cannot load the private key     | Wrong path, or a wrong or missing passphrase                   | Check `private_key_path`, and run `repository-passphrase` again         |
+| `server_repository_unavailable` | The EmuCat server has no key or `known_hosts` of its own       | Set up [section 8](#8-the-servers-own-connection), then test it         |
+| `relay_disabled`                | The server does not relay (`TRANSFER_RELAY_ENABLED=false`)     | Let the agent reach the repository, or enable the relay                 |
+| `transfer_staging_full`         | The server's staging disk or quota is full                     | Wait for other transfers, or raise `TRANSFER_MAX_STAGING_BYTES`         |
+| `transfer_busy`                 | The server is relaying as many transfers as it allows          | Try again shortly; the agent retries by itself                          |
 
 For problems with a VM's own files, and with Copy or Transfer, see the [agent guide](agent.md#registering-vms).
 

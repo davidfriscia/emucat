@@ -38,6 +38,14 @@ Copy [`agent/agent.example.toml`](../agent/agent.example.toml) to the path `emuc
 | `[storage] cache_max_bytes`                                 |                                               | The cache's limit. 20 GiB by default, 0 is off      |
 | `[storage] restore_max_files`, `restore_max_expanded_bytes` |                                               | What a restore accepts from an archive              |
 | `[logging] level`, `format`                                 | `EMUCAT_AGENT_LOG_LEVEL`, `_FORMAT`           | Filter, and `text` or `json`                        |
+| `[repositories."<id>"] transport`                           |                                               | `auto` (default), `sftp` or `relay`: see below      |
+
+**`transport`** ([decision 0055](decisions/0055-server-repository-access.md)) says how the agent reaches that
+repository. `auto` uses its own SFTP connection, and only when the repository cannot be reached at all (no route,
+refused, timed out) sends and fetches archives through the EmuCat server instead. `sftp` never uses the server.
+`relay` never uses SFTP: leave out `host`, `username`, `remote_root`, `private_key_path` and the host keys, which are
+then refused. An authentication failure, an unknown or changed host key, a permission or integrity problem is never
+sent around through the server. `repository-check` prints which transport it used.
 
 The base directory is the folder that _holds_ the VM folders. It is often not where the emulator is installed, and
 the agent never guesses it from the executable's location.
@@ -411,8 +419,12 @@ A restore that replaces the persistent copy extracts the new version into stagin
 
 ## Cloning a version
 
-An administrator can clone any version of a VM into a new VM ([decision 0052](decisions/0052-vm-clones.md)). The agent
-chosen for it downloads the version's archive from the repository into `staging/clone-<operation>/`, refuses it unless
+An administrator can clone any version of a VM into a new VM ([decision 0052](decisions/0052-vm-clones.md)). Since
+[decision 0055](decisions/0055-server-repository-access.md) **the EmuCat server makes every clone itself**, over its
+own repository connection, and no agent is involved. The agent still has the code described below, for servers of
+earlier releases.
+
+An agent asked by an earlier server downloads the version's archive from the repository into `staging/clone-<operation>/`, refuses it unless
 its size and SHA-256 are the ones registered, and writes the clone there: for 86Box and QEMU a new ZIP with every
 entry copied as it is and the manifest naming the new VM, checked as a restore would check it and with every file
 decompressed and hashed; for VirtualBox the OVA as it is. It then uploads, verifies and publishes it at the new VM's
