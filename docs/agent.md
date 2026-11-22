@@ -56,7 +56,7 @@ On the agent's computer:
 
 It prints a code such as `ABCD-2345`, and waits. In the web app, signed in as an administrator:
 
-1. Open **Agents**, enter the code, and choose **Review**.
+1. Open **Admin › Agents**, enter the code, and choose **Review**.
 2. Check that the name, platform and address are those of the computer you expect.
 3. Choose **Approve**.
 
@@ -313,7 +313,7 @@ emucat-agent import-ova --file "D:\VM exports\DOS 6.22.ova" --name "DOS-6.22" --
 ```
 
 It is **not** VirtualBox's own import: nothing is imported into VirtualBox, no machine is created, linked or changed,
-and the file is only read. To run the VM afterwards, import its master into VirtualBox from the VM's page
+and the file is only read. To run the VM afterwards, import its master into VirtualBox from the VM's Version History
 ([Importing, deleting and capturing VirtualBox machines](#importing-deleting-and-capturing-virtualbox-machines)).
 
 | Option                    | What it does                                                                          |
@@ -380,7 +380,7 @@ if ($LASTEXITCODE -ne 0) { Write-Error "$($result.error.code): $($result.error.m
 
 ## Restoring VMs
 
-An administrator restores a registered master from the VM's page, by choosing an agent and confirming. This creates a local copy of the immutable master. It does not start the VM, and it does not change the master.
+An administrator restores a registered master from the VM's **Local copies and restore** section (or a version in its Version History), by choosing an agent and confirming. This creates a local copy of the immutable master. It does not start the VM, and it does not change the master.
 
 **What it needs on the agent:** a base path configured for that emulator, local settings for the VM's repository, the agent associated with that repository, and no directory with the VM's name in the base path, in any capitalization. The page says which of these is missing.
 
@@ -430,7 +430,7 @@ When an administrator deletes a snapshot, one agent configured for its repositor
 
 ## Running and verifying VMs
 
-An administrator can launch a VM the agent holds, stop it, and verify its copy against the master, from the VM's page. The agent builds every command line itself, never runs a batch file, tracks the emulator by its PID and creation time, and refuses to restore, remove or verify a VM while it may be running. Everything is in [the launcher guide](launcher.md).
+An administrator can launch a VM the agent holds, stop it, and verify its copy against the master, from **Run and verify** in the VM's General section. The agent builds every command line itself, never runs a batch file, tracks the emulator by its PID and creation time, and refuses to restore, remove or verify a VM while it may be running. Everything is in [the launcher guide](launcher.md).
 
 ## Screenshots
 

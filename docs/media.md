@@ -158,7 +158,7 @@ public VMs that were hidden and become public.
 
 ## Deleting screenshots
 
-An administrator deletes a screenshot from **Manage media** (or the VM's page): **Delete** opens a confirmation that names
+An administrator deletes a screenshot from the VM's **Screenshots** section (Catalog › the VM › Manage): **Delete** opens a confirmation that names
 the file and shows its thumbnail. Deleting removes it **from EmuCat**: its row, its tags, and its three files unless
 another row uses the same storage key. If it was the main image there is none afterwards, and the public catalog shows the
 placeholder. The other screenshots keep their order.
@@ -180,11 +180,11 @@ identical bytes back otherwise, remove the row from `vm_media_suppressions` with
 
 ## Order
 
-Each VM's screenshots have one order, kept in `vm_media.sort_order` and shown everywhere: Manage media, the VM's page, the
+Each VM's screenshots have one order, kept in `vm_media.sort_order` and shown everywhere: the Screenshots section of the VM's management, the
 public gallery and the image viewer. New screenshots are added at the end. Upgrading keeps the order galleries showed before
 (the main image first, then by capture or upload time).
 
-**Reorder Screenshots** on Manage media opens a table of every screenshot with its thumbnail, name, position and a drag handle.
+**Reorder Screenshots** in the Screenshots section opens a table of every screenshot with its thumbnail, name, position and a drag handle.
 Drag a row by its handle; or focus a handle, press Space, move with the arrow keys and press Space again (Escape cancels); or
 use the ↑ and ↓ buttons. Nothing is sent while arranging. **Save Order** saves the whole order at once and **Cancel** discards it;
 the dialog says when there are unsaved changes. If a screenshot arrived or was deleted meanwhile, saving is refused and nothing
@@ -198,7 +198,7 @@ its screenshots' tags without the VM having them. See [the domain model](domain-
 
 ## The gallery
 
-A VM's page shows the main screenshot prominently, and thumbnails of every screenshot the viewer may see. The public sees every screenshot of a public VM, and administrators see everything, with the controls to set or clear the main image and to delete. Selecting a
+A VM's public page, and the Screenshots section of its management, show the main screenshot prominently, and thumbnails of every screenshot the viewer may see. The public sees every screenshot of a public VM, and administrators see everything, in the Screenshots section with the controls to set or clear the main image and to delete. Selecting a
 thumbnail opens the full JPEG in a viewer: the arrow keys move, Escape closes, Tab stays inside, and focus returns to the thumbnail of the image it ended on. Thumbnails load lazily and 24 at a time, and originals are never displayed, only offered to administrators as a download. See
 [decision 0027](decisions/0027-catalog-detail-and-public-covers.md).
 
@@ -238,12 +238,12 @@ removed once uploaded, refused, or no longer accepted. The server accepts them f
 | Not a supported image (86Box `screenshots` tree)             | Deleted with the directory: it is not a screenshot                |
 | The agent does not synchronize screenshots                   | Deleted with the directory; named in the result                   |
 
-The VM's Media page counts spooled copies as pending until they arrive. `transfer_blocked_media` and `local_copy_unsynced_media`
+The VM's Screenshots section counts spooled copies as pending until they arrive. `transfer_blocked_media` and `local_copy_unsynced_media`
 come only from agents older than decision 0051; update the agent and retry.
 
 ## Operations
 
-The VM's Media page shows each agent's counts of pending, uploading, synchronized and failed screenshots, and the latest error. That
+The VM's Screenshots section shows each agent's counts of pending, uploading, synchronized and failed screenshots, and the latest error. That
 report is informational and held in memory on the server, like an agent's presence, so it is empty until the agent next reports.
 
 Agent log entries carry the VM, the source path, the attempt, the first characters of the hash, whether a failure is `transient` or

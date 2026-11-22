@@ -26,6 +26,8 @@ HTTP(S) to the API and server media storage, and never through the archive repos
 requests. In development, Vite proxies them to the API; a production deployment needs a reverse proxy
 that does the same, so the API has no CORS configuration.
 
+The web app's navigation is described [below](#navigation).
+
 **API (`apps/api`).** A Fastify server with a versioned REST API under `/api/v1` and the agent
 WebSocket endpoint.
 
@@ -108,6 +110,67 @@ builds and tests on Linux so that portability stays honest.
 | `media_sync`   | Watcher, reconciliation, upload to the API                              | Archive transfers        |
 | `vm_clone`     | Clones a version's archive into a new VM's, verified, and publishes it  |                          |
 | `state`        | State types, local source version                                       | Fuller persistence       |
+
+## Navigation
+
+The web app has two coordinated navigation levels ([decision 0054](decisions/0054-navigation.md)), all defined in
+`apps/web/src/navigation.ts`:
+
+1. **The header** (`components/Layout.tsx`) shows the global areas, **Catalog** and, to administrators only,
+   **Admin**, beside the brand, the API status, the theme button, the account and sign-in or sign-out. An area is
+   highlighted (`aria-current="page"`) anywhere inside it; a VM's management belongs to Catalog.
+2. **A contextual sidebar** (`components/SidebarLayout.tsx`) leads through the open area. The Admin layout
+   (`pages/admin/AdminLayout.tsx`) lists Agents, Registrations, Repositories, Appearance and Application Updates. The
+   VM Manage layout (`pages/admin/vm/VmManageLayout.tsx`) lists General, Version History, Local copies and restore,
+   Notes and Screenshots, under the VM's name and a **Back to Catalog** link. The two are never shown together. The
+   catalog and the public pages have no sidebar.
+
+The main content is each layout's `<Outlet />`.
+
+**The catalog is the only way into a VM's management.** An administrator's catalog (`pages/admin/AdminCatalog.tsx`,
+shown by `pages/CatalogPage.tsx`) lists every registered VM with its visibility, and the VM and media counts. A public
+VM's card opens its public page, whose **Manage this VM** leads to the VM's management; a private VM's card opens the
+management directly. No menu leads there.
+
+| Route                                          | Guard         | Layout    | Page                                                                  |
+| ---------------------------------------------- | ------------- | --------- | --------------------------------------------------------------------- |
+| `/`                                            | None          | Header    | Catalog: public, or every VM for an administrator                     |
+| `/vms/:emulatorType/:vmName`                   | None          | Header    | Public VM page; an administrator also gets Manage this VM             |
+| `/login`, `/setup`                             | None          | Header    | Sign in, first-run setup                                              |
+| `/account`, `/settings`                        | Signed in     | Header    | Password and sessions; theme and server facts (administrators: below) |
+| `/admin`                                       | Administrator | Admin     | Leads to `/admin/agents`                                              |
+| `/admin/agents`, `/admin/agents/:agentId`      | Administrator | Admin     | Agents and pairing; one agent, discovery, registration                |
+| `/admin/registrations`                         | Administrator | Admin     | Registration history                                                  |
+| `/admin/repositories`                          | Administrator | Admin     | Repositories and connectivity tests                                   |
+| `/admin/appearance`                            | Administrator | Admin     | Theme                                                                 |
+| `/admin/updates`                               | Administrator | Admin     | Application updates and server facts                                  |
+| `/admin/vms/:emulatorType/:vmName`             | Administrator | VM Manage | General: visibility, metadata, tags, details, Run and verify          |
+| `/admin/vms/:emulatorType/:vmName/versions`    | Administrator | VM Manage | Version History, including restore of a version and Clone VM          |
+| `/admin/vms/:emulatorType/:vmName/copies`      | Administrator | VM Manage | Local copies and restore; a VirtualBox VM's linked machine            |
+| `/admin/vms/:emulatorType/:vmName/notes`       | Administrator | VM Manage | Notes                                                                 |
+| `/admin/vms/:emulatorType/:vmName/screenshots` | Administrator | VM Manage | Screenshots: gallery, cover, order, tags, deletion, synchronization   |
+
+Earlier addresses still work: `/admin/catalog` leads to `/` with its query, `/settings` to `/admin/appearance` for an
+administrator, `/admin/vms/…/media` to `…/screenshots`, and `/admin/vms/…#version-<id>` to `…/versions#version-<id>`.
+Anything else is "Page not found", inside the VM's layout for an unknown section.
+
+**Authorization boundaries.** The guards (`components/Guards.tsx`) only decide what a page shows: `RequireSession`
+sends anyone signed out to sign in and back, and `RequireAdmin` shows "Administrators only" to other users before any
+Admin or VM Manage layout renders, so no administrative request is made. The API checks every request on its own, so
+neither hiding Admin nor a guard is what protects anything. The public VM page and the VM's management stay separate
+pages with separate endpoints.
+
+**State.** Navigation is URL-driven: the address decides the area, the sidebar's highlighted entry and the section,
+so refresh, bookmarks, back and forward agree. The VM Manage layout reads the VM once and shares it, and the version
+history's run choice, with its sections through context; it is remounted for another VM, so nothing of one VM shows on
+another's page. The application runs under a data router (`createBrowserRouter` in `main.tsx`, one splat route that
+renders `App`'s declarative routes) so that the notes editor can ask before navigation discards unsaved changes.
+
+**Responsive behavior.** From 992 px wide the header is expanded and the sidebar is a column to the left of the
+content, sticky while the page scrolls. Narrower, the header collapses behind its toggle, and the sidebar becomes a
+button above the content that names the menu and the current destination (`aria-expanded`, `aria-controls`). It opens
+the full list, and closes when a destination is chosen, on Escape (returning focus to the button), and on back or
+forward. On a narrow screen the VM's name is shown once, as the page heading.
 
 ## Principles
 

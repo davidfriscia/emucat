@@ -62,6 +62,15 @@ token the API printed to its log in the terminal, along with the administrator y
 
 All of these can be changed in `.env`. See [`.env.example`](.env.example).
 
+### Finding your way around
+
+The header has two areas: **Catalog**, for everyone, and **Admin**, for administrators only. **Admin** has a sidebar
+with **Agents**, **Registrations**, **Repositories**, **Appearance** and **Application Updates**. A VM is managed from
+the catalog: open it, choose **Manage this VM** (a private VM opens there directly), and use the VM's own sidebar:
+**General** (metadata, run and verify), **Version History** (including Clone VM), **Local copies and restore**,
+**Notes** and **Screenshots**. On a narrow screen each sidebar is a menu button above the page. See
+[architecture](docs/architecture.md#navigation).
+
 ### Stopping
 
 - Press `Ctrl+C` in the terminal running `pnpm dev` to stop the contracts watcher, API and web app.
@@ -169,7 +178,7 @@ After upgrading from an earlier milestone, run `pnpm db:migrate`.
 ## Deploying to a server
 
 Production Docker images, one Compose file without a database service, the `emucatctl` tool and an
-admin-only **Application updates** section in Settings. See [the deployment guide](docs/deployment.md).
+admin-only **Admin › Application Updates** page. See [the deployment guide](docs/deployment.md).
 No server has been installed from it yet.
 
 ## Known limitations

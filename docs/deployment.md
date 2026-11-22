@@ -3,7 +3,7 @@
 This guide prepares a Linux server to run EmuCat in Docker, with the server's existing MariaDB, and to
 update it on demand from a fixed Git branch. Two servers use the same mechanism:
 
-| Host     | Role       | Branch    | Address                         | Updates from Settings  |
+| Host     | Role       | Branch    | Address                         | Updates from Admin     |
 | -------- | ---------- | --------- | ------------------------------- | ---------------------- |
 | **MARS** | test       | `develop` | `https://emucat-test.dfri.info` | enabled                |
 | **MOON** | production | `main`    | configurable (`PUBLIC_ORIGIN`)  | disabled until enabled |
@@ -32,7 +32,7 @@ Actions, no container registry and no push-triggered deployment: images are buil
 8. [First installation](#8-first-installation)
 9. [The deployment service](#9-the-deployment-service)
 10. [Updating from the command line](#10-updating-from-the-command-line)
-11. [Updating from Settings](#11-updating-from-settings)
+11. [Updating from Admin › Application Updates](#11-updating-from-admin--application-updates)
 12. [Backups and recovery](#12-backups-and-recovery)
 13. [Rolling back, and its limits](#13-rolling-back-and-its-limits)
 14. [The external reverse proxy](#14-the-external-reverse-proxy)
@@ -217,7 +217,7 @@ the earlier layout (`EMUCAT_APP_ENV_FILE`, `EMUCAT_DEPLOYER_TOKEN_FILE`, `EMUCAT
 
 | Variable                                        | Meaning                                                                        |
 | ----------------------------------------------- | ------------------------------------------------------------------------------ |
-| `EMUCAT_ENVIRONMENT`                            | Label shown in Settings: `test`, `production`                                  |
+| `EMUCAT_ENVIRONMENT`                            | Label shown in Application Updates: `test`, `production`                       |
 | `EMUCAT_BRANCH`                                 | The only branch this host deploys                                              |
 | `EMUCAT_GIT_URL`                                | Repository URL, read-only (SSH with a deploy key recommended). Never a token   |
 | `EMUCAT_GIT_SSH_KEY`                            | `/opt/emucat/config/deploy_key` (created by `init`), or empty for public HTTPS |
@@ -438,10 +438,10 @@ recorded:
 
 The full log is in `state/operations/<id>.log`.
 
-## 11. Updating from Settings
+## 11. Updating from Admin › Application Updates
 
-Administrators see **Application updates** in Settings (other users never see it, and the API refuses
-them). It shows the environment, branch, deployed commit and time, the newest commit of the branch,
+Administrators open **Admin › Application Updates** (`/admin/updates`; other users never see Admin, are turned away
+from the page, and the API refuses them). It shows the environment, branch, deployed commit and time, the newest commit of the branch,
 whether an update is available, the last success and failure, and whether the deployment service is
 reachable.
 
@@ -653,7 +653,7 @@ host.
 - The token is compared in constant time; the socket is reachable only by `emucat-socket` members.
 - Values from the browser are validated twice (API and service) and never reach a shell: processes are
   started with argument arrays, and commit IDs must be 40 lowercase hex digits.
-- Logs shown in Settings are sanitized; `/opt/emucat/config` is never mounted into or readable by the
+- Logs shown in Application Updates are sanitized; `/opt/emucat/config` is never mounted into or readable by the
   application, except the one token file, passed as a Compose secret.
 - Authentication, sessions, roles and agent pairing are unchanged. There is no OAuth or external
   identity provider.

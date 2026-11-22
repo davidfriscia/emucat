@@ -470,19 +470,27 @@ Administrators only, with the session and CSRF token. No response holds a creden
 
 ## Browser pages
 
-| Route                              | Audience      | Page                                                                           |
-| ---------------------------------- | ------------- | ------------------------------------------------------------------------------ |
-| `/`                                | Public        | Catalog                                                                        |
-| `/vms/:emulatorType/:vmName`       | Public        | VM detail: launch, general information, gallery                                |
-| `/login`, `/setup`                 | Public        | Sign in, first-run setup                                                       |
-| `/admin`                           | Administrator | Dashboard                                                                      |
-| `/admin/catalog`                   | Administrator | Catalog management                                                             |
-| `/admin/agents`                    | Administrator | Agents, pairing                                                                |
-| `/admin/agents/:agentId`           | Administrator | One agent, discovery, registration                                             |
-| `/admin/repositories`              | Administrator | Repositories, connectivity tests                                               |
-| `/admin/vms/:emulatorType/:vmName` | Administrator | VM detail: metadata, visibility, cover, gallery, master, local copies, restore |
-| `…/media`                          | Administrator | Media management                                                               |
-| `/account`, `/settings`            | Signed in     | Password, sessions, theme                                                      |
+| Route                              | Audience      | Page                                                                  |
+| ---------------------------------- | ------------- | --------------------------------------------------------------------- |
+| `/`                                | Public        | Catalog; every registered VM for an administrator                     |
+| `/vms/:emulatorType/:vmName`       | Public        | VM detail: launch, general information, gallery                       |
+| `/login`, `/setup`                 | Public        | Sign in, first-run setup                                              |
+| `/account`, `/settings`            | Signed in     | Password, sessions; theme (administrators: Admin › Appearance)        |
+| `/admin`                           | Administrator | Leads to Agents                                                       |
+| `/admin/agents`                    | Administrator | Agents, pairing                                                       |
+| `/admin/agents/:agentId`           | Administrator | One agent, discovery, registration                                    |
+| `/admin/registrations`             | Administrator | Registration history                                                  |
+| `/admin/repositories`              | Administrator | Repositories, connectivity tests                                      |
+| `/admin/appearance`                | Administrator | Theme                                                                 |
+| `/admin/updates`                   | Administrator | Application updates, server facts                                     |
+| `/admin/vms/:emulatorType/:vmName` | Administrator | Manage › General: visibility, metadata, tags, details, run and verify |
+| `…/versions`                       | Administrator | Manage › Version History, restore of a version, clone                 |
+| `…/copies`                         | Administrator | Manage › Local copies and restore                                     |
+| `…/notes`                          | Administrator | Manage › Notes                                                        |
+| `…/screenshots`                    | Administrator | Manage › Screenshots                                                  |
+
+Earlier routes are kept as redirects: `/admin/catalog` to `/` (with its query), `…/media` to `…/screenshots`, and
+`/settings` to `/admin/appearance` for an administrator. See [architecture](architecture.md#navigation).
 
 ## QEMU screenshot capture
 
