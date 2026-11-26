@@ -1,0 +1,42 @@
+[
+  {
+    "label": "1-master-only",
+    "cardHeights": [211],
+    "treeTop": 339,
+    "versionsFullyVisible": 1,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "2-one-snapshot",
+    "cardHeights": [213, 186],
+    "treeTop": 339,
+    "versionsFullyVisible": 2,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "3-branches-light",
+    "cardHeights": [213, 186, 237, 188, 190],
+    "treeTop": 339,
+    "versionsFullyVisible": 3,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "8-branches-dark",
+    "cardHeights": [213, 186, 237, 188, 190],
+    "treeTop": 339,
+    "versionsFullyVisible": 3,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "10-narrow",
+    "cardHeights": [432, 444, 571, 507, 526],
+    "treeTop": 486,
+    "versionsFullyVisible": 0,
+    "scrollWidth": 391,
+    "clientWidth": 390
+  }
+]

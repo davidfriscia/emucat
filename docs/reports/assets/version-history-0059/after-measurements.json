@@ -1,0 +1,58 @@
+[
+  {
+    "label": "1-master-only",
+    "cardHeights": [89],
+    "treeTop": 255,
+    "versionsFullyVisible": 1,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "2-one-snapshot",
+    "cardHeights": [92, 89],
+    "treeTop": 255,
+    "versionsFullyVisible": 2,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "3-branches-light",
+    "cardHeights": [92, 89, 92, 92, 107],
+    "treeTop": 255,
+    "versionsFullyVisible": 5,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "8-branches-dark",
+    "cardHeights": [92, 89, 92, 92, 107],
+    "treeTop": 255,
+    "versionsFullyVisible": 5,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "10-narrow",
+    "cardHeights": [176, 189, 212, 189, 282],
+    "treeTop": 339,
+    "versionsFullyVisible": 2,
+    "scrollWidth": 390,
+    "clientWidth": 390
+  },
+  {
+    "label": "assert-wide",
+    "cardHeights": [92, 89, 92, 92, 107],
+    "treeTop": 255,
+    "versionsFullyVisible": 5,
+    "scrollWidth": 1440,
+    "clientWidth": 1440
+  },
+  {
+    "label": "assert-narrow",
+    "cardHeights": [176, 189, 212, 189, 282],
+    "treeTop": 339,
+    "versionsFullyVisible": 2,
+    "scrollWidth": 390,
+    "clientWidth": 390
+  }
+]

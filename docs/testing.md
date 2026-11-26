@@ -13,7 +13,7 @@ production. The quick reference is in the [README](../README.md#testing-on-windo
 | `pnpm test:sftp`                                             | The agent's SFTP, packaging and restore tests against real OpenSSH, ZIP64    | Docker, `ssh-keygen`                       | Windows, Linux |
 | `pnpm test:e2e`                                              | The compiled agent, the API, a browser and a real OpenSSH server, end to end | MariaDB, Docker, `ssh-keygen`, Edge/Chrome | Windows        |
 | `pnpm test:deploy`                                           | The deployment tooling on disposable hosts, in a Linux container             | Docker                                     | Windows, Linux |
-| `pnpm --filter @emucat/web test:browser`                     | Archive Explorer's production bundle in a real browser (decision 0058)       | Edge, Chrome or `EMUCAT_BROWSER_PATH`      | Windows, Linux |
+| `pnpm --filter @emucat/web test:browser`                     | Archive Explorer and Version History, production builds, in a real browser   | Edge, Chrome or `EMUCAT_BROWSER_PATH`      | Windows, Linux |
 | `pnpm test:compose`                                          | The production images under `deploy/compose.yaml`                            | Docker                                     | Windows, Linux |
 
 `pnpm test:e2e` also runs real QEMU and 86Box when they are installed, and skips only those tests otherwise.
@@ -166,6 +166,15 @@ EMUCAT_BROWSER_PATH=/usr/bin/chromium pnpm --filter @emucat/web test:browser
 ```
 
 `EMUCAT_BROWSER_SCREENSHOTS=<directory>` also saves screenshots and the measurements as `measurements.json`.
+
+The same command runs `e2e/version-history.browser.test.ts` (decision 0059). It builds the **whole** application into
+`apps/web/e2e/dist-app` (ignored by Git), serves it with nginx's `try_files … /index.html` fallback, and answers only
+the routes Version History reads, from the synthetic histories in `e2e/version-history-fixtures.ts`. It checks card
+height and one toolbar row on a wide screen, tooltips on hover and keyboard focus, a disabled action's reason, the
+Info panels inside the window and the focus returned on Escape, the dialogs each action opens, branch collapse, the
+sidebar icons, both themes, no sideways scrolling at 390 px, Archive Explorer opening from **View contents**, no
+request other than `GET`, and no console error. Its screenshots are named `version-history-*.png`, or with the prefix
+in `EMUCAT_BROWSER_SCREENSHOT_PREFIX`, for before-and-after comparisons.
 
 ## Linux validation from Windows
 
