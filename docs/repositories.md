@@ -1,7 +1,7 @@
 # Setting up an SSH repository
 
 A repository is where VM archives are stored. Agents reach it directly over SSH and SFTP whenever they can. The EmuCat
-server can have its own connection to it too, for clones, View Archive Contents and a relay for agents that cannot
+server can have its own connection to it too, for clones, Archive Explorer and a relay for agents that cannot
 reach it ([section 8](#8-the-servers-own-connection)). Nothing here assumes a particular NAS. Replace
 `nas.example.lan`, `/srv/emucat` and the paths with your own. The reasoning is in decisions
 [0012](decisions/0012-direct-agent-repository.md), [0013](decisions/0013-ssh-provider.md) and
@@ -130,7 +130,7 @@ It uses a uniquely named test object under `archives/.staging`, removes it again
 ## 8. The server's own connection
 
 Optional, and separate from the agents' keys ([decision 0055](decisions/0055-server-repository-access.md)). Without it,
-everything works as before except clones (which the server makes), View Archive Contents and the relay. With it:
+everything works as before except clones (which the server makes), Archive Explorer and the relay. With it:
 
 1. **A dedicated key for the server.** Generate it on the EmuCat host, never on an agent, and never reuse an agent's:
 

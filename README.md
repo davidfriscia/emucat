@@ -10,7 +10,7 @@ one, with **Copy** or **Transfer**: the agent builds a standalone ZIP with a man
 repository, verifies its SHA-256 there, and publishes it immutably, after which the server records one private master.
 Screenshots synchronize by themselves from registered VMs to the server, and are public exactly while their VM is: see [the media guide](docs/media.md). Administrators arrange each VM's screenshots in a saved order, delete screenshots for good (the agent's file is left alone and not imported again), and tag VMs, masters, snapshots and screenshots from one tag catalog; the catalog search finds a VM by its own tags and its children's ([decision 0050](docs/decisions/0050-media-order-deletion-and-tags.md)).
 An administrator can **restore** any version onto an agent, launch a VM, stop it, and verify a local copy. A **snapshot** archives an agent's copy again as a new immutable version whose parent is the version that copy came from, so history branches; the version tree is shown to administrators only. **Remote Volatile** runs any version from a temporary copy and discards every change when the emulator exits; **Remote Snapshot** does the same, then publishes the result automatically as a new snapshot whose parent is exactly the version that ran. Neither needs or touches the agent's persistent copy, which a restore can now **replace** with any version, explicitly and safely. An administrator can also **remove** one agent's persistent copy, and **permanently delete** a leaf snapshot that nothing uses, from the repository ([decision 0041](docs/decisions/0041-storage-cleanup.md)). See [the launcher guide](docs/launcher.md#remote-modes) and [known limitations](#known-limitations).
-An administrator can **clone** any master or snapshot into a new, independent VM ([decision 0052](docs/decisions/0052-vm-clones.md)), and keep private **Markdown notes** for each VM, edited with Vditor and stored as files under `data/notes` ([decision 0053](docs/decisions/0053-vm-notes.md)).
+An administrator can open any master or snapshot in **Archive Explorer** to browse its archive, preview a file (text in modern and DOS encodings, Markdown, images including PPM, TIFF, PCX and TGA, PDF, hex) or download one, read by the server without downloading the archive or writing to disk ([decision 0056](docs/decisions/0056-archive-explorer.md)). An administrator can **clone** any master or snapshot into a new, independent VM ([decision 0052](docs/decisions/0052-vm-clones.md)), and keep private **Markdown notes** for each VM, edited with Vditor and stored as files under `data/notes` ([decision 0053](docs/decisions/0053-vm-notes.md)).
 The server can have **its own SFTP connection** to a repository, with a dedicated key and strict `known_hosts` checks ([decision 0055](docs/decisions/0055-server-repository-access.md)). It makes clones itself, with no agent online, shows **what an archive contains** in Version History, and relays archives in resumable, hashed chunks over HTTPS for an agent that cannot reach the repository; agents still prefer their own direct SFTP connection.
 
 | Part                                       | Technology                                       |
@@ -231,16 +231,20 @@ No server has been installed from it yet.
 ## Third-party software
 
 EmuCat uses open-source packages, each under its own license; `pnpm licenses list` and `cargo tree` list them all.
-Two are shipped to browsers as files of their own, and are credited here:
+Three are shipped to browsers as files of their own, and are credited here:
 
-| Package                                                                    | Used for                         | License                                                                        |
-| -------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------ |
-| [Vditor](https://github.com/Vanessa219/vditor) 4.0.1, © 2019-present B3log | The Markdown editor for VM notes | [MIT](https://github.com/Vanessa219/vditor/blob/master/LICENSE)                |
-| [DOMPurify](https://github.com/cure53/DOMPurify) 3.4.17, © Cure53          | Sanitizing rendered notes        | [MPL-2.0 or Apache-2.0](https://github.com/cure53/DOMPurify/blob/main/LICENSE) |
+| Package                                                                       | Used for                         | License                                                                        |
+| ----------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------ |
+| [Vditor](https://github.com/Vanessa219/vditor) 4.0.1, © 2019-present B3log    | The Markdown editor for VM notes | [MIT](https://github.com/Vanessa219/vditor/blob/master/LICENSE)                |
+| [DOMPurify](https://github.com/cure53/DOMPurify) 3.4.17, © Cure53             | Sanitizing rendered notes        | [MPL-2.0 or Apache-2.0](https://github.com/cure53/DOMPurify/blob/main/LICENSE) |
+| [PDF.js](https://github.com/mozilla/pdf.js) (`pdfjs-dist`) 6.5.438, © Mozilla | PDF previews in Archive Explorer | [Apache-2.0](https://github.com/mozilla/pdf.js/blob/master/LICENSE)            |
 
 Vditor's files published under `/vendor/vditor` are its own distribution, unchanged. They include
 [Lute](https://github.com/88250/lute) (Mulan PSL v2), [highlight.js](https://github.com/highlightjs/highlight.js)
-(BSD-3-Clause, its `LICENSE` is published with it) and [KaTeX](https://github.com/KaTeX/KaTeX) (MIT).
+(BSD-3-Clause, its `LICENSE` is published with it; Archive Explorer reuses it for syntax highlighting) and
+[KaTeX](https://github.com/KaTeX/KaTeX) (MIT). PDF.js's data files published under `/vendor/pdfjs` (CMaps, standard
+fonts, an ICC profile, and the JBIG2, OpenJPEG and QCMS WebAssembly decoders, with their `LICENSE_*` files) are its own
+distribution, unchanged; its QuickJS scripting engine is not published.
 
 ## License
 

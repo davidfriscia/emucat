@@ -291,6 +291,39 @@ same commit (build from cache, backup, no migration, new containers).
 | `TRANSFER_INACTIVITY_TIMEOUT_SECONDS`    | `86400`                  | An idle unfinished transfer is discarded after this                         |
 | `TRANSFER_RETENTION_SECONDS`             | `3600`                   | How long a finished transfer's bytes stay, for repeated reads               |
 
+Archive inspection and Archive Explorer ([decision 0056](decisions/0056-archive-explorer.md)). All optional, in
+`app.env`; the defaults suit the default 1 GiB API container and need no change. They are read when the API container
+is created. Archive Explorer writes nothing to disk and uses neither staging nor `/tmp`.
+
+| Variable                                 | Default               | Meaning                                                                        |
+| ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------ |
+| `ARCHIVE_INSPECTION_MAX_ENTRIES`         | `200000`              | Entries of an archive the server indexes (1 000–500 000)                       |
+| `ARCHIVE_INSPECTION_MAX_DIRECTORY_BYTES` | `67108864` (64 MiB)   | A ZIP central directory read into memory (1–128 MiB)                           |
+| `ARCHIVE_INSPECTION_MAX_MANIFEST_BYTES`  | `67108864` (64 MiB)   | The manifest inflated and parsed (1–128 MiB)                                   |
+| `ARCHIVE_INSPECTION_MAX_CONCURRENT`      | `2`                   | Archives indexed at once; more are refused with `inspection_busy`              |
+| `ARCHIVE_INSPECTION_TIMEOUT_SECONDS`     | `120`                 | Indexing one archive                                                           |
+| `ARCHIVE_CACHE_MAX_INDEXES`              | `8`                   | Indexes kept in memory (0 keeps none)                                          |
+| `ARCHIVE_CACHE_TTL_SECONDS`              | `600`                 | How long an index is kept                                                      |
+| `ARCHIVE_CACHE_MAX_BYTES`                | `67108864` (64 MiB)   | Estimated weight of the indexes kept; a larger index is used once and not kept |
+| `ARCHIVE_PREVIEW_TEXT_BYTES`             | `262144` (256 KiB)    | Text shown; longer files are shown truncated                                   |
+| `ARCHIVE_PREVIEW_HEX_BYTES`              | `65536` (64 KiB)      | One hex window                                                                 |
+| `ARCHIVE_PREVIEW_IMAGE_BYTES`            | `20971520` (20 MiB)   | An image file previewed                                                        |
+| `ARCHIVE_PREVIEW_IMAGE_PIXELS`           | `16777216`            | Pixels of an image previewed                                                   |
+| `ARCHIVE_PREVIEW_PDF_BYTES`              | `26214400` (25 MiB)   | A PDF previewed                                                                |
+| `ARCHIVE_PREVIEW_SEEK_BYTES`             | `16777216` (16 MiB)   | How far into a deflated (compressed) entry a hex window may start              |
+| `ARCHIVE_PREVIEW_MAX_CONCURRENT`         | `2`                   | Details and previews at once                                                   |
+| `ARCHIVE_PREVIEW_MAX_QUEUED`             | `8`                   | Previews that may wait up to 10 s for a slot; beyond, `preview_busy`           |
+| `ARCHIVE_PREVIEW_TIMEOUT_SECONDS`        | `60`                  | One preview, connection included                                               |
+| `ARCHIVE_DOWNLOAD_MAX_BYTES`             | `104857600` (100 MiB) | One file downloaded on its own; `0` turns single-file downloads off            |
+| `ARCHIVE_DOWNLOAD_MAX_CONCURRENT`        | `2`                   | Single-file downloads at once                                                  |
+| `ARCHIVE_DOWNLOAD_MAX_QUEUED`            | `2`                   | Downloads that may wait up to 10 s for a slot; beyond, `download_busy`         |
+| `ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS`       | `1800`                | One download                                                                   |
+
+An invalid value (out of its range, not a whole number) stops the API at start with the variable's name in the log;
+an empty value means the default. Raising the image, PDF or concurrency limits raises the API's peak memory: keep
+`EMUCAT_API_MEMORY_LIMIT` (`deploy.env`, default `1g`) above about four times the largest preview limit times its
+concurrency.
+
 Upgrading an existing installation to this release needs `emucatctl install` from the new checkout **before**
 `update`: the installed tooling of earlier releases neither creates `data/transfers` and `config/repository-ssh`
 nor passes them to Compose. The complete procedure is the [MARS runbook](runbook-0055-mars.md).
@@ -527,6 +560,14 @@ sudo deploy/bin/emucatctl install                 # from the new checkout: creat
 sudo /opt/emucat/tooling/bin/emucatctl check      # "notes directory ... owned by ..." passes
 sudo /opt/emucat/tooling/bin/emucatctl update
 ```
+
+### Upgrading to the release with Archive Explorer
+
+That release ([decision 0056](decisions/0056-archive-explorer.md)) changes neither `deploy/`, the deployment service,
+the database schema nor the agent: a host that already runs the release with the server's repository connection
+([0055](decisions/0055-server-repository-access.md), with its `install`) updates with `emucatctl update` alone, and
+needs no configuration change. The step-by-step procedure, with its checks, is the
+[Archive Explorer runbook](runbook-0056-mars.md).
 
 ## 13. Rolling back, and its limits
 

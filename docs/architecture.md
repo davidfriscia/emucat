@@ -14,7 +14,7 @@ computers through a local agent.
                      │
                      └──────────────▶ SSH/SFTP archive repository, directly (preferred)
 
-  API ──SFTP, its own key (optional)──▶ the same repository: clones, View Archive Contents, the relay
+  API ──SFTP, its own key (optional)──▶ the same repository: clones, Archive Explorer, the relay
 ```
 
 The API is the control plane. Archive bytes normally go straight between agent and repository, and the API records
@@ -23,7 +23,10 @@ what the agent verified ([decision 0012](decisions/0012-direct-agent-repository.
 repository, with a dedicated key and strict `known_hosts` checks. It uses it for three things only:
 
 - **Server-side clones.** The server copies one version's archive into a new VM itself; no agent takes part.
-- **View Archive Contents.** It reads an archive's central directory and manifest, without downloading or changing it.
+- **Archive Explorer** ([decision 0056](decisions/0056-archive-explorer.md)). It reads an archive's central directory and
+  manifest to list it, then one file's own bytes to preview or stream it, without downloading the archive, writing
+  anything to disk, using staging or changing anything. Only the archive's files are explored, never what is inside a
+  virtual disk image.
 - **The HTTPS relay**, for an agent that cannot reach a repository at all: the agent sends or fetches the archive in
   resumable, hashed chunks over its authenticated HTTPS connection, the server stages it under `data/transfers`, and
   moves it to or from the repository over its own connection, with the same staging keys, verification and

@@ -60,3 +60,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0053](0053-vm-notes.md)                                | Per-VM notes are one Markdown file on the server, edited with Vditor           |
 | [0054](0054-navigation.md)                              | Two navigation levels, and the catalog as the only way into a VM's management  |
 | [0055](0055-server-repository-access.md)                | The server's own repository connection, an HTTPS relay, server-made clones     |
+| [0056](0056-archive-explorer.md)                        | Archive Explorer reads one file of an archive through the server, diskless     |

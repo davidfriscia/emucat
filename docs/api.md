@@ -475,19 +475,47 @@ Administrators only, with the session and CSRF token. No response holds a creden
 not at `host` and `port`. Each repository in the list has `serverAccess` (the last Test Server Connection), and each
 agent its last `transport` (`sftp`, `relay` or `null`).
 
-### Archive contents
+### Archive contents and Archive Explorer
 
-[Decision 0055](decisions/0055-server-repository-access.md), administrators only, read through the server's own
-repository connection. Nothing is downloaded to the browser.
+Decisions [0055](decisions/0055-server-repository-access.md) and [0056](decisions/0056-archive-explorer.md),
+administrators only, read through the server's own repository connection, diskless and read-only. Every request
+checks the session, the administrator role and the version's identity (emulator, VM and id) itself. A file is named
+by `view` (`logical` or `physical`) and `path`, exactly as a listing returned it; offsets, sizes and compression are
+never taken from a request. Shapes are in [`archive-inspection.ts`](../packages/contracts/src/archive-inspection.ts).
 
-| Route                                                                      | What it does                                                                                                                    |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive`         | Summary: format, size, SHA-256, entry and file counts, whether the manifest is the registered one                               |
-| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive/entries` | One directory: `view` (`logical` or `physical`), `path`, optional `q` (search below it), `offset`, `limit` (at most 500). Paged |
+| Route                                                                                                    | What it does                                                                                                                                        |
+| -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive`                                       | Summary: format, size, SHA-256, entry and file counts, whether the manifest is the registered one                                                   |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive/entries`                               | One directory: `view`, `path`, optional `q` (search all paths), `offset`, `limit` (at most 1000). Paged                                             |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive/entry?view&path`                       | One file's details: metadata, CRC-32, the manifest's SHA-256, what it is (from its bytes), the preview `modes` that fit, hex and download limits    |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive/entry/preview?view&path&kind[&offset]` | The bytes of a preview: `kind` is `text` (a prefix), `hex` (a window from `offset`), `image` (as is, or converted to PNG) or `pdf` (the whole file) |
+| `GET /admin/vms/:emulatorType/:vmName/versions/:versionId/archive/entry/download?view&path`              | The whole file, streamed as an attachment, up to `ARCHIVE_DOWNLOAD_MAX_BYTES`                                                                       |
 
-Refusals: `404 version_not_found`, `409 server_repository_unavailable`, `409 version_deleted`, and
-`404 archive_path_not_found`, `409 archive_view_unavailable` (no manifest for the VM files view, as in an OVA), and
-`422 archive_malformed` / `archive_too_large` for an archive the server will not read.
+A preview's body is the bytes themselves; its headers say what they are: `x-emucat-preview-offset`,
+`x-emucat-preview-length`, `x-emucat-entry-size`, `x-emucat-preview-truncated`, and `x-emucat-preview-integrity`
+(`verified`: the whole file matched its CRC-32 and, where the manifest has one, SHA-256; `complete`: the whole file,
+whose format records no checksum; `partial`: a part, structurally checked, which no checksum covers). An image also
+has `x-emucat-image-format`, `-width`, `-height` and `-converted`. Text, hex and PDF are `application/octet-stream`;
+an image has its own type (`image/png` after a conversion). Every preview and download is `no-store`, `nosniff`,
+`Content-Security-Policy: default-src 'none'; sandbox`, `Content-Disposition: attachment` and same-origin only; a
+request whose `Sec-Fetch-Site` is another site is refused with 403. A download sends `Content-Length` and holds back
+its last chunk until the file has been verified, so one that fails its check ends short.
+
+Refusals, each with a sentence in `ARCHIVE_INSPECTION_ERROR_TEXT`:
+
+| Status | Code                                                                                                                                                        | When                                                                                      |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 400    | `validation_failed`                                                                                                                                         | An absolute path, `..`, an unknown `kind`, a negative offset                              |
+| 403    | `forbidden`, `cross_origin_rejected`                                                                                                                        | Not an administrator; another site                                                        |
+| 404    | `version_not_found`, `archive_path_not_found`, `entry_not_found`, `remote_object_missing`                                                                   | Not this VM's version; no such directory or file; not in the repository                   |
+| 408    | `request_cancelled`                                                                                                                                         | The browser went away                                                                     |
+| 409    | `version_deleted`, `archive_view_unavailable`, `entry_not_file`, `archive_size_mismatch`, `archive_changed`                                                 | Deleted; an OVA's logical view; a directory; the object differs from the row or the index |
+| 413    | `preview_too_large`, `image_too_large`, `download_too_large`                                                                                                | Over a preview or download limit                                                          |
+| 415    | `preview_unavailable`                                                                                                                                       | Not that kind of file (a PDF preview of something else)                                   |
+| 422    | `archive_malformed`, `archive_too_large`, `entry_unsupported`, `unsupported_compression`, `preview_offset_unsupported`, `integrity_failed`, `image_invalid` | The archive or entry cannot or must not be read                                           |
+| 502    | `repository_unreachable`, `ssh_authentication_failed`, `host_key_unknown`, `host_key_changed`, …                                                            | The repository connection failed                                                          |
+| 503    | `server_repository_unavailable`, `inspection_busy`, `preview_busy`, `download_busy`, `resource_limit`                                                       | No server connection; too much at once; a conversion over its time limit                  |
+| 504    | `archive_timeout`                                                                                                                                           | A listing or preview over its deadline                                                    |
 
 ## Agent repository relay
 
