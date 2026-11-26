@@ -6,7 +6,8 @@
  * Run with `pnpm test:e2e`, which builds the agent first. It needs MariaDB, Docker and `ssh-keygen`, and
  * runs on Windows only, until another platform has a credential store.
  */
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, execFileSync, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -25,7 +26,7 @@ import {
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
 import type { RowDataPacket } from 'mysql2/promise';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { GENEROUS_RATE_LIMITS, waitFor } from '../test/agent-helpers.js';
 import {
   signedInAdmin,
@@ -118,6 +119,32 @@ class SftpServer {
 
   exec(command: string): string {
     return docker('exec', this.container, 'sh', '-c', command);
+  }
+
+  /**
+   * Holds the next archive upload once its first bytes are in the repository: the SFTP sessions are stopped
+   * (SIGSTOP) from inside the container, which watches the staging area every 10 ms, so a test acts while the
+   * upload is certainly under way instead of hoping to poll at the right moment. Call it before the upload
+   * starts; it resolves once the upload is held. `releaseUploads` lets the sessions go on.
+   */
+  async holdUploads(): Promise<void> {
+    await promisify(execFile)('docker', [
+      'exec',
+      this.container,
+      'timeout',
+      '120',
+      'sh',
+      '-c',
+      'until [ -n "$(find /srv/sftp/repo/archives/.staging -type f -size +0c 2>/dev/null | head -n 1)" ]; do sleep 0.01; done; pkill -STOP -f \'sshd.*emucat\'',
+    ]);
+  }
+
+  releaseUploads(): void {
+    try {
+      this.exec("pkill -CONT -f 'sshd.*emucat' || true");
+    } catch {
+      // The container may be gone, or restarting.
+    }
   }
 
   killSessions(): void {
@@ -407,12 +434,15 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
       'the operation to finish',
     );
 
-  const uploading = (operationId: string) =>
-    until(
+  /** Waits for the upload `held` (from `sftp.holdUploads()`) to be held, and reported as under way. */
+  const uploading = async (operationId: string, held: Promise<void>) => {
+    await held;
+    return until(
       operationId,
       (operation) => operation.state === 'uploading' && (operation.progress.doneBytes ?? 0) > 0,
       'the upload to be under way',
     );
+  };
 
   async function mastersOf(vmName: string): Promise<RowDataPacket[]> {
     const [rows] = await context.pool.execute<RowDataPacket[]>(
@@ -488,6 +518,8 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
 
     await startDaemon();
   }, LONG);
+
+  afterEach(() => sftp?.releaseUploads());
 
   afterAll(async () => {
     for (const child of running) child.kill('SIGKILL');
@@ -720,24 +752,29 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
   );
 
   it(
-    'keeps a VM whose screenshot cannot be preserved, and archives none in a copy',
+    'transfers a VM whatever its screenshots hold, and archives none, in a transfer or a copy',
     async () => {
       const root = join(box86, 'Has Media');
       await mkdir(join(root, 'screenshots'), { recursive: true });
       await writeFile(join(root, '86box.cfg'), 'machine = x\n');
       await writeFile(join(root, 'disk.img'), randomBytes(4096));
-      // Not an image, so the server can never acknowledge it.
+      // Not an image, so the server could never accept it. Screenshots are not VM state (decision 0051): what
+      // they hold decides nothing about a transfer, and they are never archived.
       await writeFile(join(root, 'screenshots', 'one.png'), 'a screenshot');
-      const before = await fingerprint(root);
 
-      // Since Milestone 4 the proof comes after the commit, so the master exists and the VM stays.
-      const blocked = await register('Has Media', '86box', 'transfer');
-      const partial = await finished(blocked.id);
-      expect(partial.state, JSON.stringify(partial)).toBe('partial_success');
-      expect(partial.error?.code).toBe('transfer_blocked_media');
-      expect(partial.recovery).toMatch(/Copy/);
-      expect(await fingerprint(root)).toEqual(before);
+      const transfer = await register('Has Media', '86box', 'transfer');
+      const moved = await finished(transfer.id);
+      expect(moved, JSON.stringify(moved)).toMatchObject({
+        state: 'succeeded',
+        localCopy: 'removed',
+        error: null,
+      });
+      expect(existsSync(root)).toBe(false);
       expect(await mastersOf('Has Media')).toHaveLength(1);
+      const archived = sftp.exec(`unzip -l '/srv/sftp/repo/${moved.archiveKey}'`);
+      expect(archived).toContain('86box.cfg');
+      expect(archived).toContain('disk.img');
+      expect(archived).not.toMatch(/screenshots/i);
 
       const other = join(box86, 'Has Media Too');
       await mkdir(join(other, 'screenshots'), { recursive: true });
@@ -759,9 +796,11 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     'retries an upload that was interrupted once, and ends with one verified master',
     async () => {
       const root = await makeQemuVm('Interrupted Once', 96);
+      const held = sftp.holdUploads();
       const operation = await register('Interrupted Once', 'qemu', 'copy');
-      await uploading(operation.id);
+      await uploading(operation.id, held);
       sftp.killSessions();
+      sftp.releaseUploads();
       const done = await finished(operation.id);
       expect(done.state, JSON.stringify(done)).toBe('succeeded');
       expect(existsSync(root)).toBe(true);
@@ -779,9 +818,11 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     async () => {
       const root = await makeQemuVm('Keeps Failing', 96);
       const before = await fingerprint(root);
+      const held = sftp.holdUploads();
       const operation = await register('Keeps Failing', 'qemu', 'transfer');
-      await uploading(operation.id);
+      await uploading(operation.id, held);
       const killer = setInterval(() => sftp.killSessions(), 150);
+      sftp.releaseUploads();
       let done: RegistrationOperation;
       try {
         done = await finished(operation.id);
@@ -815,12 +856,14 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     async () => {
       const root = await makeQemuVm('Cancel Me', 96);
       const before = await fingerprint(root);
+      const held = sftp.holdUploads();
       const operation = await register('Cancel Me', 'qemu', 'transfer');
-      await uploading(operation.id);
+      await uploading(operation.id, held);
       const cancelled = await admin.request({
         method: 'POST',
         url: `/admin/registrations/${operation.id}/cancel`,
       });
+      sftp.releaseUploads();
       expect(cancelled.statusCode, cancelled.body).toBe(200);
       const done = await finished(operation.id);
       expect(done.state, JSON.stringify(done)).toBe('cancelled');
@@ -840,8 +883,9 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     'survives an API restart during an upload, without any false success',
     async () => {
       const root = await makeQemuVm('Api Restart', 128);
+      const held = sftp.holdUploads();
       const operation = await register('Api Restart', 'qemu', 'copy');
-      await uploading(operation.id);
+      await uploading(operation.id, held);
       await server.close();
 
       // The upload carries on directly to the repository, with no API at all.
@@ -850,6 +894,7 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
         [operation.id],
       );
       expect(row[0]?.state).toBe('uploading');
+      sftp.releaseUploads();
       await waitFor(
         () => sftp.files().includes(operation.archiveKey),
         'the archive to be published while the API is down',
@@ -872,9 +917,11 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     async () => {
       const root = await makeQemuVm('Agent Crash', 128);
       const before = await fingerprint(root);
+      const held = sftp.holdUploads();
       const operation = await register('Agent Crash', 'qemu', 'transfer');
-      await uploading(operation.id);
+      await uploading(operation.id, held);
       await killAgent();
+      sftp.releaseUploads();
       expect(await fingerprint(root)).toEqual(before);
       expect((await read(operation.id)).state, 'no false outcome while it is away').toBe(
         'uploading',
@@ -905,11 +952,13 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     async () => {
       const root = await makeQemuVm('Lost Ack', 64);
       const before = await fingerprint(root);
+      const held = sftp.holdUploads();
       const operation = await register('Lost Ack', 'qemu', 'transfer');
-      await uploading(operation.id);
+      await uploading(operation.id, held);
 
       // The server goes away, the agent publishes without it, and then the agent crashes as well.
       await server.close();
+      sftp.releaseUploads();
       await waitFor(
         () => sftp.files().includes(operation.archiveKey),
         'the archive to be published',
@@ -1144,12 +1193,14 @@ describe.runIf(process.platform === 'win32')('registration with nothing simulate
     async () => {
       const root = await makeQemuVm('Revoked', 128);
       const before = await fingerprint(root);
+      const held = sftp.holdUploads();
       const operation = await register('Revoked', 'qemu', 'transfer');
-      await uploading(operation.id);
+      await uploading(operation.id, held);
       const revoked = await admin.request({
         method: 'POST',
         url: `/admin/agents/${agentId}/revoke`,
       });
+      sftp.releaseUploads();
       expect(revoked.statusCode).toBe(200);
       const failed = await finished(operation.id);
       expect(failed).toMatchObject({ state: 'failed', error: { code: 'agent_revoked' } });

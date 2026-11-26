@@ -37,6 +37,7 @@ import {
   type VmVerification,
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
+import { captureFailures, recordBrowser } from './artifacts.js';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GENEROUS_RATE_LIMITS, waitFor } from '../test/agent-helpers.js';
@@ -118,6 +119,7 @@ const BOX86_CONFIG = [
 ].join('\r\n');
 
 describe('running and verifying VMs, end to end', () => {
+  captureFailures(() => browser);
   let context: BrowserTestContext;
   let server: FastifyInstance;
   let admin: TestClient;
@@ -523,9 +525,11 @@ describe('running and verifying VMs, end to end', () => {
       'the web app to start',
       60_000,
     );
-    browser = await chromium
-      .launch({ channel: 'msedge', headless: true })
-      .catch(() => chromium.launch({ channel: 'chrome', headless: true }));
+    browser = recordBrowser(
+      await chromium
+        .launch({ channel: 'msedge', headless: true })
+        .catch(() => chromium.launch({ channel: 'chrome', headless: true })),
+    );
   }, LONG);
 
   afterAll(async () => {
@@ -709,6 +713,12 @@ describe('running and verifying VMs, end to end', () => {
           ).statusCode,
         ).toBe(200);
         await section.getByRole('link', { name: 'Open screenshot', exact: true }).waitFor();
+        // The gallery is the VM's Screenshots section (decision 0054), reached from its sidebar.
+        await page
+          .getByRole('navigation', { name: 'VM' })
+          .getByRole('link', { name: 'Screenshots', exact: true })
+          .click();
+        await page.waitForURL(`**/admin/vms/qemu/${encodeURIComponent(VM)}/screenshots`);
         await page
           .getByRole('button', { name: /View emucat-capture-.*at full resolution/ })
           .first()
@@ -1160,13 +1170,16 @@ describe('running and verifying VMs, end to end', () => {
       async () => {
         const page = await (await browser.newContext()).newPage();
         await signIn(page);
-        await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}`));
+        // The version history is its own section; choosing Run there opens General, the one place to run
+        // (decision 0054).
+        await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VM)}/versions`));
         // Labels are minutes and can repeat, so the version is found by its identity.
         await page
           .locator('.version-card')
           .filter({ has: page.getByTitle(snapshotId, { exact: true }) })
           .getByRole('button', { name: /in Remote Snapshot$/ })
           .click();
+        await page.waitForURL(`**/admin/vms/qemu/${encodeURIComponent(VM)}`);
         const section = page.getByRole('region', { name: 'Run and verify' });
         expect(
           await section.getByRole('radio', { name: 'Remote Snapshot', exact: true }).isChecked(),
@@ -1346,22 +1359,19 @@ describe('running and verifying VMs, end to end', () => {
         // Full width: the page is wider than Bootstrap's widest container.
         const mainWidth = await page.locator('main').evaluate((node) => node.clientWidth);
         expect(mainWidth).toBeGreaterThan(1400);
+        // Each part of a VM's management is a section of its own, offered by the VM's sidebar (decision 0054).
+        const sections = page.getByRole('navigation', { name: 'VM' });
         expect(
-          await page
-            .getByRole('group', { name: 'VM actions' })
-            .getByRole('link', {
-              name: 'Manage media',
-            })
-            .isVisible(),
+          await sections.getByRole('link', { name: 'Screenshots', exact: true }).isVisible(),
         ).toBe(true);
         const headings = await page.getByRole('heading', { level: 2 }).allTextContents();
-        expect(headings.slice(0, 5)).toEqual([
-          'Metadata',
-          'Details',
-          'Run and verify',
-          'Local copies and restores',
-          'Version history',
-        ]);
+        expect(headings.slice(0, 3)).toEqual(['Metadata', 'Details', 'Run and verify']);
+        await sections.getByRole('link', { name: 'Local copies and restore', exact: true }).click();
+        await page.waitForURL(`**/admin/vms/qemu/${encodeURIComponent(VM)}/copies`);
+        expect(
+          await page.locator('main').evaluate((node) => node.clientWidth),
+          'the copies section is full width too',
+        ).toBeGreaterThan(1400);
 
         const history = page.getByRole('table', { name: 'Restore history, newest first' });
         await history.waitFor();

@@ -33,6 +33,11 @@ PermitRootLogin no
 AllowUsers emucat
 AuthorizedKeysFile /home/emucat/.ssh/authorized_keys
 Subsystem sftp internal-sftp
+# Every connection from the host reaches the container from one address, the Docker gateway. OpenSSH 9.8+
+# penalizes an address whose pre-authentication child crashes, and one does when a test freezes the server
+# (docker pause) mid-handshake: the penalty would then refuse every later connection of the whole test file,
+# the agent's and the API's alike, with "Disconnected". A real server's clients have addresses of their own.
+PerSourcePenalties no
 Match User emucat
   ChrootDirectory /srv/sftp
   ForceCommand internal-sftp $DENY

@@ -210,8 +210,16 @@ docker exec "$(compose ps -q api)" node -e "require('fs').mkdirSync('/data/notes
 compose up --detach --wait --wait-timeout 120 --force-recreate >/dev/null
 check "notes written by the API are on the host, under data/notes" \
   test "$(cat "$root/data/notes/qemu/Win98/Win98 - notes.md")" = '# kept'
-check "notes files the API writes belong to UID/GID 1000" \
-  test "$(stat -c %u:%g "$root/data/notes/qemu/Win98/Win98 - notes.md")" = 1000:1000
+if command -v cygpath >/dev/null; then
+  # Windows (Git Bash): the host's stat reports the Windows account, never a container's UID. Docker Desktop
+  # keeps a bind-mounted file's Linux owner as metadata, so the owner is read where it is kept, by the
+  # replaced container: a file written as root would read 0:0 there.
+  check "notes files the API writes belong to UID/GID 1000 (read through the bind mount)" \
+    test "$(docker exec "$(compose ps -q api)" stat -c %u:%g '/data/notes/qemu/Win98/Win98 - notes.md')" = 1000:1000
+else
+  check "notes files the API writes belong to UID/GID 1000" \
+    test "$(stat -c %u:%g "$root/data/notes/qemu/Win98/Win98 - notes.md")" = 1000:1000
+fi
 check "notes survive replacing the containers" \
   test "$(docker exec "$(compose ps -q api)" cat '/data/notes/qemu/Win98/Win98 - notes.md')" = '# kept'
 check "the API cannot write outside its mounts" \

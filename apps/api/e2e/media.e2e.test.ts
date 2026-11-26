@@ -9,7 +9,7 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -81,17 +81,6 @@ function ppm(width: number, height: number, red: number, green: number, blue: nu
     pixels[index + 2] = blue;
   }
   return Buffer.concat([Buffer.from(`P6\n${width} ${height}\n255\n`), pixels]);
-}
-
-async function fingerprint(root: string): Promise<string[]> {
-  const entries: string[] = [];
-  for (const name of (await readdir(root, { recursive: true })).sort()) {
-    const path = join(root, String(name));
-    const info = await stat(path);
-    const contents = info.isFile() ? sha(await readFile(path)) : '';
-    entries.push(`${String(name)}|${info.size}|${info.mtimeMs}|${contents}`);
-  }
-  return entries;
 }
 
 describe.runIf(process.platform === 'win32')('screenshots with nothing simulated', () => {
@@ -266,6 +255,18 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
     );
     return rows.map((row) => row.original_sha256 as string);
   };
+
+  // Screenshots copied out of a directory about to be removed, waiting in the agent's state for upload (0051).
+  const spooled = async () => {
+    try {
+      return await readdir(join(directory, 'state', 'media', 'spool'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+  };
+  const untilSpoolEmpty = () =>
+    waitFor(async () => (await spooled()).length === 0, 'the media spool to be empty', 60_000);
 
   const api = (path: string, init?: RequestInit) =>
     fetch(`http://127.0.0.1:${port}/api/v1${path}`, init);
@@ -698,7 +699,7 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
   );
 
   it(
-    'transfers a VM once the server holds its screenshots, deleting the local copy',
+    'transfers a VM at once, deleting the local copy, and its screenshots still arrive',
     async () => {
       const root = await qemuVm('Transfer Me');
       const first = ppm(640, 480, 200, 10, 10);
@@ -717,8 +718,12 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
       expect(existsSync(root)).toBe(false);
       expect(await readdir(qemu)).not.toContain('.emucat-removing');
 
+      // The transfer waited for no screenshot (decision 0051). Those not yet uploaded were copied to the
+      // agent's spool before the directory went, and reach the server from there.
+      await untilMedia('qemu', 'Transfer Me', 2);
       const held = await heldHashes('Transfer Me');
       expect(held.sort()).toEqual([sha(first), sha(second)].sort());
+      await untilSpoolEmpty();
       const media = await mediaOf('qemu', 'Transfer Me');
       const shot = media.find((item) => item.originalFilename === 'screenshot001.ppm');
       expect(shot).toMatchObject({ widthPx: 640, heightPx: 480 });
@@ -742,90 +747,73 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
   );
 
   it(
-    'keeps the VM when a screenshot cannot be preserved, and removes it after that is fixed',
+    'transfers an 86Box VM whatever its screenshots tree holds, and its screenshot still arrives',
     async () => {
       const root = await box86Vm('Cannot Preserve');
       const good = await png(300, 200, '#123123');
       await writeFile(join(root, 'screenshots', 'good.png'), good);
       await mkdir(join(root, 'screenshots', 'sub'));
       await writeFile(join(root, 'screenshots', 'sub', 'notes.txt'), 'not an image');
-      const before = await fingerprint(root);
 
+      // The screenshots tree is media, not VM state: a file there that is not an image no longer refuses the
+      // removal (decision 0051), and nothing of the tree is archived.
       const operation = await register('Cannot Preserve', '86box', 'transfer');
-      const blocked = await finished(operation.id);
-      expect(blocked, JSON.stringify(blocked)).toMatchObject({
-        state: 'partial_success',
-        localCopy: 'cleanup_failed',
-        error: { code: 'transfer_blocked_media' },
+      const done = await finished(operation.id);
+      expect(done, JSON.stringify(done)).toMatchObject({
+        state: 'succeeded',
+        localCopy: 'removed',
+        error: null,
       });
-      expect(blocked.error?.message).toContain('notes.txt');
-      expect(blocked.recovery).toMatch(/Retry removal/);
-      expect(await fingerprint(root), 'not one file changed').toEqual(before);
+      expect(existsSync(root)).toBe(false);
       const [masters] = await context.pool.execute<RowDataPacket[]>(
         "SELECT 1 FROM vm_versions WHERE vm_name = 'Cannot Preserve' AND kind = 'master'",
       );
-      expect(masters.length, 'the master stays').toBe(1);
+      expect(masters.length, 'the master exists').toBe(1);
+      const listing = docker(
+        'exec',
+        container,
+        'sh',
+        '-c',
+        `unzip -l '/srv/sftp/repo/${done.archiveKey}'`,
+      );
+      expect(listing).toContain('86box.cfg');
+      expect(listing).not.toMatch(/screenshots|good\.png|notes\.txt/i);
 
-      // The VM is registered now, so its good screenshot still arrives.
+      // The image was kept for upload, and arrives; the file that is not one is not offered.
       await untilMedia('86box', 'Cannot Preserve', 1);
-
-      // A retry with nothing changed is refused the same way.
-      const refused = await admin.request({
-        method: 'POST',
-        url: `/admin/registrations/${operation.id}/retry-cleanup`,
-      });
-      expect(refused.statusCode, refused.body).toBe(202);
-      const again = await finished(operation.id);
-      expect(again.error?.code).toBe('transfer_blocked_media');
-      expect(existsSync(join(root, 'disk.img'))).toBe(true);
-
-      await rename(
-        join(root, 'screenshots', 'sub', 'notes.txt'),
-        join(directory, 'moved-notes.txt'),
-      );
-      const retried = await admin.request({
-        method: 'POST',
-        url: `/admin/registrations/${operation.id}/retry-cleanup`,
-      });
-      expect(retried.statusCode, retried.body).toBe(202);
-      const done = await waitFor(
-        async () => {
-          const current = await read(operation.id);
-          return current.state === 'succeeded' ? current : null;
-        },
-        'the retried removal',
-        60_000,
-      );
-      expect(done.localCopy).toBe('removed');
-      expect(existsSync(root)).toBe(false);
+      await untilSpoolEmpty();
       expect(await heldHashes('Cannot Preserve')).toEqual([sha(good)]);
     },
     LONG,
   );
 
   it(
-    'keeps the VM when its screenshot is rejected by the server',
+    'transfers a VM whose screenshot the server rejects, and keeps no copy of it',
     async () => {
       const root = await qemuVm('Rejected Shot');
       await writeFile(join(root, 'corrupt.ppm'), Buffer.from('P6\n50 50\n255\nnope'));
-      const before = await fingerprint(root);
       const operation = await register('Rejected Shot', 'qemu', 'transfer');
-      const blocked = await finished(operation.id);
-      expect(blocked).toMatchObject({
-        state: 'partial_success',
-        error: { code: 'transfer_blocked_media' },
+      const done = await finished(operation.id);
+      expect(done, JSON.stringify(done)).toMatchObject({
+        state: 'succeeded',
+        localCopy: 'removed',
+        error: null,
       });
-      expect(blocked.error?.message).toContain('corrupt.ppm');
-      expect(await fingerprint(root)).toEqual(before);
+      expect(existsSync(root)).toBe(false);
+      // The copy kept for upload is offered and refused, and the refusal ends it: the spool keeps nothing the
+      // server will never take, and the catalog never shows it.
+      await untilSpoolEmpty();
+      expect(await mediaOf('qemu', 'Rejected Shot')).toEqual([]);
     },
     LONG,
   );
 
   it(
-    'keeps the VM when the API is away at the moment of proof',
+    'removes the local copy with the API away after the commit, and the screenshot arrives once it is back',
     async () => {
       const root = await qemuVm('Server Away');
-      await writeFile(join(root, 'shot.ppm'), ppm(64, 48, 1, 2, 3));
+      const shot = ppm(64, 48, 1, 2, 3);
+      await writeFile(join(root, 'shot.ppm'), shot);
       const operation = await register('Server Away', 'qemu', 'transfer');
       await waitFor(
         async () => {
@@ -836,9 +824,9 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
         120_000,
       );
       expect((await read(operation.id)).state).toBe('cleaning_local');
-      // The server commits before it acknowledges. Only once the agent has the acknowledgement, which
-      // its journal records before it reads the archive back, is this the moment of proof; stopping
-      // the server earlier would lose the acknowledgement and test a reconnection instead.
+      // The server commits before it acknowledges. Only once the agent has the acknowledgement, which its
+      // journal records, is the removal the agent's own to finish; stopping the server earlier would lose the
+      // acknowledgement and test a reconnection instead.
       const journal = join(directory, 'state', 'registrations', `${operation.id}.journal`);
       await waitFor(
         async () => {
@@ -852,41 +840,22 @@ describe.runIf(process.platform === 'win32')('screenshots with nothing simulated
         'the agent to accept the commit',
         30_000,
       );
-      // Nothing can have been proved yet: proof takes a read-back and a further round of the wait.
       await stopServer();
-      // Longer than the agent is configured to wait.
-      await new Promise((done) => setTimeout(done, 12_000));
-      expect(existsSync(join(root, 'disk.qcow2')), 'nothing was deleted').toBe(true);
-      expect(existsSync(join(root, 'shot.ppm')), 'nothing was deleted').toBe(true);
+      // Nothing about the screenshot waits for the server any more (decision 0051): the removal finishes, and
+      // the screenshot, which nothing can upload now, is kept in the agent's spool.
+      await waitFor(() => !existsSync(root), 'the local copy to be removed', 60_000);
+      expect(await spooled(), 'the screenshot is kept for upload').toHaveLength(1);
       await startServer();
       await waitFor(isOnline, 'the agent to reconnect', 60_000);
       const done = await finished(operation.id);
       expect(done, JSON.stringify(done)).toMatchObject({
-        state: 'partial_success',
-        localCopy: 'cleanup_failed',
-        error: { code: 'transfer_blocked_media' },
+        state: 'succeeded',
+        localCopy: 'removed',
+        error: null,
       });
-      expect(done.error?.message).toMatch(/could not confirm|have not reached/);
-      expect(existsSync(join(root, 'shot.ppm'))).toBe(true);
-      expect(existsSync(join(root, 'disk.qcow2'))).toBe(true);
-
-      // With the server back, its screenshot arrives by itself, and the removal can then go ahead.
       await untilMedia('qemu', 'Server Away', 1);
-      const retried = await admin.request({
-        method: 'POST',
-        url: `/admin/registrations/${operation.id}/retry-cleanup`,
-      });
-      expect(retried.statusCode, retried.body).toBe(202);
-      const removed = await waitFor(
-        async () => {
-          const current = await read(operation.id);
-          return current.state === 'succeeded' ? current : null;
-        },
-        'the retried removal',
-        60_000,
-      );
-      expect(removed.localCopy).toBe('removed');
-      expect(existsSync(root)).toBe(false);
+      expect(await heldHashes('Server Away')).toEqual([sha(shot)]);
+      await untilSpoolEmpty();
     },
     LONG,
   );

@@ -33,6 +33,7 @@ import {
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
 import type { RowDataPacket } from 'mysql2/promise';
+import { captureFailures, recordBrowser } from './artifacts.js';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -103,6 +104,7 @@ async function fingerprint(root: string, prefix = ''): Promise<Record<string, st
 }
 
 describe('restore, public cover and VM details, end to end', () => {
+  captureFailures(() => browser);
   let context: BrowserTestContext;
   let server: FastifyInstance;
   let admin: TestClient;
@@ -527,9 +529,11 @@ describe('restore, public cover and VM details, end to end', () => {
       'the web app to start',
       60_000,
     );
-    browser = await chromium
-      .launch({ channel: 'msedge', headless: true })
-      .catch(() => chromium.launch({ channel: 'chrome', headless: true }));
+    browser = recordBrowser(
+      await chromium
+        .launch({ channel: 'msedge', headless: true })
+        .catch(() => chromium.launch({ channel: 'chrome', headless: true })),
+    );
   }, LONG);
 
   afterAll(async () => {
@@ -743,7 +747,8 @@ describe('restore, public cover and VM details, end to end', () => {
       'browses with the keyboard, traps focus, and returns it',
       async () => {
         await page.goto(webUrl(`/vms/86box/${encodeURIComponent(VM)}`));
-        const thumbnail = page.getByRole('button', { name: /Screenshot 2 of/ });
+        // The main cover, which the gallery labels by its role rather than by its position (it is not first).
+        const thumbnail = page.getByRole('button', { name: /, the main cover$/ });
         await thumbnail.waitFor();
         await thumbnail.focus();
         await page.keyboard.press('Enter');
@@ -788,7 +793,7 @@ describe('restore, public cover and VM details, end to end', () => {
         const focused = await page.evaluate(() =>
           document.activeElement?.getAttribute('aria-label'),
         );
-        expect(focused).toMatch(/Screenshot 2 of/);
+        expect(focused).toMatch(/, the main cover$/);
       },
       LONG,
     );
@@ -825,14 +830,26 @@ describe('restore, public cover and VM details, end to end', () => {
         const adminPage = await adminContext.newPage();
         await signIn(adminPage);
         await adminPage.goto(webUrl('/admin/catalog'));
+        // A public VM opens on its public page; management, and its Screenshots section, are one step further
+        // (decision 0054).
         await adminPage.getByRole('link', { name: VM }).click();
+        await adminPage.getByRole('link', { name: 'Manage this VM' }).click();
         await adminPage.waitForURL(`**${path}`);
+        await adminPage
+          .getByRole('navigation', { name: 'VM' })
+          .getByRole('link', { name: 'Screenshots', exact: true })
+          .click();
+        await adminPage.waitForURL(`**${path}/screenshots`);
         await adminPage.getByRole('heading', { name: 'Screenshots', exact: true }).waitFor();
-        await adminPage.getByRole('button', { name: /c-third/ }).waitFor();
+        await adminPage
+          .getByRole('button', { name: /^View screenshots\/c-third\.png at full resolution/ })
+          .waitFor();
         await shot(adminPage, '6-admin-detail');
         expect(await adminPage.getByRole('button', { name: 'Clear main image' }).count()).toBe(1);
         expect(await adminPage.getByRole('button', { name: 'Set as main image' }).count()).toBe(2);
-        await adminPage.getByRole('button', { name: /c-third/ }).click();
+        await adminPage
+          .getByRole('button', { name: /^View screenshots\/c-third\.png at full resolution/ })
+          .click();
         const dialog = adminPage.getByRole('dialog');
         await dialog.waitFor();
         await decodedImage(adminPage, '[role="dialog"] img');
@@ -1230,7 +1247,7 @@ describe('restore, public cover and VM details, end to end', () => {
           const adminContext = await browser.newContext();
           const page = await adminContext.newPage();
           await signIn(page);
-          await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VIA)}`));
+          await page.goto(webUrl(`/admin/vms/qemu/${encodeURIComponent(VIA)}/copies`));
           // The restore, in the section of local copies. The version history offers one per version too.
           const copies = page.getByRole('region', { name: 'Local copies and restores' });
           await copies.getByRole('button', { name: 'Restore…' }).click();
@@ -1492,7 +1509,7 @@ describe('restore, public cover and VM details, end to end', () => {
         const page = await (await browser.newContext()).newPage();
         try {
           await signIn(page);
-          await page.goto(webUrl(vmPath));
+          await page.goto(webUrl(`${vmPath}/copies`));
           await page.getByRole('button', { name: 'Remove the local copy on E2E restore' }).click();
           const dialog = page.getByRole('dialog', { name: `Remove the local copy of ${VM}` });
           await dialog.waitFor();
@@ -1541,7 +1558,7 @@ describe('restore, public cover and VM details, end to end', () => {
         const page = await (await browser.newContext()).newPage();
         try {
           await signIn(page);
-          await page.goto(webUrl(vmPath));
+          await page.goto(webUrl(`${vmPath}/versions`));
           const card = page.locator(`li[aria-labelledby="version-${installed}"] > .version-card`);
           await card.getByRole('button', { name: /^Delete / }).click();
           const dialog = page.getByRole('dialog', { name: 'Permanently delete this snapshot' });

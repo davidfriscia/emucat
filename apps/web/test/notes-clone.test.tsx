@@ -175,8 +175,9 @@ describe('VM notes', () => {
     const [put] = api.callsTo('PUT', NOTES_PATH);
     expect(put?.body).toEqual({ markdown: '# Install\n\nBoot from floppy' });
     expect(put?.headers['if-match']).toBe(ETAG_EMPTY);
-    // The editor is gone, and nothing is left of it.
-    expect(editor.destroyed).toBe(true);
+    // The editor is gone, and nothing is left of it. It is destroyed by an effect's cleanup, which React runs after
+    // the commit that shows "Notes saved.", so the test waits for it rather than reading it in between.
+    await waitFor(() => expect(editor.destroyed).toBe(true));
     expect(within(section).queryByText('Unsaved changes')).toBeNull();
 
     // Rendered for reading: Lute's sanitizer is asked for, and the result is cleaned again.
@@ -212,7 +213,10 @@ describe('VM notes', () => {
     );
     await waitFor(() => expect(within(section).queryByRole('textbox')).toBeNull());
     expect(api.callsTo('PUT', NOTES_PATH)).toHaveLength(0);
-    expect(vditor.state.instances.every((instance) => instance.destroyed)).toBe(true);
+    // Destroyed by an effect's cleanup, after the commit that removed the textbox.
+    await waitFor(() =>
+      expect(vditor.state.instances.every((instance) => instance.destroyed)).toBe(true),
+    );
     expect(vditor.state.previews.at(-1)?.markdown).toBe('Saved text');
   });
 

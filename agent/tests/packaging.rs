@@ -680,19 +680,62 @@ mod links {
         assert_eq!(error.kind, SourceErrorKind::Unsafe);
     }
 
+    // Decision 0051: an 86Box VM's top-level `screenshots` tree is media, set aside before any rule for archived
+    // files, a link at its root included. A junction there is neither followed nor a reason to refuse, the Windows
+    // counterpart of `links_and_odd_names_among_the_screenshots_do_not_stop_an_archive`. Real VM content keeps
+    // every link check: see `a_junction_inside_a_vm_fails_the_archive_and_is_not_followed` and the test below.
     #[test]
-    fn a_junction_inside_the_screenshots_directory_is_refused_too() {
+    fn junctions_among_the_screenshots_are_set_aside_and_never_followed() {
         let outside = TempDir::new().unwrap();
-        let fixture = Fixture::new(
+        fs::write(outside.path().join("secret.txt"), b"outside the VM").unwrap();
+        // A junction inside the tree, and, in a second VM, the tree itself as a junction.
+        let inside = Fixture::new(
             EmulatorType::Box86,
             "Box",
             &[("86box.cfg", b"x"), ("screenshots/one.png", b"s")],
         );
         junction(
-            &fixture.root.join("screenshots").join("more"),
+            &inside.root.join("screenshots").join("more"),
             outside.path(),
         );
-        assert_eq!(fixture.build().unwrap_err().kind, SourceErrorKind::Unsafe);
+        let rooted = Fixture::new(EmulatorType::Box86, "Rooted", &[("86box.cfg", b"x")]);
+        junction(&rooted.root.join("Screenshots"), outside.path());
+        for fixture in [&inside, &rooted] {
+            let tree = scan_tree(&fixture.root, EmulatorType::Box86).unwrap();
+            assert_eq!(tree.archived.len(), 1, "{:?}", tree.archived);
+            let built = fixture.build().unwrap();
+            assert_eq!(
+                zip_names(&built.path),
+                vec![".emucat-manifest.json".to_owned(), "86box.cfg".to_owned()]
+            );
+        }
+        assert_eq!(
+            fs::read(outside.path().join("secret.txt")).unwrap(),
+            b"outside the VM"
+        );
+    }
+
+    #[test]
+    fn a_junction_in_a_directory_that_is_not_the_screenshots_tree_still_fails_the_archive() {
+        // Only the VM's top-level `screenshots` directory is media: the same name deeper down, or a similar name,
+        // is VM content like any other, and a junction there is refused.
+        for link in [
+            "media/screenshots/more",
+            "screenshots-old/more",
+            "screenshot/more",
+        ] {
+            let outside = TempDir::new().unwrap();
+            let fixture = Fixture::new(EmulatorType::Box86, "Box", &[("86box.cfg", b"x")]);
+            // Joined segment by segment: `mklink` reads a `/` as the start of an option.
+            let path = link
+                .split('/')
+                .fold(fixture.root.clone(), |path, part| path.join(part));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            junction(&path, outside.path());
+            let error = fixture.build().unwrap_err();
+            assert_eq!(error.kind, SourceErrorKind::Unsafe, "{link}");
+            assert!(fixture.staging_is_empty(), "{link}");
+        }
     }
 }
 
