@@ -313,7 +313,7 @@ describe('the VM’s sidebar', () => {
 
   it.each([
     ['', 'General', 'Run and verify'],
-    ['/versions', 'Version History', 'Version history'],
+    ['/versions', 'Version History', 'Version History'],
     ['/copies', 'Local copies and restore', 'Local copies and restores'],
     ['/notes', 'Notes', 'Notes'],
     ['/screenshots', 'Screenshots', 'Screenshots'],
@@ -334,7 +334,7 @@ describe('the VM’s sidebar', () => {
     renderAt(VM_PATH);
     await screen.findByRole('navigation', { name: 'VM' });
     for (const [label, path, heading] of [
-      ['Version History', `${VM_PATH}/versions`, 'Version history'],
+      ['Version History', `${VM_PATH}/versions`, 'Version History'],
       ['Local copies and restore', `${VM_PATH}/copies`, 'Local copies and restores'],
       ['Notes', `${VM_PATH}/notes`, 'Notes'],
       ['Screenshots', `${VM_PATH}/screenshots`, 'Screenshots'],
@@ -392,7 +392,7 @@ describe('the VM’s sidebar', () => {
   it('leads an old link to a version on the VM’s page to Version History', async () => {
     manage();
     renderAt(`${VM_PATH}#version-018f47a0-7c2b-4f7e-9a3d-1b2c3d4e9010`);
-    await screen.findByRole('heading', { name: 'Version history' });
+    await screen.findByRole('heading', { name: 'Version History' });
     expect(location()).toBe(`${VM_PATH}/versions`);
     expect(screen.getByTestId('location-hash').textContent).toBe(
       '#version-018f47a0-7c2b-4f7e-9a3d-1b2c3d4e9010',

@@ -1,5 +1,11 @@
 import { LoaderCircle, type LucideIcon } from 'lucide-react';
-import { forwardRef, type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  forwardRef,
+  useId,
+  type ButtonHTMLAttributes,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 
 /**
  * Icon buttons and toolbars (decision 0058), built on Lucide icons imported one by one. Every button has an accessible
@@ -27,6 +33,14 @@ interface BaseProps extends Omit<
   /** Where the tooltip opens. */
   tooltipPlacement?: 'below' | 'above' | 'start';
   variant?: 'ghost' | 'primary';
+  /**
+   * Why the button cannot be used now, given with `disabled`. The button then stays focusable and is marked
+   * `aria-disabled` instead, so that its explanation can be reached by keyboard and is announced as its description;
+   * it never acts while disabled. Without a reason, `disabled` is the native attribute.
+   */
+  disabledReason?: string | null | undefined;
+  /** Danger styling on hover and focus only, for a destructive action that stays neutral at rest. */
+  danger?: boolean;
   children?: ReactNode;
 }
 
@@ -38,7 +52,9 @@ function Content({
   tooltip,
   tooltipPlacement,
   children,
-}: BaseProps) {
+  reason,
+  reasonId,
+}: BaseProps & { reason: string | null; reasonId: string }) {
   return (
     <>
       {loading ? (
@@ -48,7 +64,18 @@ function Content({
       )}
       {showLabel ? <span className="icon-button-label">{label}</span> : null}
       {children}
-      {tooltip !== '' ? (
+      {reason !== null ? (
+        // The reason is written once: it is the button's description (aria-describedby names it) and the tooltip's
+        // text. Only the tooltip's title is hidden, since the button's name already says it.
+        <span
+          className={`icon-tooltip icon-tooltip-wrap icon-tooltip-${tooltipPlacement ?? 'below'}`}
+        >
+          <span className="icon-tooltip-title" aria-hidden="true">
+            {tooltip || label} unavailable
+          </span>
+          <span id={reasonId}>{reason}</span>
+        </span>
+      ) : tooltip !== '' ? (
         <span
           className={`icon-tooltip icon-tooltip-${tooltipPlacement ?? 'below'}`}
           aria-hidden="true"
@@ -66,6 +93,7 @@ const className = (props: BaseProps, pressed?: boolean) =>
     props.variant === 'primary' ? 'icon-button-primary' : '',
     pressed ? 'icon-button-pressed' : '',
     props.showLabel ? 'icon-button-with-label' : '',
+    props.danger ? 'icon-button-danger' : '',
     props.className ?? '',
   ]
     .filter(Boolean)
@@ -83,6 +111,8 @@ const CONTENT_KEYS = [
   'className',
   'pressed',
   'onPressedChange',
+  'disabledReason',
+  'danger',
 ] as const;
 
 /** The props that go to the `<button>` itself. */
@@ -92,17 +122,47 @@ function buttonAttributes(props: object): ButtonHTMLAttributes<HTMLButtonElement
   return attributes;
 }
 
+/** The reason a disabled button explains, or `null` when it is enabled or has none. */
+function reasonOf(props: BaseProps): string | null {
+  return props.disabled && props.disabledReason ? props.disabledReason : null;
+}
+
+/**
+ * The attributes that make a disabled button with a reason focusable but inert: `aria-disabled`, its reason as the
+ * description, and a click that is stopped before any handler of the caller's runs.
+ */
+function disabledAttributes(
+  props: BaseProps,
+  reason: string | null,
+  reasonId: string,
+): ButtonHTMLAttributes<HTMLButtonElement> {
+  if (reason === null) return {};
+  const describedBy = [props['aria-describedby'], reasonId].filter(Boolean).join(' ');
+  return {
+    disabled: false,
+    'aria-disabled': true,
+    'aria-describedby': describedBy,
+    onClick: (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    },
+  };
+}
+
 export const IconButton = forwardRef<HTMLButtonElement, BaseProps>(function IconButton(props, ref) {
+  const reasonId = `${useId()}-reason`;
+  const reason = reasonOf(props);
   return (
     <button
       ref={ref}
       type="button"
       {...buttonAttributes(props)}
+      {...disabledAttributes(props, reason, reasonId)}
       className={className(props)}
       aria-label={props.label}
       aria-busy={props.loading || undefined}
     >
-      <Content {...props} />
+      <Content {...props} reason={reason} reasonId={reasonId} />
     </button>
   );
 });
@@ -112,6 +172,8 @@ export const IconToggleButton = forwardRef<
   BaseProps & { pressed: boolean; onPressedChange?: (pressed: boolean) => void }
 >(function IconToggleButton(props, ref) {
   const { pressed, onPressedChange, onClick } = props;
+  const reasonId = `${useId()}-reason`;
+  const reason = reasonOf(props);
   return (
     <button
       ref={ref}
@@ -125,8 +187,9 @@ export const IconToggleButton = forwardRef<
         onClick?.(event);
         if (!event.defaultPrevented) onPressedChange?.(!pressed);
       }}
+      {...disabledAttributes(props, reason, reasonId)}
     >
-      <Content {...props} />
+      <Content {...props} reason={reason} reasonId={reasonId} />
     </button>
   );
 });

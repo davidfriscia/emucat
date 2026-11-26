@@ -15,6 +15,8 @@ export function InfoPopover({
   align = 'end',
   disabled,
   wide,
+  tooltip,
+  tooltipPlacement,
 }: {
   icon: LucideIcon;
   /** The button's accessible name, such as "File information". */
@@ -25,6 +27,9 @@ export function InfoPopover({
   align?: 'start' | 'end';
   disabled?: boolean;
   wide?: boolean;
+  /** The button's tooltip, when it should be shorter than its accessible name. */
+  tooltip?: string;
+  tooltipPlacement?: 'below' | 'above' | 'start';
 }) {
   const ids = useId();
   const [open, setOpen] = useState(false);
@@ -68,7 +73,8 @@ export function InfoPopover({
         aria-controls={open ? `${ids}-panel` : undefined}
         aria-haspopup="dialog"
         onPressedChange={setOpen}
-        tooltip={open ? '' : undefined}
+        tooltip={open ? '' : tooltip}
+        tooltipPlacement={tooltipPlacement}
       />
       {open ? (
         <div

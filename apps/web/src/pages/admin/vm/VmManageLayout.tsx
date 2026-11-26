@@ -1,5 +1,6 @@
 import { useCaptureGalleryRefresh } from '../../../components/CaptureScreenshot';
 import { vmTitle, type AdminVmDetail, type VmIdentity } from '@emucat/contracts';
+import { ArrowLeft } from 'lucide-react';
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import { Link, matchPath, Outlet, useLocation, useNavigate } from 'react-router';
 import { ApiRequestError, fetchAdminVm } from '../../../api';
@@ -43,7 +44,8 @@ export function useVmManage(): VmManageContextValue {
 function BackToCatalog() {
   return (
     <Link to={CATALOG_PATH} className="sidebar-back small">
-      <span aria-hidden="true">← </span>Back to Catalog
+      <ArrowLeft size={14} aria-hidden="true" className="sidebar-back-icon" />
+      Back to Catalog
     </Link>
   );
 }

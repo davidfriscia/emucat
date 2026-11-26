@@ -195,6 +195,28 @@ function base(routes: Record<string, unknown> = {}) {
   });
 }
 
+/** Opens a version's Info panel, from its own card, and returns the panel. */
+async function versionInfo(scope: HTMLElement, name: string) {
+  fireEvent.click(within(scope).getByRole('button', { name: `Information about ${name}` }));
+  return within(scope).findByRole('dialog');
+}
+
+/** Whether a control is shown but cannot be used: natively disabled, or `aria-disabled` with its reason. */
+function unavailable(element: HTMLElement): boolean {
+  return (
+    (element as HTMLButtonElement).disabled || element.getAttribute('aria-disabled') === 'true'
+  );
+}
+
+/** The reason an `aria-disabled` control gives, as assistive technology reads it. */
+function reasonOf(element: HTMLElement): string {
+  return (element.getAttribute('aria-describedby') ?? '')
+    .split(' ')
+    .map((id) => document.getElementById(id)?.textContent ?? '')
+    .join(' ')
+    .trim();
+}
+
 async function history() {
   renderAt(`${VM_PATH}/versions`);
   const tree = await screen.findByRole('tree', { name: 'Versions of Win98' });
@@ -210,7 +232,11 @@ describe('the version tree', () => {
     const master = items[0] as HTMLElement;
     expect(within(master).getByRole('heading', { name: 'Master' })).toBeTruthy();
     expect(within(master).getByText('2 branches')).toBeTruthy();
-    expect(within(master).getByText('None (root)')).toBeTruthy();
+    // The parent is detail, given on demand.
+    expect(within(master).queryByText('None (root)')).toBeNull();
+    const masterInfo = await versionInfo(master, 'Master');
+    expect(within(masterInfo).getByText('None (root)')).toBeTruthy();
+    fireEvent.keyDown(masterInfo, { key: 'Escape' });
 
     // C is under A, not after B: the history is not flattened into a list.
     const a = items[1] as HTMLElement;
@@ -281,10 +307,15 @@ describe('the version tree', () => {
     base({ [`GET ${VM_PATH}/versions`]: tree });
     const drawn = await history();
     const c = within(drawn).getAllByRole('treeitem')[2] as HTMLElement;
-    expect(within(c).getByText(/Repository disabled/)).toBeTruthy();
-    expect(
-      (within(c).getByRole('button', { name: 'Restore…' }) as HTMLButtonElement).disabled,
-    ).toBe(true);
+    expect(within(c).getByText('Repository disabled, so it cannot be restored now')).toBeTruthy();
+    const restore = within(c).getByRole('button', { name: 'Restore Win98_202601010003' });
+    expect(unavailable(restore)).toBe(true);
+    expect(reasonOf(restore)).toMatch(/repository is disabled/);
+    // Focusable, so that its reason can be read, yet it never acts.
+    restore.focus();
+    expect(document.activeElement).toBe(restore);
+    fireEvent.click(restore);
+    expect(screen.queryByRole('dialog', { name: 'Restore Win98' })).toBeNull();
   });
 });
 
@@ -299,7 +330,9 @@ describe('creating a snapshot', () => {
     });
     const tree = await history();
     // Only the version the local copy came from offers a snapshot from it.
-    const buttons = within(tree).getAllByRole('button', { name: 'Create snapshot from Study PC…' });
+    const buttons = within(tree).getAllByRole('button', {
+      name: 'Create snapshot of Win98_202601010002 from the local copy on Study PC',
+    });
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0] as HTMLElement);
     const dialog = await screen.findByRole('dialog', { name: 'Create a snapshot from Study PC' });
@@ -326,7 +359,11 @@ describe('creating a snapshot', () => {
       ),
     });
     const tree = await history();
-    fireEvent.click(within(tree).getByRole('button', { name: 'Create snapshot from Study PC…' }));
+    fireEvent.click(
+      within(tree).getByRole('button', {
+        name: 'Create snapshot of Win98_202601010002 from the local copy on Study PC',
+      }),
+    );
     const dialog = await screen.findByRole('dialog', { name: 'Create a snapshot from Study PC' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create snapshot' }));
     expect(await within(dialog).findByText(/running on this agent/)).toBeTruthy();
@@ -338,7 +375,7 @@ describe('restoring a historical version', () => {
     const api = base({ 'POST /admin/restores': { ...restoreOperationStub() } });
     const tree = await history();
     const a = within(tree).getAllByRole('treeitem')[1] as HTMLElement;
-    fireEvent.click(within(a).getAllByRole('button', { name: 'Restore…' })[0] as HTMLElement);
+    fireEvent.click(within(a).getByRole('button', { name: 'Restore Win98_202601010001' }));
     const dialog = await screen.findByRole('dialog', { name: 'Restore Win98' });
     const select = within(dialog).getByLabelText('Version') as HTMLSelectElement;
     expect(select.value).toBe(SNAP_A);
@@ -699,14 +736,19 @@ describe('deleting a snapshot', () => {
     const c = item(tree, SNAP_C);
     expect(within(master).queryByRole('button', { name: /^Delete Master/ })).toBeNull();
     const deleteA = within(a).getByRole('button', { name: 'Delete Win98_202601010001' });
-    expect((deleteA as HTMLButtonElement).disabled).toBe(true);
-    expect(deleteA.getAttribute('aria-describedby')).toBeTruthy();
-    expect(within(a).getByText(/Other versions were created from this snapshot/)).toBeTruthy();
+    expect(unavailable(deleteA)).toBe(true);
+    // The reason is the button's own description, reachable by keyboard, and in the version's Info.
+    expect(reasonOf(deleteA)).toMatch(/Other versions were created from this snapshot/);
+    fireEvent.click(deleteA);
+    expect(screen.queryByRole('dialog', { name: 'Permanently delete this snapshot' })).toBeNull();
     const deleteB = within(b).getByRole('button', { name: 'Delete Win98_202601010002' });
-    expect((deleteB as HTMLButtonElement).disabled).toBe(true);
-    expect(within(b).getByText(/holds a persistent copy of this snapshot/)).toBeTruthy();
+    expect(unavailable(deleteB)).toBe(true);
+    expect(reasonOf(deleteB)).toMatch(/holds a persistent copy of this snapshot/);
+    const infoB = await versionInfo(b, 'Win98_202601010002');
+    expect(within(infoB).getByText(/holds a persistent copy of this snapshot/)).toBeTruthy();
     const deleteC = within(c).getByRole('button', { name: 'Delete Win98_202601010003' });
-    expect((deleteC as HTMLButtonElement).disabled).toBe(false);
+    expect(unavailable(deleteC)).toBe(false);
+    expect(deleteC.getAttribute('aria-describedby')).toBeNull();
   });
 
   it('names the exact version, warns that it cannot be undone, and sends only its ID', async () => {
@@ -762,16 +804,15 @@ describe('deleting a snapshot', () => {
     const c = item(await history(), SNAP_C);
     expect(within(c).getByText('Being deleted')).toBeTruthy();
     expect(within(c).queryByRole('button', { name: /^Delete/ })).toBeNull();
-    expect(
-      (within(c).getByRole('button', { name: 'Restore…' }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    expect(
-      (
-        within(c).getByRole('button', {
-          name: 'Run Win98_202601010003 in Remote Volatile',
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+    expect(unavailable(within(c).getByRole('button', { name: 'Restore Win98_202601010003' }))).toBe(
+      true,
+    );
+    const run = within(c).getByRole('button', {
+      name: 'Run Win98_202601010003 in Remote Volatile',
+    });
+    expect(unavailable(run)).toBe(true);
+    expect(reasonOf(run)).toBe('It is being deleted.');
+    // A failure that needs attention stays in view, not behind Info.
     expect(within(c).getByText('repository_unreachable')).toBeTruthy();
     fireEvent.click(
       within(c).getByRole('button', { name: 'Retry deleting Win98_202601010003 now' }),
@@ -857,7 +898,10 @@ describe('titles and descriptions', () => {
     const a = within(drawn).getAllByRole('treeitem')[1] as HTMLElement;
     expect(within(a).getByRole('heading', { name: 'Clean install' })).toBeTruthy();
     expect(within(a).getByText('Win98_202601010001')).toBeTruthy();
-    const description = within(a).getByText(/Line one/);
+    // The description is detail, in the version's Info.
+    expect(within(a).queryByText(/Line one/)).toBeNull();
+    const info = await versionInfo(a, 'Win98_202601010001');
+    const description = within(info).getByText(/Line one/);
     expect(description.textContent).toBe('Line one\n<b>not bold</b>');
     expect(description.querySelector('b')).toBeNull();
   });
@@ -910,7 +954,11 @@ describe('titles and descriptions', () => {
       [`GET /admin/registrations/${registrationOperation().id}`]: snapshotOperation(),
     });
     const tree = await history();
-    fireEvent.click(within(tree).getByRole('button', { name: 'Create snapshot from Study PC…' }));
+    fireEvent.click(
+      within(tree).getByRole('button', {
+        name: 'Create snapshot of Win98_202601010002 from the local copy on Study PC',
+      }),
+    );
     const dialog = await screen.findByRole('dialog', { name: 'Create a snapshot from Study PC' });
     fireEvent.change(within(dialog).getByLabelText(/Title/), { target: { value: 'Before SP1' } });
     fireEvent.change(within(dialog).getByLabelText(/Description/), {
@@ -1083,7 +1131,7 @@ describe('remastering from a local copy', () => {
       }),
     });
     await history();
-    fireEvent.click(screen.getByRole('button', { name: 'Remaster from local copy…' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remaster from local copy' }));
     const dialog = await screen.findByRole('dialog', { name: 'Remaster from a local copy' });
     expect(await within(dialog).findByText(/Permanently deleted \(4/)).toBeTruthy();
     expect(api.callsTo('GET', `${VM_PATH}/remaster/local`)[0]?.query.get('agentId')).toBe(AGENT_ID);

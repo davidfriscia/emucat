@@ -10,6 +10,9 @@ export function SidebarNavItem({ item, onSelect }: { item: NavItem; onSelect?: (
   return (
     <li className="nav-item">
       <NavLink to={item.to} end={item.end ?? false} className={itemClass} onClick={onSelect}>
+        {item.icon ? (
+          <item.icon size={16} aria-hidden="true" className="sidebar-link-icon" />
+        ) : null}
         {item.label}
       </NavLink>
     </li>

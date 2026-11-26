@@ -44,7 +44,9 @@ const VM_PATH = '/admin/vms/virtualbox/xenix-386';
 const MANAGEMENT_PATH = `${VM_PATH}/virtualbox`;
 const WHEN = '2026-11-15T10:00:00.000Z';
 const SHA = 'a'.repeat(64);
-const disabled = (element: HTMLElement) => (element as HTMLButtonElement).disabled;
+/** Shown but unusable: natively disabled, or `aria-disabled` with its reason (Version History's icon toolbars). */
+const disabled = (element: HTMLElement) =>
+  (element as HTMLButtonElement).disabled || element.getAttribute('aria-disabled') === 'true';
 
 function source(overrides: Partial<VirtualBoxSource> = {}): VirtualBoxSource {
   return {
@@ -784,6 +786,13 @@ describe('importing a version into VirtualBox', () => {
     renderAt(`${VM_PATH}/versions`);
     const button = await screen.findByRole('button', { name: 'Import Master into VirtualBox' });
     await waitFor(() => expect(disabled(button)).toBe(true));
+    expect(button.getAttribute('aria-describedby')).toBeTruthy();
+    expect(
+      document.getElementById(button.getAttribute('aria-describedby') ?? '')?.textContent,
+    ).toBe('Another VirtualBox operation is in progress.');
+    // It never acts while disabled.
+    fireEvent.click(button);
+    expect(screen.queryByRole('dialog', { name: 'Import Master into VirtualBox' })).toBeNull();
   });
 });
 

@@ -557,7 +557,29 @@ h2,
   overflow-wrap: anywhere;
 }
 
-/* Version history: a tree, with a guide line for each level so that branches stay visible. */
+/*
+ * Version history (decision 0059): compact cards in a tree. Each level is indented by a fixed step and joined to its
+ * parent by a guide line and an elbow, so that branches stay visible without the cards growing.
+ */
+.version-history-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.version-history-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+.version-history-actions {
+  margin-inline-start: auto;
+}
+
 .version-tree,
 .version-children {
   list-style: none;
@@ -566,41 +588,136 @@ h2,
 }
 
 .version-children {
-  margin-left: 0.75rem;
-  padding-left: 0.75rem;
-  border-left: 2px solid var(--bs-border-color);
+  --version-indent: 1rem;
+  /* The guide line runs under the parent's chevron. */
+  margin-left: 1.25rem;
+  padding-left: var(--version-indent);
+  border-left: 1px solid var(--bs-border-color);
+}
+.version-children > .version-node {
+  position: relative;
+}
+/* The elbow from the guide line to the child's card. */
+.version-children > .version-node::before {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--version-indent));
+  top: 1.15rem;
+  width: calc(var(--version-indent) - 0.15rem);
+  border-top: 1px solid var(--bs-border-color);
+}
+/* The last child's guide line stops at its elbow. */
+.version-children > .version-node:last-child::after {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--version-indent) - 1px);
+  top: calc(1.15rem + 1px);
+  bottom: 0;
+  border-left: 1px solid var(--bs-body-bg);
+}
+.card .version-children > .version-node:last-child::after {
+  border-left-color: var(--bs-card-bg, var(--bs-body-bg));
 }
 
-.version-facts {
+.version-card {
+  margin-bottom: 0.375rem;
+  padding: 0.375rem 0.5rem 0.25rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+  background: var(--bs-body-bg);
+}
+.version-card-master {
+  border-left: 3px solid var(--bs-primary-border-subtle);
+}
+.version-card-head {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem 1.25rem;
-  margin: 0.35rem 0 0;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
 }
-
-.version-facts div {
-  display: flex;
-  gap: 0.35rem;
+.version-toggle.icon-button {
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: 0.125rem;
 }
-
-.version-facts dt {
-  font-weight: 500;
+.version-toggle-space {
+  flex: 0 0 1.5rem;
+}
+.version-kind-icon {
+  flex: 0 0 auto;
   color: var(--bs-secondary-color);
 }
-
-.version-facts dd {
+.version-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.5rem;
+  min-width: 0;
+  /* Below this width, the short identifier moves to the next line rather than squeezing the name. */
+  flex: 1 1 11rem;
+}
+.version-title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.version-label {
+  overflow-wrap: anywhere;
+}
+.version-kind {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bs-secondary-color);
+}
+.version-kind-master {
+  color: var(--bs-primary-text-emphasis);
+}
+.version-id {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+}
+.version-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  margin: 0.125rem 0 0.125rem calc(1.5rem + 0.375rem);
+  font-size: 0.8125rem;
+}
+.version-summary-text {
+  color: var(--bs-secondary-color);
+  font-variant-numeric: tabular-nums;
+}
+.version-summary .version-tags {
   margin: 0;
 }
-
-.version-toggle {
-  min-width: 1.5rem;
-  text-decoration: none;
+.version-alert {
+  margin: 0.25rem 0 0.25rem calc(1.5rem + 0.375rem);
+}
+.version-toolbar {
+  margin-left: calc(1.5rem + 0.375rem - 0.4rem);
+}
+.version-description {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 575.98px) {
   .version-children {
-    margin-left: 0.25rem;
-    padding-left: 0.5rem;
+    --version-indent: 0.5rem;
+    margin-left: 0.75rem;
+  }
+  .version-summary,
+  .version-alert {
+    margin-left: 0;
+  }
+  .version-toolbar {
+    margin-left: -0.4rem;
   }
 }
 
@@ -1224,7 +1341,18 @@ main.container:has(> .page-wide) {
 }
 
 .sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   color: var(--bs-body-color);
+}
+.sidebar-link-icon {
+  flex: 0 0 auto;
+}
+.sidebar-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
 }
 
 .sidebar-link:hover,
@@ -1297,11 +1425,11 @@ main.container:has(> .page-wide) {
   line-height: 1;
   white-space: nowrap;
 }
-.icon-button:hover:not(:disabled) {
+.icon-button:hover:not(:disabled):not([aria-disabled='true']) {
   background: var(--bs-tertiary-bg);
   border-color: var(--bs-border-color);
 }
-.icon-button:active:not(:disabled) {
+.icon-button:active:not(:disabled):not([aria-disabled='true']) {
   background: var(--bs-secondary-bg);
 }
 .icon-button:focus-visible {
@@ -1309,10 +1437,29 @@ main.container:has(> .page-wide) {
   outline-offset: 1px;
   z-index: 2;
 }
-.icon-button:disabled {
+.icon-button:disabled,
+.icon-button[aria-disabled='true'] {
   color: var(--bs-secondary-color);
   opacity: 0.55;
   cursor: not-allowed;
+}
+/* Its explanation stays fully legible, whatever the button's own faded look. */
+.icon-button[aria-disabled='true'] .icon-tooltip {
+  color: var(--bs-body-bg);
+}
+.icon-button[aria-disabled='true']:hover,
+.icon-button[aria-disabled='true']:focus-visible {
+  opacity: 1;
+}
+.icon-button[aria-disabled='true'] > svg {
+  opacity: 0.55;
+}
+/* Destructive actions are neutral at rest; their danger shows when they are about to be used. */
+.icon-button-danger:hover:not(:disabled):not([aria-disabled='true']),
+.icon-button-danger:focus-visible:not([aria-disabled='true']) {
+  color: var(--bs-danger-text-emphasis);
+  background: var(--bs-danger-bg-subtle);
+  border-color: var(--bs-danger-border-subtle);
 }
 .icon-button-pressed,
 .icon-button-pressed:hover:not(:disabled) {
@@ -1376,6 +1523,58 @@ main.container:has(> .page-wide) {
 }
 .icon-button:hover .icon-tooltip,
 .icon-button:focus-visible .icon-tooltip {
+  opacity: 1;
+}
+/* A tooltip with an explanation: a short title, then the reason, wrapped. */
+.icon-tooltip-wrap {
+  width: max-content;
+  max-width: min(18rem, calc(100vw - 2rem));
+  white-space: normal;
+  text-align: start;
+  line-height: 1.35;
+}
+.icon-tooltip-title {
+  display: block;
+  font-weight: 600;
+}
+
+/* Compact status indicators: an icon and a few words, the full statement as a tooltip and for screen readers. */
+.status-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--bs-secondary-color);
+  white-space: nowrap;
+}
+.status-chip-success {
+  color: var(--bs-success-text-emphasis);
+  border-color: var(--bs-success-border-subtle);
+}
+.status-chip-warning {
+  color: var(--bs-warning-text-emphasis);
+  border-color: var(--bs-warning-border-subtle);
+  background: var(--bs-warning-bg-subtle);
+}
+.status-chip-danger {
+  color: var(--bs-danger-text-emphasis);
+  border-color: var(--bs-danger-border-subtle);
+  background: var(--bs-danger-bg-subtle);
+}
+.status-chip-info {
+  color: var(--bs-info-text-emphasis);
+  border-color: var(--bs-info-border-subtle);
+}
+.status-chip .icon-tooltip {
+  left: 0;
+  transform: none;
+}
+.status-chip:hover .icon-tooltip {
   opacity: 1;
 }
 .icon-toolbar {
@@ -1488,6 +1687,23 @@ main.container:has(> .page-wide) {
 .info-list {
   margin: 0;
   padding-inline-start: 1.1rem;
+}
+.info-copyable {
+  word-break: break-all;
+  user-select: all;
+}
+/* On a phone, an information panel is a sheet at the bottom of the window, whatever it was opened from. */
+@media (max-width: 575.98px) {
+  .info-popover,
+  .info-popover-wide {
+    position: fixed;
+    top: auto;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    width: auto;
+    max-height: 70vh;
+  }
 }
 
 /* Archive Explorer's compact layout (decision 0058): header, view switch, then the split with the preview filling it. */

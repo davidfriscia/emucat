@@ -9,7 +9,34 @@ import {
   type VirtualBoxManagementResponse,
   type VmIdentity,
 } from '@emucat/contracts';
-import { useCallback, useRef, useState } from 'react';
+import {
+  ArrowUpToLine,
+  Camera,
+  ChevronDown,
+  ChevronRight,
+  CopyPlus,
+  FolderOpen,
+  GitBranch,
+  HardDriveDownload,
+  HardDriveUpload,
+  History,
+  Import,
+  Info,
+  Layers,
+  Link2,
+  Monitor,
+  MonitorCog,
+  Pencil,
+  Play,
+  RefreshCw,
+  ServerOff,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldQuestion,
+  Tags,
+  Trash2,
+} from 'lucide-react';
+import { Fragment, useCallback, useRef, useState, type ReactNode } from 'react';
 import {
   discardWorkspace,
   fetchRemasters,
@@ -44,6 +71,16 @@ import {
 } from './Snapshots';
 import { FormError } from './States';
 import { TagEditorDialog, TagList } from './Tags';
+import {
+  ICON_SIZE,
+  IconButton,
+  Toolbar,
+  ToolbarGroup,
+  ToolbarSeparator,
+  ToolbarSpacer,
+} from './ui/IconButton';
+import { InfoPopover } from './ui/Popover';
+import { StatusChip } from './ui/StatusChip';
 import {
   ImportIntoVirtualBoxDialog,
   notifyVirtualBoxChanged,
@@ -84,11 +121,62 @@ function holderText(holder: VersionNode['holders'][number]): string {
   return `Local copy on ${holder.agentName} (${status})`;
 }
 
+/** The compact indicator of one agent's copy. Its full statement is {@link holderText}. */
+function HolderChip({ holder }: { holder: VersionNode['holders'][number] }) {
+  const detail = holderText(holder);
+  if (holder.kind === 'workspace') {
+    return (
+      <StatusChip icon={MonitorCog} label={`Working copy · ${holder.agentName}`} detail={detail} />
+    );
+  }
+  if (holder.contentStatus === 'verified') {
+    return (
+      <StatusChip
+        icon={Monitor}
+        tone="success"
+        label={`Local · ${holder.agentName}`}
+        detail={detail}
+      />
+    );
+  }
+  return (
+    <StatusChip
+      icon={ShieldAlert}
+      tone="warning"
+      label={`Local · ${holder.agentName} · ${holder.contentStatus === 'modified' ? 'modified' : 'not verified'}`}
+      detail={detail}
+    />
+  );
+}
+
+/** The compact indicator of what is known about the archive itself. Its full statement is {@link verificationText}. */
+function ArchiveChip({ node }: { node: VersionNode }) {
+  const detail = verificationText(node);
+  if (node.deletion)
+    return <StatusChip icon={Trash2} tone="danger" label="Being deleted" detail={detail} />;
+  if (!node.available) {
+    return (
+      <StatusChip icon={ServerOff} tone="warning" label="Repository disabled" detail={detail} />
+    );
+  }
+  // Historical: what the agent checked when it published the archive, not the archive's or a copy's state today.
+  return node.manifest ? (
+    <StatusChip icon={ShieldCheck} tone="success" label="Verified when published" detail={detail} />
+  ) : (
+    <StatusChip icon={ShieldQuestion} label="Hash recorded" detail={detail} />
+  );
+}
+
+const EXECUTION_GROUP = 'Run and restore';
+const MANAGEMENT_GROUP = 'Version management';
+const LIFECYCLE_GROUP = 'Lifecycle';
+
 /** One version, with its children nested under it. A list inside a list is what keeps branches visible. */
 function VersionItem({
   entry,
   vm,
   nameOf,
+  labelOf,
   restoreOptions,
   onRestore,
   onSnapshot,
@@ -117,6 +205,8 @@ function VersionItem({
   onImport: (node: VersionNode) => void;
   /** The version's name for assistive technology: unique in the tree, even when labels repeat. */
   nameOf: (node: VersionNode) => string;
+  /** Another version's label, by its identifier, or `null` when it is not in the history. */
+  labelOf: (id: string) => string | null;
   restoreOptions: RestoreOptionsResponse | null;
   onRestore: (versionId: string) => void;
   onSnapshot: (node: VersionNode, agentId: string, agentName: string) => void;
@@ -125,8 +215,8 @@ function VersionItem({
   onRetryDelete: (node: VersionNode) => void;
 }) {
   const { node, depth, children } = entry;
+  const name = nameOf(node);
   const deleteReason = deletionReasonText(node);
-  const deleteHelpId = `version-delete-help-${node.id}`;
   const [expanded, setExpanded] = useState(true);
   const headingId = `version-${node.id}`;
   const canRestore = node.available && (restoreOptions?.agents.some((a) => a.online) ?? false);
@@ -142,6 +232,64 @@ function VersionItem({
   const virtualBoxBusy =
     virtualbox?.operations.some((item) => item.state === 'queued' || item.state === 'running') ??
     false;
+  const title = node.title ?? versionLabel(node);
+  const KindIcon = node.kind === 'master' ? Layers : Camera;
+
+  // Why each action that is shown cannot be used now. The conditions are the ones the buttons always had; these only
+  // say them. `null`: available.
+  const unusable = node.deletion
+    ? 'It is being deleted.'
+    : 'Its repository is disabled, so it cannot be used now.';
+  const restoreReason = canRestore
+    ? null
+    : !node.available
+      ? unusable
+      : restoreOptions === null
+        ? 'The agents that could restore it are not known yet.'
+        : 'No agent is online to restore it.';
+  const availableReason = node.available ? null : unusable;
+  const importDisabled = !node.available || node.deletion !== null || !importer || virtualBoxBusy;
+  const importReason = !importDisabled
+    ? null
+    : !node.available || node.deletion !== null
+      ? unusable
+      : !importer
+        ? 'No online agent can import into VirtualBox.'
+        : 'Another VirtualBox operation is in progress.';
+  const machineSnapshotDisabled =
+    source === null ||
+    !node.available ||
+    node.deletion !== null ||
+    virtualBoxBusy ||
+    source.state !== 'powered_off' ||
+    !source.agentOnline;
+  const machineSnapshotReason =
+    source === null || !machineSnapshotDisabled
+      ? null
+      : !node.available || node.deletion !== null
+        ? unusable
+        : virtualBoxBusy
+          ? 'Another VirtualBox operation is in progress.'
+          : source.state !== 'powered_off'
+            ? 'Power the machine off to create a snapshot.'
+            : `${source.agentName} is offline.`;
+  const showDelete = node.kind === 'snapshot' && !node.deletion;
+  const restrictions: [string, string][] = [];
+  if (!isVirtualBox) {
+    if (restoreReason) restrictions.push(['Restore', restoreReason]);
+    if (availableReason) restrictions.push(['Run', availableReason]);
+  } else {
+    if (importReason) restrictions.push(['Import into VirtualBox', importReason]);
+    if (snapshotParent && machineSnapshotReason)
+      restrictions.push(['Create snapshot', machineSnapshotReason]);
+  }
+  if (!node.deletion && availableReason)
+    restrictions.push(['Clone and view contents', availableReason]);
+  if (showDelete && deleteReason && !node.deletable.eligible)
+    restrictions.push(['Delete snapshot', deleteReason]);
+
+  const parentLabel = node.parentVersionId ? labelOf(node.parentVersionId) : null;
+
   return (
     <li
       role="treeitem"
@@ -150,290 +298,238 @@ function VersionItem({
       aria-expanded={children.length > 0 ? expanded : undefined}
       className="version-node"
     >
-      <div className="version-card card mb-2">
-        <div className="card-body py-2">
-          <div className="d-flex flex-wrap align-items-center gap-2">
-            {children.length > 0 ? (
-              <button
-                type="button"
-                className="btn btn-sm btn-link p-0 version-toggle"
-                aria-label={expanded ? `Collapse ${nameOf(node)}` : `Expand ${nameOf(node)}`}
-                onClick={() => setExpanded((value) => !value)}
-              >
-                <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
-              </button>
-            ) : null}
-            <h4 id={headingId} className="h6 mb-0 version-title">
-              {node.title ?? versionLabel(node)}
+      <div className={`version-card version-card-${node.kind}`}>
+        <div className="version-card-head">
+          {children.length > 0 ? (
+            <IconButton
+              icon={expanded ? ChevronDown : ChevronRight}
+              label={expanded ? `Collapse ${name}` : `Expand ${name}`}
+              tooltip={expanded ? 'Collapse branch' : 'Expand branch'}
+              className="version-toggle"
+              onClick={() => setExpanded((value) => !value)}
+            />
+          ) : (
+            <span className="version-toggle-space" aria-hidden="true" />
+          )}
+          <KindIcon size={ICON_SIZE} aria-hidden="true" className="version-kind-icon" />
+          <div className="version-identity">
+            <h4 id={headingId} className="version-title">
+              {title}
             </h4>
             {node.title ? (
-              <span className="small text-body-secondary">{versionLabel(node)}</span>
+              <span className="small text-body-secondary version-label">{versionLabel(node)}</span>
             ) : null}
-            <span
-              className={`badge ${node.kind === 'master' ? 'text-bg-primary' : 'text-bg-secondary'}`}
-            >
+            <span className={`version-kind version-kind-${node.kind}`}>
               {node.kind === 'master' ? 'Master' : 'Snapshot'}
             </span>
-            {node.promotedAt ? (
-              <span className="badge text-bg-light border">Promoted from a snapshot</span>
-            ) : null}
-            {node.deletion ? <span className="badge text-bg-danger">Being deleted</span> : null}
-            <span className="small text-body-secondary vm-identity" title={node.id}>
-              {shortId(node.id)}
-            </span>
-            {children.length > 1 ? (
-              <span className="badge text-bg-light border">{children.length} branches</span>
-            ) : null}
           </div>
-          <dl className="small version-facts mb-1">
-            <div>
-              <dt>Created</dt>
-              <dd>{formatTime(node.createdAt)}</dd>
-            </div>
-            <div>
-              <dt>Parent</dt>
-              <dd className="vm-identity">
-                {node.parentVersionId ? shortId(node.parentVersionId) : 'None (root)'}
-              </dd>
-            </div>
-            <div>
-              <dt>Archive</dt>
-              <dd>{formatBytes(node.archiveSizeBytes)}</dd>
-            </div>
-            {node.createdByAgentName ? (
-              <div>
-                <dt>From</dt>
-                <dd>{node.createdByAgentName}</dd>
-              </div>
-            ) : null}
-            {node.promotedAt ? (
-              <div>
-                <dt>Promoted</dt>
-                <dd>{formatTime(node.promotedAt)}</dd>
-              </div>
-            ) : null}
-          </dl>
-          {node.description ? (
-            <details className="small mb-1 version-description">
-              <summary>Description</summary>
-              {/* Plain text, never markup: React escapes it, and CSS keeps its line breaks. */}
-              <p className="mb-0 mt-1" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                {node.description}
-              </p>
-            </details>
+          <span className="small text-body-secondary vm-identity version-id" title={node.id}>
+            {shortId(node.id)}
+          </span>
+        </div>
+        <div className="version-summary">
+          <span className="version-summary-text">
+            {formatTime(node.createdAt)} · {formatBytes(node.archiveSizeBytes)}
+          </span>
+          <ArchiveChip node={node} />
+          {node.promotedAt ? (
+            <StatusChip
+              icon={ArrowUpToLine}
+              label="Promoted"
+              detail={`Promoted from a snapshot ${formatTime(node.promotedAt)}`}
+            />
           ) : null}
-          <TagList tags={node.tags} label={`Tags of ${nameOf(node)}`} className="mb-1" />
-          <p className="small text-body-secondary mb-1">{verificationText(node)}</p>
-          {node.deletion ? (
-            <div className="small mb-1" role="status">
-              Deletion requested {formatTime(node.deletion.requestedAt)}; an agent configured for{' '}
-              {node.repositoryName} deletes its archive, and the snapshot then leaves the history.
-              {node.deletion.error ? (
-                <div className="alert alert-warning small mb-0 mt-1">
-                  The last attempt failed (
-                  <span className="vm-identity">{node.deletion.error.code}</span>):{' '}
-                  {node.deletion.error.message} It is tried again automatically.
-                  <div className="mt-1">
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-outline-secondary theme-button"
-                      aria-label={`Retry deleting ${nameOf(node)} now`}
-                      onClick={() => onRetryDelete(node)}
-                    >
-                      Retry now
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-            </div>
+          {source && lineage === node.id ? (
+            <StatusChip
+              icon={Link2}
+              label="Linked machine"
+              detail="The linked machine comes from this version."
+            />
           ) : null}
-          {node.holders.length > 0 ? (
-            <ul className="list-inline small mb-1">
-              {node.holders.map((holder) => (
-                <li
-                  key={`${holder.agentId}/${holder.workspaceId ?? 'local'}`}
-                  className="list-inline-item badge text-bg-light border"
-                >
-                  {holderText(holder)}
-                </li>
-              ))}
-            </ul>
+          {children.length > 1 ? (
+            <StatusChip icon={GitBranch} label={`${children.length} branches`} />
           ) : null}
-          {isVirtualBox ? (
-            <>
-              <p className="small text-body-secondary mb-1">
-                An OVA exported by VirtualBox. It can be imported into VirtualBox as a new machine;
-                nothing already there is replaced.
-                {source && lineage === node.id
-                  ? ' The linked machine comes from this version.'
-                  : ''}
-              </p>
-              <div className="d-flex flex-wrap gap-2 mt-1">
-                <button
-                  type="button"
-                  className="btn btn-sm btn-outline-primary"
-                  disabled={
-                    !node.available || node.deletion !== null || !importer || virtualBoxBusy
-                  }
-                  aria-label={`Import ${nameOf(node)} into VirtualBox`}
-                  aria-haspopup="dialog"
-                  onClick={() => onImport(node)}
-                >
-                  Import into VirtualBox…
-                </button>
-                {snapshotParent && source ? (
+          {node.holders.map((holder) => (
+            <HolderChip
+              key={`${holder.agentId}/${holder.workspaceId ?? 'local'}`}
+              holder={holder}
+            />
+          ))}
+          <TagList tags={node.tags} label={`Tags of ${name}`} className="version-tags" />
+        </div>
+        {node.deletion ? (
+          // Kept in view: an action is under way, and a failure may need a person.
+          <div className="small version-alert" role="status">
+            Deletion requested {formatTime(node.deletion.requestedAt)}; an agent configured for{' '}
+            {node.repositoryName} deletes its archive, and the snapshot then leaves the history.
+            {node.deletion.error ? (
+              <div className="alert alert-warning small mb-0 mt-1">
+                The last attempt failed (
+                <span className="vm-identity">{node.deletion.error.code}</span>):{' '}
+                {node.deletion.error.message} It is tried again automatically.
+                <div className="mt-1">
                   <button
                     type="button"
                     className="btn btn-sm btn-outline-secondary theme-button"
-                    disabled={
-                      !node.available ||
-                      node.deletion !== null ||
-                      virtualBoxBusy ||
-                      source.state !== 'powered_off' ||
-                      !source.agentOnline
-                    }
-                    aria-label={`Create snapshot of ${source.displayName} from ${nameOf(node)}`}
-                    onClick={() => onSnapshot(node, source.agentId, source.agentName)}
+                    aria-label={`Retry deleting ${name} now`}
+                    onClick={() => onRetryDelete(node)}
                   >
-                    Create snapshot…
+                    Retry now
                   </button>
-                ) : null}
-                {node.kind === 'snapshot' && !node.deletion ? (
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-outline-danger"
-                    disabled={!node.deletable.eligible}
-                    aria-label={`Delete ${nameOf(node)}`}
-                    aria-describedby={deleteReason ? deleteHelpId : undefined}
-                    aria-haspopup="dialog"
-                    onClick={() => onDelete(node)}
-                  >
-                    Delete snapshot…
-                  </button>
-                ) : null}
+                </div>
               </div>
-              {virtualbox && !importer ? (
-                <p className="small text-body-secondary mt-1 mb-0">
-                  No online agent can import into VirtualBox.
-                </p>
-              ) : null}
-              {snapshotParent && source && source.state !== 'powered_off' ? (
-                <p className="small text-body-secondary mt-1 mb-0">
-                  Power the machine off to create a snapshot.
-                </p>
-              ) : null}
-            </>
-          ) : null}
-          <div className={`d-flex flex-wrap gap-2 mt-1${isVirtualBox ? ' d-none' : ''}`}>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-primary"
-              disabled={!canRestore}
-              onClick={() => onRestore(node.id)}
-            >
-              Restore…
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-primary"
-              disabled={!node.available}
-              aria-label={`Run ${nameOf(node)} in Remote Volatile`}
-              onClick={() => onRun(node, 'remote_volatile')}
-            >
-              Run volatile…
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-outline-primary"
-              disabled={!node.available}
-              aria-label={`Run ${nameOf(node)} in Remote Snapshot`}
-              onClick={() => onRun(node, 'remote_snapshot')}
-            >
-              Run and snapshot…
-            </button>
-            {localHolders.map((holder) => (
-              <button
-                key={holder.agentId}
-                type="button"
-                className="btn btn-sm btn-outline-secondary theme-button"
-                onClick={() => onSnapshot(node, holder.agentId, holder.agentName)}
-              >
-                Create snapshot from {holder.agentName}…
-              </button>
-            ))}
-            {node.kind === 'snapshot' && !node.deletion ? (
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-danger"
-                disabled={!node.deletable.eligible}
-                aria-label={`Delete ${nameOf(node)}`}
-                aria-describedby={deleteReason ? deleteHelpId : undefined}
-                aria-haspopup="dialog"
-                onClick={() => onDelete(node)}
-              >
-                Delete snapshot…
-              </button>
             ) : null}
           </div>
-          {node.kind === 'snapshot' && !node.deletion && deleteReason ? (
-            <p id={deleteHelpId} className="small text-body-secondary mt-1 mb-0">
-              Cannot be deleted now: {deleteReason}
-            </p>
-          ) : null}
-          {!node.deletion ? (
-            <div className="d-flex flex-wrap gap-2 mt-1">
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-secondary theme-button"
-                aria-label={`Edit details of ${nameOf(node)}`}
-                aria-haspopup="dialog"
-                onClick={() => onEditDetails(node)}
-              >
-                Edit details…
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-secondary theme-button"
-                aria-label={`Tags of ${nameOf(node)}`}
-                aria-haspopup="dialog"
-                onClick={() => onEditTags(node)}
-              >
-                Tags…
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-secondary theme-button"
-                disabled={!node.available}
-                aria-label={`Clone ${nameOf(node)} into a new VM`}
-                aria-haspopup="dialog"
-                onClick={() => onClone(node)}
-              >
-                Clone VM…
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-secondary theme-button"
-                disabled={!node.available}
-                aria-label={`View the archive contents of ${nameOf(node)}`}
-                aria-haspopup="dialog"
-                onClick={() => onViewContents(node)}
-              >
-                View contents…
-              </button>
-              {node.kind === 'snapshot' ? (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-outline-danger"
-                  aria-label={`Promote ${nameOf(node)} to master`}
+        ) : null}
+        <Toolbar label={`Actions for ${name}`} className="version-toolbar">
+          <ToolbarGroup label={EXECUTION_GROUP}>
+            {isVirtualBox ? (
+              <>
+                <IconButton
+                  icon={Import}
+                  label={`Import ${name} into VirtualBox`}
+                  tooltip="Import into VirtualBox"
                   aria-haspopup="dialog"
-                  onClick={() => onPromote(node)}
-                >
-                  Promote to master…
-                </button>
-              ) : null}
-            </div>
+                  disabled={importDisabled}
+                  disabledReason={importReason}
+                  onClick={() => onImport(node)}
+                />
+                {snapshotParent && source ? (
+                  <IconButton
+                    icon={Camera}
+                    label={`Create snapshot of ${source.displayName} from ${name}`}
+                    tooltip={`Create snapshot of ${source.displayName}`}
+                    disabled={machineSnapshotDisabled}
+                    disabledReason={machineSnapshotReason}
+                    onClick={() => onSnapshot(node, source.agentId, source.agentName)}
+                  />
+                ) : null}
+              </>
+            ) : (
+              <>
+                <IconButton
+                  icon={HardDriveDownload}
+                  label={`Restore ${name}`}
+                  tooltip="Restore version"
+                  aria-haspopup="dialog"
+                  disabled={!canRestore}
+                  disabledReason={restoreReason}
+                  onClick={() => onRestore(node.id)}
+                />
+                <IconButton
+                  icon={Play}
+                  label={`Run ${name} in Remote Volatile`}
+                  tooltip="Run volatile"
+                  disabled={!node.available}
+                  disabledReason={availableReason}
+                  onClick={() => onRun(node, 'remote_volatile')}
+                />
+                <IconButton
+                  icon={Camera}
+                  label={`Run ${name} in Remote Snapshot`}
+                  tooltip="Run and snapshot"
+                  disabled={!node.available}
+                  disabledReason={availableReason}
+                  onClick={() => onRun(node, 'remote_snapshot')}
+                />
+                {localHolders.map((holder) => (
+                  <IconButton
+                    key={holder.agentId}
+                    icon={HardDriveUpload}
+                    label={`Create snapshot of ${name} from the local copy on ${holder.agentName}`}
+                    tooltip={`Create snapshot from the local copy on ${holder.agentName}`}
+                    aria-haspopup="dialog"
+                    onClick={() => onSnapshot(node, holder.agentId, holder.agentName)}
+                  />
+                ))}
+              </>
+            )}
+          </ToolbarGroup>
+          {!node.deletion ? (
+            <>
+              <ToolbarSeparator />
+              <ToolbarGroup label={MANAGEMENT_GROUP}>
+                <IconButton
+                  icon={Pencil}
+                  label={`Edit details of ${name}`}
+                  tooltip="Edit details"
+                  aria-haspopup="dialog"
+                  onClick={() => onEditDetails(node)}
+                />
+                <IconButton
+                  icon={Tags}
+                  label={`Tags of ${name}`}
+                  tooltip="Manage tags"
+                  aria-haspopup="dialog"
+                  onClick={() => onEditTags(node)}
+                />
+                <IconButton
+                  icon={CopyPlus}
+                  label={`Clone ${name} into a new VM`}
+                  tooltip="Clone VM"
+                  aria-haspopup="dialog"
+                  disabled={!node.available}
+                  disabledReason={availableReason}
+                  onClick={() => onClone(node)}
+                />
+                <IconButton
+                  icon={FolderOpen}
+                  label={`View the archive contents of ${name}`}
+                  tooltip="View contents"
+                  aria-haspopup="dialog"
+                  disabled={!node.available}
+                  disabledReason={availableReason}
+                  onClick={() => onViewContents(node)}
+                />
+              </ToolbarGroup>
+            </>
           ) : null}
-        </div>
+          {showDelete ? (
+            <>
+              <ToolbarSeparator />
+              <ToolbarGroup label={LIFECYCLE_GROUP}>
+                <IconButton
+                  icon={ArrowUpToLine}
+                  label={`Promote ${name} to master`}
+                  tooltip="Promote to master"
+                  aria-haspopup="dialog"
+                  danger
+                  onClick={() => onPromote(node)}
+                />
+                <IconButton
+                  icon={Trash2}
+                  label={`Delete ${name}`}
+                  tooltip="Delete snapshot"
+                  aria-haspopup="dialog"
+                  danger
+                  disabled={!node.deletable.eligible}
+                  disabledReason={deleteReason}
+                  onClick={() => onDelete(node)}
+                />
+              </ToolbarGroup>
+            </>
+          ) : null}
+          <ToolbarSpacer />
+          <InfoPopover
+            icon={Info}
+            label={`Information about ${name}`}
+            tooltip="Version information"
+            tooltipPlacement="start"
+            title={title}
+            wide
+          >
+            {() => (
+              <VersionInfo
+                node={node}
+                parentLabel={parentLabel}
+                childCount={children.length}
+                isVirtualBox={isVirtualBox}
+                linked={source !== null && lineage === node.id}
+                restrictions={restrictions}
+              />
+            )}
+          </InfoPopover>
+        </Toolbar>
       </div>
       {children.length > 0 && expanded ? (
         <ul role="group" className="version-children">
@@ -443,6 +539,7 @@ function VersionItem({
               entry={child}
               vm={vm}
               nameOf={nameOf}
+              labelOf={labelOf}
               restoreOptions={restoreOptions}
               onRestore={onRestore}
               onSnapshot={onSnapshot}
@@ -461,6 +558,182 @@ function VersionItem({
         </ul>
       ) : null}
     </li>
+  );
+}
+
+/**
+ * Everything known about one version, on demand: all that the card used to show, and the archive's own facts. Only
+ * what the version tree already carries; nothing here asks the API for more.
+ */
+function VersionInfo({
+  node,
+  parentLabel,
+  childCount,
+  isVirtualBox,
+  linked,
+  restrictions,
+}: {
+  node: VersionNode;
+  parentLabel: string | null;
+  childCount: number;
+  isVirtualBox: boolean;
+  linked: boolean;
+  restrictions: [string, string][];
+}) {
+  return (
+    <>
+      <h4 className="info-section">Version</h4>
+      <dl className="info-facts">
+        {node.title ? (
+          <>
+            <dt>Label</dt>
+            <dd>{versionLabel(node)}</dd>
+          </>
+        ) : null}
+        <dt>Kind</dt>
+        <dd>{node.kind === 'master' ? 'Master' : 'Snapshot'}</dd>
+        <dt>Identifier</dt>
+        <dd>
+          <code className="vm-identity info-copyable">{node.id}</code>
+        </dd>
+        <dt>Created</dt>
+        <dd>{formatTime(node.createdAt)}</dd>
+        {node.promotedAt ? (
+          <>
+            <dt>Promoted</dt>
+            <dd>{formatTime(node.promotedAt)}, from a snapshot</dd>
+          </>
+        ) : null}
+        <dt>Parent</dt>
+        <dd>
+          {node.parentVersionId ? (
+            <>
+              {parentLabel ? `${parentLabel} ` : null}
+              <span className="vm-identity" title={node.parentVersionId}>
+                {shortId(node.parentVersionId)}
+              </span>
+            </>
+          ) : (
+            <span className="vm-identity">None (root)</span>
+          )}
+        </dd>
+        <dt>Children</dt>
+        <dd>{childCount === 0 ? 'None' : childCount === 1 ? 'One' : `${childCount} branches`}</dd>
+        {node.createdByAgentName ? (
+          <>
+            <dt>From</dt>
+            <dd>{node.createdByAgentName}</dd>
+          </>
+        ) : null}
+        {node.createdByDisplayName ? (
+          <>
+            <dt>By</dt>
+            <dd>{node.createdByDisplayName}</dd>
+          </>
+        ) : null}
+        {node.tags.length > 0 ? (
+          <>
+            <dt>Tags</dt>
+            <dd>{node.tags.map((tag) => `#${tag.name}`).join(' ')}</dd>
+          </>
+        ) : null}
+      </dl>
+      {node.description ? (
+        <>
+          <h4 className="info-section">Description</h4>
+          {/* Plain text, never markup: React escapes it, and CSS keeps its line breaks. */}
+          <p className="mb-0 version-description">{node.description}</p>
+        </>
+      ) : null}
+      <h4 className="info-section">Archive</h4>
+      <dl className="info-facts">
+        <dt>Size</dt>
+        <dd>{formatBytes(node.archiveSizeBytes)}</dd>
+        {node.manifest ? (
+          <>
+            <dt>Files</dt>
+            <dd>{node.manifest.fileCount}</dd>
+            <dt>Uncompressed</dt>
+            <dd>{formatBytes(node.manifest.totalUncompressedBytes)}</dd>
+          </>
+        ) : null}
+        <dt>Repository</dt>
+        <dd>
+          {node.repositoryName}
+          {node.available ? '' : ' (disabled)'}
+        </dd>
+        <dt>SHA-256</dt>
+        <dd>
+          <code className="info-copyable">{node.archiveSha256}</code>
+        </dd>
+        {node.manifest ? (
+          <>
+            <dt>Manifest</dt>
+            <dd>
+              <code className="info-copyable">{node.manifest.sha256}</code>
+            </dd>
+          </>
+        ) : null}
+      </dl>
+      {isVirtualBox ? (
+        <p className="info-note mt-1 mb-0">
+          An OVA exported by VirtualBox. It can be imported into VirtualBox as a new machine;
+          nothing already there is replaced.
+          {linked ? ' The linked machine comes from this version.' : ''}
+        </p>
+      ) : null}
+      <h4 className="info-section">Verification</h4>
+      <p className="mb-1">{verificationText(node)}.</p>
+      {node.manifest && node.available && !node.deletion ? (
+        <p className="info-note mb-0">
+          This is what the agent checked when it published the archive. It does not say that the
+          archive, or any local copy, has been verified since.
+        </p>
+      ) : null}
+      <h4 className="info-section">Copies on agents</h4>
+      {node.holders.length > 0 ? (
+        <ul className="info-list">
+          {node.holders.map((holder) => (
+            <li key={`${holder.agentId}/${holder.workspaceId ?? 'local'}`}>{holderText(holder)}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mb-0">No agent holds a copy derived from this version.</p>
+      )}
+      {node.deletion ? (
+        <>
+          <h4 className="info-section">Deletion</h4>
+          <dl className="info-facts">
+            <dt>Requested</dt>
+            <dd>{formatTime(node.deletion.requestedAt)}</dd>
+            <dt>Attempts</dt>
+            <dd>{node.deletion.attempts}</dd>
+            {node.deletion.error ? (
+              <>
+                <dt>Last error</dt>
+                <dd>
+                  <span className="vm-identity">{node.deletion.error.code}</span>:{' '}
+                  {node.deletion.error.message}
+                </dd>
+              </>
+            ) : null}
+          </dl>
+        </>
+      ) : null}
+      {restrictions.length > 0 ? (
+        <>
+          <h4 className="info-section">Unavailable now</h4>
+          <dl className="info-facts">
+            {restrictions.map(([action, reason]) => (
+              <Fragment key={action}>
+                <dt>{action}</dt>
+                <dd>{reason}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -616,6 +889,8 @@ export function VmVersionHistory(props: VersionHistoryProps) {
 
 interface VersionHistoryProps {
   vm: VmIdentity;
+  /** Draws the section's heading, with this identifier, in the history's own header. */
+  headingId?: string | undefined;
   /** The VM's title, which names what an import creates. */
   title?: string | undefined;
   onRun?: ((preselect: Omit<RunPreselection, 'token'>) => void) | undefined;
@@ -629,11 +904,67 @@ function VirtualBoxVersionHistory(props: VersionHistoryProps) {
   );
 }
 
+/** What every version history is, said once, in the page's Info panel. */
+function VersionHistoryInfo() {
+  return (
+    <>
+      <p className="mb-2">
+        Every version is a full, immutable archive; a snapshot records the version it was made from,
+        so history can branch. Running a version in a remote mode never changes it, nor any local
+        copy.
+      </p>
+      <p className="info-note mb-0">
+        Each version’s Info button gives its identity, archive, verification, the copies agents hold
+        and why an action is unavailable now.
+      </p>
+    </>
+  );
+}
+
+/** The history's compact header: its name and count, then what applies to the whole history, and Info. */
+function VersionHistoryHeader({
+  headingId,
+  count,
+  children,
+}: {
+  headingId?: string | undefined;
+  count?: number | undefined;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="version-history-header">
+      {headingId ? (
+        <h2 id={headingId} className="version-history-title">
+          <History size={ICON_SIZE + 2} aria-hidden="true" />
+          Version History
+        </h2>
+      ) : null}
+      {count !== undefined ? (
+        <span className="toolbar-text">{count === 1 ? 'One version' : `${count} versions`}</span>
+      ) : null}
+      <Toolbar label="Version history actions" className="version-history-actions">
+        {children}
+        <InfoPopover
+          icon={Info}
+          label="About the version history"
+          tooltip="About the version history"
+          tooltipPlacement="start"
+          title="About the version history"
+          wide
+        >
+          <VersionHistoryInfo />
+        </InfoPopover>
+      </Toolbar>
+    </div>
+  );
+}
+
 function VersionHistory({
   vm,
   title,
   onRun,
   virtualbox,
+  headingId,
 }: VersionHistoryProps & { virtualbox: VirtualBoxManagementResponse | null }) {
   const { emulatorType, vmName } = vm;
   const identity = { emulatorType, vmName };
@@ -700,10 +1031,20 @@ function VersionHistory({
 
   if (tree.error && !tree.data) {
     return (
-      <p className="small text-body-secondary">The version history is not available right now.</p>
+      <div className="version-history">
+        <VersionHistoryHeader headingId={headingId} />
+        <p className="small text-body-secondary">The version history is not available right now.</p>
+      </div>
     );
   }
-  if (!tree.data) return <p className="small text-body-secondary">Loading the version history…</p>;
+  if (!tree.data) {
+    return (
+      <div className="version-history">
+        <VersionHistoryHeader headingId={headingId} />
+        <p className="small text-body-secondary">Loading the version history…</p>
+      </div>
+    );
+  }
 
   const built = buildVersionTree(tree.data.versions);
   // Snapshot labels are minutes, so two can be the same. Their controls must still be told apart.
@@ -766,13 +1107,30 @@ function VersionHistory({
       }
     }
   }
-  const parentOf = (node: VersionNode) => {
-    const parent = tree.data?.versions.find((version) => version.id === node.parentVersionId);
-    return parent ? versionLabel(parent) : null;
+  const labelOf = (id: string) => {
+    const found = tree.data?.versions.find((version) => version.id === id);
+    return found ? versionLabel(found) : null;
   };
+  const parentOf = (node: VersionNode) =>
+    node.parentVersionId ? labelOf(node.parentVersionId) : null;
 
+  const drawable = built.ok && built.root !== null;
   return (
     <div className="version-history">
+      <VersionHistoryHeader headingId={headingId} count={built.ok ? built.count : undefined}>
+        {drawable && remasterChoices.length > 0 ? (
+          <IconButton
+            icon={RefreshCw}
+            label="Remaster from local copy"
+            tooltipPlacement="start"
+            aria-haspopup="dialog"
+            danger
+            disabled={remasterActive}
+            disabledReason={remasterActive ? 'A remaster is already in progress.' : null}
+            onClick={() => setRemastering(true)}
+          />
+        ) : null}
+      </VersionHistoryHeader>
       {snapshotOperation ? (
         <SnapshotProgress
           key={snapshotOperation}
@@ -796,29 +1154,12 @@ function VersionHistory({
         <p className="small">This VM has no versions yet.</p>
       ) : (
         <>
-          <p className="small text-body-secondary">
-            {built.count === 1 ? 'One version' : `${built.count} versions`}. Every version is a
-            full, immutable archive; a snapshot records the version it was made from, so history can
-            branch. Running a version in a remote mode never changes it, nor any local copy.
-          </p>
-          {remasterChoices.length > 0 ? (
-            <div className="mb-2">
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-danger"
-                disabled={remasterActive}
-                aria-haspopup="dialog"
-                onClick={() => setRemastering(true)}
-              >
-                Remaster from local copy…
-              </button>
-            </div>
-          ) : null}
           <ul role="tree" aria-label={`Versions of ${vmName}`} className="version-tree">
             <VersionItem
               entry={built.root}
               vm={identity}
               nameOf={nameOf}
+              labelOf={labelOf}
               restoreOptions={options.data}
               onRestore={setRestoring}
               onSnapshot={(node, agentId, agentName) =>
@@ -1018,10 +1359,7 @@ export function VmVersionsSection({
   return (
     <section className="card" aria-labelledby="vm-versions-heading">
       <div className="card-body">
-        <h2 id="vm-versions-heading" className="h6 card-title">
-          Version history
-        </h2>
-        <VmVersionHistory vm={vm} title={title} onRun={onRun} />
+        <VmVersionHistory vm={vm} title={title} onRun={onRun} headingId="vm-versions-heading" />
       </div>
     </section>
   );

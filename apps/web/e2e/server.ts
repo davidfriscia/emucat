@@ -46,7 +46,14 @@ async function sendResponse(res: ServerResponse, response: Response) {
   res.end(body);
 }
 
-export async function startServer(root: string): Promise<HarnessServer> {
+/**
+ * `fallback` names the file served for a path that is no file (an application route), as nginx's `try_files` does
+ * for the web application.
+ */
+export async function startServer(
+  root: string,
+  options: { fallback?: string } = {},
+): Promise<HarnessServer> {
   const requests: RecordedRequest[] = [];
   const routes = new Map<string, Route>();
   const handle = async (req: IncomingMessage, res: ServerResponse) => {
@@ -79,9 +86,13 @@ export async function startServer(root: string): Promise<HarnessServer> {
       /^(\.\.[/\\])+/u,
       '',
     );
-    const file = join(root, relative);
+    let file = join(root, relative);
     try {
-      if (!(await stat(file)).isFile()) throw new Error('not a file');
+      const found = await stat(file).catch(() => null);
+      if (!found?.isFile()) {
+        if (!options.fallback || extname(relative) !== '') throw new Error('not a file');
+        file = join(root, options.fallback);
+      }
       res.setHeader('content-type', NGINX_TYPES[extname(file)] ?? 'application/octet-stream');
       res.end(await readFile(file));
     } catch {

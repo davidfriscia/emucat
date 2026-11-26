@@ -1,4 +1,5 @@
 import { adminVmRoute, vmPathParamsSchema, type VmIdentity } from '@emucat/contracts';
+import { HardDrive, History, Images, NotebookPen, Settings, type LucideIcon } from 'lucide-react';
 import { matchPath, useParams } from 'react-router';
 
 /**
@@ -14,6 +15,8 @@ export interface NavItem {
   to: string;
   /** Active only on exactly this path, not on the paths below it. */
   end?: boolean;
+  /** Drawn before the label, never instead of it. */
+  icon?: LucideIcon;
 }
 
 /** The header's global areas. */
@@ -64,11 +67,11 @@ export function vmSectionRoute(vm: VmIdentity, section: VmSection): string {
 /** A VM's management sidebar: exactly these destinations, in this order. */
 export function vmManageNavItems(vm: VmIdentity): NavItem[] {
   return [
-    { label: 'General', to: vmSectionRoute(vm, 'general'), end: true },
-    { label: 'Version History', to: vmSectionRoute(vm, 'versions') },
-    { label: 'Local copies and restore', to: vmSectionRoute(vm, 'copies') },
-    { label: 'Notes', to: vmSectionRoute(vm, 'notes') },
-    { label: 'Screenshots', to: vmSectionRoute(vm, 'screenshots') },
+    { label: 'General', to: vmSectionRoute(vm, 'general'), end: true, icon: Settings },
+    { label: 'Version History', to: vmSectionRoute(vm, 'versions'), icon: History },
+    { label: 'Local copies and restore', to: vmSectionRoute(vm, 'copies'), icon: HardDrive },
+    { label: 'Notes', to: vmSectionRoute(vm, 'notes'), icon: NotebookPen },
+    { label: 'Screenshots', to: vmSectionRoute(vm, 'screenshots'), icon: Images },
   ];
 }
 

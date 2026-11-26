@@ -4,7 +4,15 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/coverage/**', 'agent/target/**', 'var/**'] },
+  {
+    ignores: [
+      '**/dist/**',
+      'apps/web/e2e/dist-app/**',
+      '**/coverage/**',
+      'agent/target/**',
+      'var/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
