@@ -639,10 +639,16 @@ export class ArchiveInspection {
     } catch (error) {
       if (signal.aborted) throw error;
       if (error instanceof ApiError) throw error;
-      if (error instanceof ArchiveCheckError) {
-        throw problem(422, error.kind === 'limit' ? 'archive_too_large' : 'archive_malformed');
-      }
-      if (error instanceof ZipFormatError || error instanceof TarFormatError) {
+      if (
+        error instanceof ArchiveCheckError ||
+        error instanceof ZipFormatError ||
+        error instanceof TarFormatError
+      ) {
+        // The response names only the class of problem; the log keeps the reader's reason, for diagnosis.
+        this.log.warn(
+          { versionId: record.versionId, format, reason: error.message },
+          'Archive refused',
+        );
         throw problem(422, error.kind === 'limit' ? 'archive_too_large' : 'archive_malformed');
       }
       throw repositoryProblem(error);

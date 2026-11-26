@@ -118,7 +118,7 @@ export function vmZip(emulatorType: string, vmName: string, files: Record<string
   return { zip, manifestSha256: sha256(bytes), manifestBytes: bytes };
 }
 
-function tarHeader(name: string, size: number, type = '0'): Buffer {
+export function tarHeader(name: string, size: number, type = '0'): Buffer {
   const header = Buffer.alloc(512);
   header.write(name, 0, 100, 'utf8');
   header.write('0000644\0', 100);

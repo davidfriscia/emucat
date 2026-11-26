@@ -40,7 +40,8 @@ When the server indexes an archive it keeps, for every file, a compact **locator
 - ZIP and ZIP64: the stored name, local header offset, compressed and uncompressed sizes, method, CRC-32, flags, and
   the offset of the central directory (no entry's data may reach it).
 - TAR (OVA): the data offset and size of a regular file. Links, devices, directories and anything but regular files
-  are refused when the archive is indexed, as an agent's restore refuses them.
+  are refused when the archive is indexed, as an agent's restore refuses them. How the archive may end, with or
+  without an end marker, is the agent's import policy ([0057](0057-ova-tar-compatibility.md)).
 
 Locators never leave the server. A request names a version, a view and a path **exactly** as a listing returned it;
 the path is looked up in the index (binary search, exact match, no normalization), never used as a file name, and

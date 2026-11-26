@@ -38,6 +38,7 @@ The file is checked by streaming (`agent/src/ova.rs`), never extracted, executed
   whole zero block, is refused as truncated or damaged. Completeness is decided by these exact boundaries, never by
   the file's size alone. It is only the archive's structure: whether the disk image inside is sound is not checked,
   and VirtualBox decides that when the master is imported.
+  The server reads OVAs by the same policy when it lists or clones one ([0057](0057-ova-tar-compatibility.md)).
 - Every entry must be a regular file at the top level with a safe name: no `..`, no absolute path, no drive, no
   control character, no link, no device, no directory, no duplicate (ignoring case). PAX and GNU long names are read,
   and checked like any other.
