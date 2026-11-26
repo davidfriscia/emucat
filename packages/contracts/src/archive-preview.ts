@@ -172,24 +172,24 @@ export function decodeText(bytes: Uint8Array, encoding: TextEncoding): string {
 }
 
 function validUtf8(bytes: Uint8Array): boolean {
-  try {
-    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    return true;
-  } catch {
-    // A preview may end inside a character: one cut sequence at the very end is allowed.
-    for (let back = 1; back <= 3 && back < bytes.length; back += 1) {
-      const lead = bytes[bytes.length - back] ?? 0;
-      if ((lead & 0xc0) === 0xc0) {
-        try {
-          new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, bytes.length - back));
-          return true;
-        } catch {
-          return false;
-        }
-      }
+  const strict = (slice: Uint8Array) => {
+    try {
+      new TextDecoder('utf-8', { fatal: true }).decode(slice);
+      return true;
+    } catch {
+      return false;
     }
-    return false;
+  };
+  if (strict(bytes)) return true;
+  // A preview may end inside a character: one incomplete sequence at the very end is allowed, and nothing else.
+  for (let back = 1; back <= 3 && back <= bytes.length; back += 1) {
+    const lead = bytes[bytes.length - back] ?? 0;
+    if ((lead & 0xc0) === 0x80) continue;
+    const needed =
+      (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : (lead & 0xf8) === 0xf0 ? 4 : 0;
+    return needed > back && strict(bytes.subarray(0, bytes.length - back));
   }
+  return false;
 }
 
 /** UTF-16 without a byte-order mark: ASCII-heavy text has a zero in every other byte. */
@@ -261,11 +261,26 @@ export function looksLikeText(bytes: Uint8Array): boolean {
   if (startsWith(bytes, [0xff, 0xfe]) || startsWith(bytes, [0xfe, 0xff])) return true;
   if (utf16Without(bytes)) return true;
   let controls = 0;
+  let ascii = 0;
+  const high = new Uint32Array(128);
   for (const byte of bytes) {
     if (byte === 0) return false;
     if ((byte < 0x20 && !TEXT_CONTROLS.has(byte)) || byte === 0x7f) controls += 1;
+    else if (byte < 0x80) ascii += 1;
+    else high[byte - 0x80] = (high[byte - 0x80] ?? 0) + 1;
   }
-  return controls <= bytes.length * 0.01;
+  if (controls > bytes.length * 0.01) return false;
+  if (validUtf8(bytes)) return true;
+  // Legacy single-byte text is still mostly ASCII, and is not one high byte over and over, as a ROM's 0xFF padding or
+  // an erased flash image is. DOS menus drawn with box characters stay well within both bounds.
+  // Box-drawing characters (CP437 0xB0–0xDF) repeat by nature, so they never count as padding.
+  const dominant = Math.max(
+    ...high.filter((_, index) => index + 0x80 < 0xb0 || index + 0x80 > 0xdf),
+  );
+  if (bytes.length >= 64 && dominant > bytes.length * 0.5) return false;
+  let boxes = 0;
+  for (let byte = 0xb0; byte <= 0xdf; byte += 1) boxes += high[byte - 0x80] ?? 0;
+  return ascii + boxes >= bytes.length * 0.3;
 }
 
 // --- Languages -------------------------------------------------------------------------------------------------

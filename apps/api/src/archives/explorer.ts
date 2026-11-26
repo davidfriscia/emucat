@@ -45,28 +45,71 @@ const formatBytes = (bytes: number) =>
     ? `${Math.round((bytes / 1024 / 1024) * 10) / 10} MiB`
     : `${Math.round(bytes / 1024)} KiB`;
 
-/** A fixed number of slots, taken or refused at once: work never queues up behind a slow repository. */
-class Slots {
+/**
+ * A fixed number of slots. A request that finds them all taken waits a little, in a short queue, since a person
+ * clicking through files produces bursts that end quickly; when the queue is full, or the wait is over, it is refused.
+ * A waiting request holds nothing but its place, and leaves the queue as soon as its browser goes away.
+ */
+export class Slots {
   private used = 0;
+  private readonly waiting: Array<() => void> = [];
 
   constructor(
     private readonly size: number,
     private readonly busyCode: string,
+    private readonly maxWaiting: number,
+    private readonly waitMs = 10_000,
   ) {}
 
   get inUse(): number {
     return this.used;
   }
 
-  take(): () => void {
-    if (this.used >= this.size) throw problem(503, this.busyCode);
-    this.used += 1;
+  get queued(): number {
+    return this.waiting.length;
+  }
+
+  /** A release that hands the slot straight to the next in the queue, so that nobody can take it in between. */
+  private releaser(): () => void {
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.used -= 1;
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.used -= 1;
     };
+  }
+
+  async take(signal?: AbortSignal): Promise<() => void> {
+    if (this.used < this.size && this.waiting.length === 0) {
+      this.used += 1;
+      return this.releaser();
+    }
+    if (this.waiting.length >= this.maxWaiting) throw problem(503, this.busyCode);
+    if (signal?.aborted) throw cancelledError();
+    await new Promise<void>((resolve, reject) => {
+      const turn = () => {
+        cleanup();
+        resolve();
+      };
+      const leave = (error: unknown) => {
+        const index = this.waiting.indexOf(turn);
+        if (index !== -1) this.waiting.splice(index, 1);
+        cleanup();
+        reject(error);
+      };
+      const timer = setTimeout(() => leave(problem(503, this.busyCode)), this.waitMs);
+      const onAbort = () => leave(cancelledError());
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiting.push(turn);
+    });
+    // The slot was handed over by its last holder, already counted.
+    return this.releaser();
   }
 }
 
@@ -136,8 +179,16 @@ export class ArchiveExplorer {
     private readonly log: FastifyBaseLogger,
     private readonly policy: ArchivePolicy = DEFAULT_ARCHIVE_POLICY,
   ) {
-    this.previews = new Slots(policy.preview.maxConcurrent, 'preview_busy');
-    this.downloads = new Slots(policy.download.maxConcurrent, 'download_busy');
+    this.previews = new Slots(
+      policy.preview.maxConcurrent,
+      'preview_busy',
+      policy.preview.maxQueued,
+    );
+    this.downloads = new Slots(
+      policy.download.maxConcurrent,
+      'download_busy',
+      policy.download.maxQueued,
+    );
   }
 
   get activity(): { previews: number; downloads: number } {
@@ -149,7 +200,7 @@ export class ArchiveExplorer {
     request: AbortSignal | undefined,
     work: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const release = this.previews.take();
+    const release = await this.previews.take(request);
     const { signal, dispose } = operationSignal(request, this.policy.preview.timeoutMs);
     try {
       return await work(signal);
@@ -322,7 +373,7 @@ export class ArchiveExplorer {
     request?: AbortSignal,
   ): Promise<Download> {
     const { download } = this.policy;
-    const release = this.downloads.take();
+    const release = await this.downloads.take(request);
     const { signal, abort, dispose } = operationSignal(request, download.timeoutMs);
     const finish = () => {
       dispose();

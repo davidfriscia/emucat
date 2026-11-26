@@ -166,9 +166,11 @@ const envSchema = z.object({
   ARCHIVE_PREVIEW_PDF_BYTES: intIn(64 * KiB, 512 * MiB, ARCHIVE.preview.pdfBytes),
   ARCHIVE_PREVIEW_SEEK_BYTES: intIn(0, GiB, ARCHIVE.preview.maxSeekBytes),
   ARCHIVE_PREVIEW_MAX_CONCURRENT: intIn(1, 16, ARCHIVE.preview.maxConcurrent),
+  ARCHIVE_PREVIEW_MAX_QUEUED: intIn(0, 64, ARCHIVE.preview.maxQueued),
   ARCHIVE_PREVIEW_TIMEOUT_SECONDS: intIn(5, 600, ARCHIVE.preview.timeoutMs / 1000),
   ARCHIVE_DOWNLOAD_MAX_BYTES: intIn(0, 64 * GiB, ARCHIVE.download.maxBytes),
   ARCHIVE_DOWNLOAD_MAX_CONCURRENT: intIn(1, 16, ARCHIVE.download.maxConcurrent),
+  ARCHIVE_DOWNLOAD_MAX_QUEUED: intIn(0, 64, ARCHIVE.download.maxQueued),
   ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS: intIn(10, 86_400, ARCHIVE.download.timeoutMs / 1000),
 });
 
@@ -316,11 +318,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         pdfBytes: values.ARCHIVE_PREVIEW_PDF_BYTES,
         maxSeekBytes: values.ARCHIVE_PREVIEW_SEEK_BYTES,
         maxConcurrent: values.ARCHIVE_PREVIEW_MAX_CONCURRENT,
+        maxQueued: values.ARCHIVE_PREVIEW_MAX_QUEUED,
         timeoutMs: values.ARCHIVE_PREVIEW_TIMEOUT_SECONDS * 1000,
       },
       download: {
         maxBytes: values.ARCHIVE_DOWNLOAD_MAX_BYTES,
         maxConcurrent: values.ARCHIVE_DOWNLOAD_MAX_CONCURRENT,
+        maxQueued: values.ARCHIVE_DOWNLOAD_MAX_QUEUED,
         timeoutMs: values.ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS * 1000,
       },
     },

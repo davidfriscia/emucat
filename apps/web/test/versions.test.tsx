@@ -1243,7 +1243,7 @@ describe('view archive contents', () => {
     return { view, path, q, entries, total: entries.length, nextOffset: null };
   };
 
-  it('summarizes the archive and browses it one directory at a time, read-only', async () => {
+  it('opens Archive Explorer, which browses the archive one directory at a time, read-only', async () => {
     const api = base({
       [`GET ${ARCHIVE}`]: summary(),
       [`GET ${ARCHIVE}/entries`]: listing,
@@ -1252,27 +1252,32 @@ describe('view archive contents', () => {
     fireEvent.click(
       within(tree).getAllByRole('button', { name: /View the archive contents of Master/ })[0]!,
     );
-    const dialog = await screen.findByRole('dialog', { name: 'Archive contents' });
-    expect(await within(dialog).findByText(`${MASTER}.zip`)).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'Archive Explorer' });
+    const files = within(await within(dialog).findByRole('tree', { name: 'Archive files' }));
+    expect(await files.findByRole('treeitem', { name: 'vm.cfg' })).toBeTruthy();
+    fireEvent.click(within(dialog).getByText('Archive details'));
+    expect(within(dialog).getByText(`${MASTER}.zip`)).toBeTruthy();
     expect(within(dialog).getByText(/complete archive/)).toBeTruthy();
     expect(within(dialog).getByText(/verified when this version was registered/)).toBeTruthy();
-    expect(await within(dialog).findByText('vm.cfg')).toBeTruthy();
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Open directory disks' }));
-    expect(await within(dialog).findByText('hdd0.img')).toBeTruthy();
-    const crumbs = within(within(dialog).getByRole('navigation', { name: 'Archive path' }));
-    expect(crumbs.getByText('disks').getAttribute('aria-current')).toBe('location');
+    fireEvent.click(files.getByRole('treeitem', { name: 'disks, directory' }));
+    expect(await files.findByRole('treeitem', { name: 'hdd0.img' })).toBeTruthy();
+    expect(
+      files.getByRole('treeitem', { name: 'disks, directory' }).getAttribute('aria-expanded'),
+    ).toBe('true');
     expect(api.calls.some((call) => call.query.get('path') === 'disks')).toBe(true);
 
     fireEvent.change(within(dialog).getByRole('searchbox', { name: 'Search paths' }), {
       target: { value: 'hdd' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Search' }));
-    expect(await within(dialog).findByText('disks/hdd0.img')).toBeTruthy();
+    const results = within(await within(dialog).findByRole('tree', { name: 'Search results' }));
+    expect(await results.findByRole('treeitem', { name: 'disks/hdd0.img' })).toBeTruthy();
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Stored entries' }));
-    expect(await within(dialog).findByText('.emucat-manifest.json')).toBeTruthy();
-    expect(within(dialog).getByText('deflated')).toBeTruthy();
+    expect(
+      await within(dialog).findByRole('treeitem', { name: '.emucat-manifest.json' }),
+    ).toBeTruthy();
     // Nothing but reads.
     expect(api.calls.every((call) => call.method === 'GET')).toBe(true);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
@@ -1287,7 +1292,7 @@ describe('view archive contents', () => {
     fireEvent.click(
       within(tree).getAllByRole('button', { name: /View the archive contents of Master/ })[0]!,
     );
-    const dialog = await screen.findByRole('dialog', { name: 'Archive contents' });
+    const dialog = await screen.findByRole('dialog', { name: 'Archive Explorer' });
     expect((await within(dialog).findByRole('alert')).textContent).toMatch(
       /no connection of its own/,
     );

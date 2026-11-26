@@ -244,4 +244,6 @@ export const ARCHIVE_INSPECTION_ERROR_TEXT: Record<string, string> = {
   image_invalid: 'The image is damaged or is not what its contents first suggested.',
   image_too_large: 'The image has more pixels than the server previews.',
   resource_limit: 'The server stopped: this would take more memory or time than it allows.',
+  download_incomplete:
+    'The download stopped before the whole file arrived, so it was not saved. It may have failed its checksum: try again, and verify this version if it fails again.',
 };

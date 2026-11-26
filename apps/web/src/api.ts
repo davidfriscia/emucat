@@ -1,7 +1,11 @@
 import {
+  ARCHIVE_PREVIEW_HEADERS,
+  archiveEntryDetailsSchema,
   archiveListingResponseSchema,
   archiveSummarySchema,
   serverConnectionTestSchema,
+  type ArchiveEntryDetails,
+  type ArchivePreviewKind,
   type ArchiveListingResponse,
   type ArchiveSummary,
   type ArchiveView,
@@ -731,6 +735,120 @@ export function fetchArchiveEntries(
     archiveListingResponseSchema,
     { signal },
   );
+}
+
+// Archive Explorer (decision 0056): one file, through the server. Bytes come back as bytes, never as a page.
+
+export interface ArchiveFileRef {
+  view: ArchiveView;
+  path: string;
+}
+
+const fileQuery = (file: ArchiveFileRef, extra: Record<string, string> = {}) =>
+  new URLSearchParams({ view: file.view, path: file.path, ...extra }).toString();
+
+export function fetchArchiveEntry(
+  vm: VmIdentity,
+  versionId: string,
+  file: ArchiveFileRef,
+  signal?: AbortSignal,
+): Promise<ArchiveEntryDetails> {
+  return requestJson(
+    `${archivePath(vm, versionId)}/entry?${fileQuery(file)}`,
+    archiveEntryDetailsSchema,
+    { signal },
+  );
+}
+
+export interface ArchivePreviewBytes {
+  bytes: Uint8Array;
+  contentType: string;
+  offset: number;
+  totalBytes: number;
+  truncated: boolean;
+  integrity: 'verified' | 'complete' | 'partial';
+  image: { format: string; width: number; height: number; converted: boolean } | null;
+}
+
+export async function fetchArchivePreview(
+  vm: VmIdentity,
+  versionId: string,
+  file: ArchiveFileRef,
+  kind: ArchivePreviewKind,
+  options: { offset?: number; signal?: AbortSignal } = {},
+): Promise<ArchivePreviewBytes> {
+  const extra: Record<string, string> = { kind };
+  if (options.offset) extra.offset = String(options.offset);
+  const response = await send(
+    `${archivePath(vm, versionId)}/entry/preview?${fileQuery(file, extra)}`,
+    {
+      signal: options.signal,
+    },
+  );
+  const header = (name: string) => response.headers.get(name);
+  const number = (name: string) => Number(header(name) ?? 0);
+  const integrity = header(ARCHIVE_PREVIEW_HEADERS.integrity);
+  const format = header(ARCHIVE_PREVIEW_HEADERS.format);
+  return {
+    bytes: new Uint8Array(await response.arrayBuffer()),
+    contentType: header('content-type') ?? 'application/octet-stream',
+    offset: number(ARCHIVE_PREVIEW_HEADERS.offset),
+    totalBytes: number(ARCHIVE_PREVIEW_HEADERS.total),
+    truncated: header(ARCHIVE_PREVIEW_HEADERS.truncated) === 'true',
+    integrity: integrity === 'verified' || integrity === 'complete' ? integrity : 'partial',
+    image: format
+      ? {
+          format,
+          width: number(ARCHIVE_PREVIEW_HEADERS.width),
+          height: number(ARCHIVE_PREVIEW_HEADERS.height),
+          converted: header(ARCHIVE_PREVIEW_HEADERS.converted) === 'true',
+        }
+      : null,
+  };
+}
+
+/**
+ * One file, as a Blob, read to its end. The server holds back the file's last bytes until it has verified the whole
+ * file, so a download that fails its check ends early, and this rejects instead of returning a partial file.
+ */
+export async function downloadArchiveFile(
+  vm: VmIdentity,
+  versionId: string,
+  file: ArchiveFileRef,
+  options: { signal?: AbortSignal; onProgress?: (received: number, total: number) => void } = {},
+): Promise<Blob> {
+  const response = await send(`${archivePath(vm, versionId)}/entry/download?${fileQuery(file)}`, {
+    signal: options.signal,
+  });
+  const total = Number(response.headers.get('content-length') ?? 0);
+  const reader = response.body?.getReader();
+  if (!reader) return response.blob();
+  const parts: Uint8Array[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      received += value.length;
+      options.onProgress?.(received, total);
+    }
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    throw new ApiRequestError(
+      0,
+      'download_incomplete',
+      'The download stopped before the whole file arrived.',
+    );
+  }
+  if (total > 0 && received !== total) {
+    throw new ApiRequestError(
+      0,
+      'download_incomplete',
+      'The download stopped before the whole file arrived.',
+    );
+  }
+  return new Blob(parts as BlobPart[], { type: 'application/octet-stream' });
 }
 
 // Restores

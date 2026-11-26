@@ -900,15 +900,291 @@ main.container:has(> .page-wide) {
     flex: 1 1 100%;
   }
 }
-.archive-dialog {
-  max-width: 56rem;
+/*
+ * Archive Explorer (decision 0056): a large dialog with a file tree beside the selected file. From 768 px the two
+ * panels sit side by side with a draggable splitter; narrower, one panel is shown at a time.
+ */
+.archive-explorer {
   width: 100%;
-  max-height: calc(100vh - 2rem);
-  overflow-y: auto;
+  max-width: 96rem;
 }
-.archive-listing {
-  max-height: 50vh;
-  overflow-y: auto;
+.min-w-0 {
+  min-width: 0;
+}
+.archive-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+}
+/* Narrow: the dialog scrolls as a whole, so the panel shown gets the full height. */
+.archive-pane {
+  min-width: 0;
+  padding: 0.5rem;
+}
+.archive-splitter {
+  display: none;
+}
+.archive-split[data-pane='file'] .archive-tree-pane,
+.archive-split[data-pane='tree'] .archive-file-pane {
+  display: none;
+}
+@media (min-width: 768px) {
+  /* Wide: a fixed-height dialog, and each panel scrolls on its own. */
+  .archive-explorer {
+    height: calc(100vh - 2rem);
+    height: calc(100dvh - 2rem);
+  }
+  .archive-explorer-body {
+    min-height: 0;
+    overflow: hidden;
+  }
+  .archive-split {
+    grid-template-columns: var(--archive-tree-width, 320px) 6px minmax(0, 1fr);
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .archive-pane {
+    min-height: 0;
+    overflow: auto;
+  }
+  .archive-split[data-pane] .archive-tree-pane,
+  .archive-split[data-pane] .archive-file-pane {
+    display: block;
+  }
+  .archive-splitter {
+    display: block;
+    cursor: col-resize;
+    background: var(--bs-border-color-translucent);
+    touch-action: none;
+  }
+  .archive-splitter:hover,
+  .archive-splitter:focus-visible {
+    background: var(--bs-primary);
+    outline: none;
+  }
+}
+.archive-tree {
+  font-size: 0.875rem;
+}
+.archive-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding-block: 0.125rem;
+  padding-inline-end: 0.25rem;
+  border-radius: var(--bs-border-radius-sm);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.archive-tree-row:hover {
+  background: var(--bs-tertiary-bg);
+}
+.archive-tree-row:focus-visible {
+  outline: 2px solid var(--bs-primary);
+  outline-offset: -2px;
+}
+.archive-tree-selected,
+.archive-tree-selected:hover {
+  background: var(--bs-primary-bg-subtle);
+  color: var(--bs-primary-text-emphasis);
+}
+.archive-tree-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.archive-tree-size {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+.archive-twisty {
+  display: inline-block;
+  width: 0.9rem;
+  flex: 0 0 auto;
+  text-align: center;
+}
+.archive-icon {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+}
+.archive-tree-more {
+  color: var(--bs-link-color);
+}
+.archive-tree-status {
+  padding-block: 0.125rem;
+}
+.archive-facts dd code {
+  word-break: break-all;
+}
+.archive-toolbar {
+  margin-bottom: 0.5rem;
+}
+.archive-text,
+.archive-hex {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  padding: 0.5rem;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-body-color);
+  border-radius: var(--bs-border-radius);
+  white-space: pre;
+  tab-size: 8;
+}
+.archive-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.archive-hex {
+  font-variant-ligatures: none;
+}
+.archive-offset {
+  width: 10rem;
+}
+.archive-page {
+  width: 4rem;
+}
+.archive-image {
+  max-height: 65vh;
+  overflow: auto;
+  background: repeating-conic-gradient(var(--bs-tertiary-bg) 0% 25%, transparent 0% 50%) 50% / 16px
+    16px;
+  border-radius: var(--bs-border-radius);
+  padding: 0.5rem;
+}
+.archive-image-fit img {
+  max-width: 100%;
+  max-height: calc(65vh - 1rem);
+  object-fit: contain;
+}
+.archive-pixelated {
+  image-rendering: pixelated;
+}
+.archive-pdf {
+  max-height: 70vh;
+  overflow: auto;
+  background: var(--bs-tertiary-bg);
+  border-radius: var(--bs-border-radius);
+  padding: 0.5rem;
+  text-align: center;
+}
+.archive-pdf canvas {
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 30%);
+}
+.archive-markdown {
+  max-height: 65vh;
+  overflow: auto;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius);
+}
+.archive-markdown table {
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+}
+.archive-markdown th,
+.archive-markdown td {
+  border: 1px solid var(--bs-border-color);
+  padding: 0.25rem 0.5rem;
+}
+.archive-markdown pre {
+  background: var(--bs-tertiary-bg);
+  padding: 0.5rem;
+  border-radius: var(--bs-border-radius);
+}
+.archive-markdown blockquote {
+  border-inline-start: 3px solid var(--bs-border-color);
+  padding-inline-start: 0.75rem;
+  color: var(--bs-secondary-color);
+}
+.archive-inert-link {
+  text-decoration: underline dotted;
+  cursor: help;
+}
+.archive-blocked-image {
+  color: var(--bs-secondary-color);
+  font-style: italic;
+}
+
+/* Syntax highlighting (highlight.js classes), in the application's colours for both themes. */
+.archive-text .hljs-comment,
+.archive-text .hljs-quote {
+  color: #6a737d;
+  font-style: italic;
+}
+.archive-text .hljs-keyword,
+.archive-text .hljs-selector-tag,
+.archive-text .hljs-built_in,
+.archive-text .hljs-section {
+  color: #a626a4;
+}
+.archive-text .hljs-string,
+.archive-text .hljs-regexp,
+.archive-text .hljs-addition {
+  color: #22863a;
+}
+.archive-text .hljs-number,
+.archive-text .hljs-literal,
+.archive-text .hljs-symbol {
+  color: #b35900;
+}
+.archive-text .hljs-attr,
+.archive-text .hljs-attribute,
+.archive-text .hljs-variable,
+.archive-text .hljs-template-variable,
+.archive-text .hljs-property {
+  color: #005cc5;
+}
+.archive-text .hljs-title,
+.archive-text .hljs-name,
+.archive-text .hljs-tag,
+.archive-text .hljs-type {
+  color: #b31d28;
+}
+.archive-text .hljs-meta,
+.archive-text .hljs-deletion {
+  color: #6f42c1;
+}
+[data-bs-theme='dark'] .archive-text .hljs-comment,
+[data-bs-theme='dark'] .archive-text .hljs-quote {
+  color: #8b949e;
+}
+[data-bs-theme='dark'] .archive-text .hljs-keyword,
+[data-bs-theme='dark'] .archive-text .hljs-selector-tag,
+[data-bs-theme='dark'] .archive-text .hljs-built_in,
+[data-bs-theme='dark'] .archive-text .hljs-section {
+  color: #d2a8ff;
+}
+[data-bs-theme='dark'] .archive-text .hljs-string,
+[data-bs-theme='dark'] .archive-text .hljs-regexp,
+[data-bs-theme='dark'] .archive-text .hljs-addition {
+  color: #7ee787;
+}
+[data-bs-theme='dark'] .archive-text .hljs-number,
+[data-bs-theme='dark'] .archive-text .hljs-literal,
+[data-bs-theme='dark'] .archive-text .hljs-symbol {
+  color: #ffa657;
+}
+[data-bs-theme='dark'] .archive-text .hljs-attr,
+[data-bs-theme='dark'] .archive-text .hljs-attribute,
+[data-bs-theme='dark'] .archive-text .hljs-variable,
+[data-bs-theme='dark'] .archive-text .hljs-template-variable,
+[data-bs-theme='dark'] .archive-text .hljs-property {
+  color: #79c0ff;
+}
+[data-bs-theme='dark'] .archive-text .hljs-title,
+[data-bs-theme='dark'] .archive-text .hljs-name,
+[data-bs-theme='dark'] .archive-text .hljs-tag,
+[data-bs-theme='dark'] .archive-text .hljs-type {
+  color: #ff7b72;
+}
+[data-bs-theme='dark'] .archive-text .hljs-meta,
+[data-bs-theme='dark'] .archive-text .hljs-deletion {
+  color: #bc8cff;
 }
 .clone-dialog {
   max-width: 36rem;

@@ -32,11 +32,14 @@ export interface ArchivePolicy {
     /** How far into a deflated entry a hex preview may start: everything before it has to be inflated. */
     maxSeekBytes: number;
     maxConcurrent: number;
+    /** Requests that may wait, up to 10 seconds, for a slot; beyond that they are refused at once. */
+    maxQueued: number;
     timeoutMs: number;
   };
   download: {
     maxBytes: number;
     maxConcurrent: number;
+    maxQueued: number;
     timeoutMs: number;
   };
 }
@@ -60,7 +63,8 @@ export const DEFAULT_ARCHIVE_POLICY: ArchivePolicy = {
     pdfBytes: 25 * MiB,
     maxSeekBytes: 16 * MiB,
     maxConcurrent: 2,
+    maxQueued: 8,
     timeoutMs: 60_000,
   },
-  download: { maxBytes: 100 * MiB, maxConcurrent: 2, timeoutMs: 1_800_000 },
+  download: { maxBytes: 100 * MiB, maxConcurrent: 2, maxQueued: 2, timeoutMs: 1_800_000 },
 };

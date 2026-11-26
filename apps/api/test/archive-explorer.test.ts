@@ -18,6 +18,7 @@ import {
 import type { FastifyBaseLogger } from 'fastify';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it } from 'vitest';
+import { Slots } from '../src/archives/explorer.js';
 import { ArchiveInspection } from '../src/archives/inspection.js';
 import { DEFAULT_ARCHIVE_POLICY, type ArchivePolicy } from '../src/archives/policy.js';
 import { contentDisposition } from '../src/routes/admin-archives.js';
@@ -755,7 +756,9 @@ describe('Archive Explorer: resources', () => {
 
   it('refuses previews beyond its concurrency, and stops at its deadline, releasing the connection', async () => {
     const w = await serverWorld({
-      overrides: { archives: policy({ preview: { maxConcurrent: 1, timeoutMs: 400 } }) },
+      overrides: {
+        archives: policy({ preview: { maxConcurrent: 1, maxQueued: 0, timeoutMs: 400 } }),
+      },
     });
     const { base } = await explorerVersion(
       w,
@@ -918,5 +921,32 @@ describe('Archive index cache', () => {
     await expect(slow).rejects.toMatchObject({ code: 'archive_timeout' });
     w.sftp.readDelayMs = 0;
     await released(w);
+  });
+});
+
+describe('Preview and download slots', () => {
+  it('queue a short burst, refuse beyond the queue, and leave the queue when cancelled', async () => {
+    const slots = new Slots(1, 'preview_busy', 2, 200);
+    const first = await slots.take();
+    const order: string[] = [];
+    const second = slots.take().then((release) => {
+      order.push('second');
+      return release;
+    });
+    const leaving = new AbortController();
+    const third = slots.take(leaving.signal);
+    await expect(slots.take()).rejects.toMatchObject({ code: 'preview_busy' });
+    leaving.abort();
+    await expect(third).rejects.toMatchObject({ code: 'request_cancelled' });
+    expect(slots.queued).toBe(1);
+    first();
+    const releaseSecond = await second;
+    expect(order).toEqual(['second']);
+    // The slot was handed over: never more holders than slots.
+    expect(slots.inUse).toBe(1);
+    const late = slots.take();
+    await expect(late).rejects.toMatchObject({ code: 'preview_busy' });
+    releaseSecond();
+    expect(slots.inUse).toBe(0);
   });
 });

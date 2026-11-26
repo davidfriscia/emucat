@@ -23,7 +23,7 @@ import {
 import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
 import { DeleteSnapshotDialog, deletionReasonText } from './Cleanup';
-import { ArchiveContentsDialog } from './ArchiveContents';
+import { ArchiveExplorerDialog } from './ArchiveExplorer';
 import { CloneProgress, CloneVmDialog } from './Clone';
 import { ConfirmDialog } from './Dialogs';
 import { VmLaunchDialog, WORKSPACE_STATE_TEXT, type RunPreselection } from './Execution';
@@ -974,7 +974,7 @@ function VersionHistory({
         />
       ) : null}
       {viewing ? (
-        <ArchiveContentsDialog vm={identity} node={viewing} onClose={() => setViewing(null)} />
+        <ArchiveExplorerDialog vm={identity} node={viewing} onClose={() => setViewing(null)} />
       ) : null}
       {cloning ? (
         <CloneVmDialog

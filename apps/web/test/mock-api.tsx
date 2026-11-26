@@ -58,6 +58,8 @@ export function mockApi(routes: Record<string, Handler> = {}, { defaults = true 
     if (!(key in table)) throw new TypeError('Failed to fetch');
     const handler = table[key];
     const result = await (typeof handler === 'function' ? handler(call) : handler);
+    // A test that needs bytes or particular headers answers with a Response of its own.
+    if (result instanceof Response) return result;
     if (result instanceof Reply) {
       return new Response(result.status === 204 ? null : JSON.stringify(result.body), {
         status: result.status,
