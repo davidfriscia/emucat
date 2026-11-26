@@ -25,6 +25,7 @@ import { contentDisposition } from '../src/routes/admin-archives.js';
 import { ADMIN_PASSWORD, insertVm, TestClient } from './browser-app.js';
 import { closeServers, serverWorld, type ServerWorld } from './server-world.js';
 import { closeWorlds } from './version-world.js';
+import { redirectTemporaryDirectory } from './platform.js';
 import { buildTar, buildZip, manifestFor, sha256 } from './zip-builder.js';
 
 afterEach(async () => {
@@ -713,29 +714,32 @@ describe('Archive Explorer: resources', () => {
       { stored: ['disks/hdd0.img'] },
     );
     // This worker's temporary directory, empty, for the duration: whatever the server wrote would land in it.
+    // TMPDIR on POSIX, TEMP and TMP on Windows: see platform.ts.
     const scratch = mkdtempSync(join(tmpdir(), 'emucat-explorer-'));
-    const previous = process.env.TMPDIR;
-    process.env.TMPDIR = scratch;
-    expect(tmpdir()).toBe(scratch);
+    const restoreTemporary = redirectTemporaryDirectory(scratch);
     const staging = readdirSync(w.sftp.directory).sort();
-
-    w.sftp.resetStats();
-    expect((await w.admin.get(base)).statusCode).toBe(200);
-    const listing = w.sftp.stats.bytesRead;
-    w.sftp.resetStats();
-    expect(
-      (await w.admin.get(`${base}/entry/preview?${q('vm.cfg', { kind: 'text' })}`)).statusCode,
-    ).toBe(200);
-    const preview = w.sftp.stats.bytesRead;
-    w.sftp.resetStats();
-    expect((await w.admin.get(`${base}/entry/download?${q('vm.cfg')}`)).statusCode).toBe(200);
-    const download = w.sftp.stats.bytesRead;
-    w.sftp.resetStats();
-    expect(
-      (await w.admin.get(`${base}/entry/preview?${q('disks/hdd0.img', { kind: 'hex' })}`))
-        .statusCode,
-    ).toBe(200);
-    const hex = w.sftp.stats.bytesRead;
+    let listing: number, preview: number, download: number, hex: number;
+    try {
+      w.sftp.resetStats();
+      expect((await w.admin.get(base)).statusCode).toBe(200);
+      listing = w.sftp.stats.bytesRead;
+      w.sftp.resetStats();
+      expect(
+        (await w.admin.get(`${base}/entry/preview?${q('vm.cfg', { kind: 'text' })}`)).statusCode,
+      ).toBe(200);
+      preview = w.sftp.stats.bytesRead;
+      w.sftp.resetStats();
+      expect((await w.admin.get(`${base}/entry/download?${q('vm.cfg')}`)).statusCode).toBe(200);
+      download = w.sftp.stats.bytesRead;
+      w.sftp.resetStats();
+      expect(
+        (await w.admin.get(`${base}/entry/preview?${q('disks/hdd0.img', { kind: 'hex' })}`))
+          .statusCode,
+      ).toBe(200);
+      hex = w.sftp.stats.bytesRead;
+    } finally {
+      restoreTemporary();
+    }
 
     // Measured byte counts, reported by the implementation report.
     console.info(
@@ -746,8 +750,6 @@ describe('Archive Explorer: resources', () => {
     expect(preview).toBeLessThan(1024);
     expect(download).toBeLessThan(1024);
     expect(hex).toBeLessThan(65 * 1024 + 4 * 1024);
-    process.env.TMPDIR = previous;
-    if (previous === undefined) delete process.env.TMPDIR;
     expect(readdirSync(scratch)).toEqual([]);
     rmSync(scratch, { recursive: true });
     expect(readdirSync(w.sftp.directory).sort()).toEqual(staging);
@@ -853,7 +855,7 @@ describe('Archive index cache', () => {
       policy({ cache: { maxBytes: 100 } }),
     );
     expect((await tiny.summary(vm, one.id)).manifest?.fileCount).toBe(1);
-    expect(tiny.stats()).toEqual({ indexes: 0, estimatedBytes: 0, loading: 0 });
+    expect(tiny.stats()).toEqual({ indexes: 0, estimatedBytes: 0, loading: 0, waiting: 0 });
 
     const expiring = new ArchiveInspection(
       w.context.pool,
@@ -867,6 +869,9 @@ describe('Archive index cache', () => {
     expect(w.sftp.stats.bytesRead).toBeGreaterThan(0);
   });
 
+  // Cancellation (R2). Every step waits on a state, never on time: the SFTP server holds READ answers until the test
+  // releases them, and stats() says how many requests wait on a load.
+
   it('shares one load between requests, which can each give up without stopping the others (R2)', async () => {
     const w = await serverWorld();
     const { id } = await explorerVersion(w, await fixtures());
@@ -876,32 +881,99 @@ describe('Archive index cache', () => {
       silent,
       DEFAULT_ARCHIVE_POLICY,
     );
-    w.sftp.readDelayMs = 40;
+    const release = w.sftp.holdReads();
     const leaving = new AbortController();
     const staying = new AbortController();
     const first = inspection.summary(vm, id, leaving.signal);
     const second = inspection.summary(vm, id, staying.signal);
-    await until(() => inspection.stats().loading === 1);
+    // Both have joined the one load, and it is waiting on the repository.
+    await until(() => inspection.stats().waiting === 2 && w.sftp.heldReads() > 0);
+    expect(inspection.stats().loading).toBe(1);
     leaving.abort();
     await expect(first).rejects.toMatchObject({ code: 'request_cancelled' });
+    expect(inspection.stats()).toMatchObject({ loading: 1, waiting: 1 });
+    release();
     expect((await second).manifest?.fileCount).toBeGreaterThan(0);
+    // A completed load is cached, and cancelling after completion changes nothing.
+    expect(inspection.stats()).toMatchObject({ indexes: 1, loading: 0, waiting: 0 });
+    staying.abort();
     expect(inspection.stats().indexes).toBe(1);
-
-    // When every requester has gone, the load itself stops and its connection closes.
-    inspection.evict(id);
-    w.sftp.resetStats();
-    const a = new AbortController();
-    const b = new AbortController();
-    const pending = [inspection.summary(vm, id, a.signal), inspection.summary(vm, id, b.signal)];
-    await until(() => inspection.stats().loading === 1 && w.sftp.stats.reads.length > 0);
-    a.abort();
-    b.abort();
-    for (const request of pending)
-      await expect(request).rejects.toMatchObject({ code: 'request_cancelled' });
-    w.sftp.readDelayMs = 0;
+    expect((await inspection.summary(vm, id)).manifest?.fileCount).toBeGreaterThan(0);
     await released(w);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(inspection.stats()).toMatchObject({ indexes: 0, loading: 0 });
+  });
+
+  it('stops a load when every requester has gone, at any read, and caches nothing (R2)', async () => {
+    const w = await serverWorld();
+    const { id } = await explorerVersion(w, await fixtures());
+    const inspection = new ArchiveInspection(
+      w.context.pool,
+      w.access,
+      silent,
+      DEFAULT_ARCHIVE_POLICY,
+    );
+    // How many reads a whole load takes: the first ones find the directory, the last ones read the manifest that
+    // the index is built from.
+    w.sftp.resetStats();
+    await inspection.summary(vm, id);
+    const reads = w.sftp.stats.reads.length;
+    expect(reads).toBeGreaterThan(1);
+    for (const after of [0, Math.floor(reads / 2), reads - 1]) {
+      inspection.evict(id);
+      await released(w);
+      w.sftp.resetStats();
+      const release = w.sftp.holdReads(after);
+      const a = new AbortController();
+      const b = new AbortController();
+      const pending = [inspection.summary(vm, id, a.signal), inspection.summary(vm, id, b.signal)];
+      await until(() => inspection.stats().waiting === 2 && w.sftp.heldReads() > 0);
+      a.abort();
+      b.abort();
+      const settled = await Promise.allSettled(pending);
+      for (const result of settled) {
+        expect(result, `held after ${after} reads`).toMatchObject({
+          status: 'rejected',
+          reason: { code: 'request_cancelled' },
+        });
+      }
+      // The load stops by itself, with its answer still held: cancellation does not wait for the repository.
+      await until(() => inspection.stats().loading === 0);
+      release();
+      await released(w);
+      expect(inspection.stats(), `held after ${after} reads`).toMatchObject({
+        indexes: 0,
+        loading: 0,
+        waiting: 0,
+      });
+    }
+  });
+
+  it('starts no load for a request cancelled before it reaches the repository (R2)', async () => {
+    const w = await serverWorld();
+    const { id } = await explorerVersion(w, await fixtures());
+    const inspection = new ArchiveInspection(
+      w.context.pool,
+      w.access,
+      silent,
+      DEFAULT_ARCHIVE_POLICY,
+    );
+    w.sftp.resetStats();
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(inspection.summary(vm, id, aborted.signal)).rejects.toMatchObject({
+      code: 'request_cancelled',
+    });
+    // Cancelled while its version record is read from the database: summary() has not reached the repository yet
+    // when it returns, so the abort below lands in that window. No load may start for nobody.
+    const late = new AbortController();
+    const request = inspection.summary(vm, id, late.signal);
+    late.abort();
+    await expect(request).rejects.toMatchObject({ code: 'request_cancelled' });
+    expect(inspection.stats()).toMatchObject({ indexes: 0, loading: 0, waiting: 0 });
+    expect(w.sftp.stats.reads).toEqual([]);
+    expect(w.sftp.openConnections()).toBe(0);
+    // And the version is still listed normally afterwards.
+    expect((await inspection.summary(vm, id)).manifest?.fileCount).toBeGreaterThan(0);
+    await released(w);
   });
 
   it('refuses more concurrent loads than allowed, and stops a load at its deadline', async () => {

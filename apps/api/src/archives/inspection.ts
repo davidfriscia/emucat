@@ -280,6 +280,8 @@ export interface CacheStats {
   indexes: number;
   estimatedBytes: number;
   loading: number;
+  /** Requests waiting on those loads. */
+  waiting: number;
 }
 
 export class ArchiveInspection {
@@ -300,6 +302,7 @@ export class ArchiveInspection {
       indexes: this.cache.size,
       estimatedBytes: this.cachedBytes,
       loading: this.loading.size,
+      waiting: [...this.loading.values()].reduce((sum, load) => sum + load.activeWaiters, 0),
     };
   }
 
@@ -475,6 +478,9 @@ export class ArchiveInspection {
   ): Promise<Inspected> {
     if (signal?.aborted) throw cancelledError();
     const record = await this.record(vm, versionId);
+    // Cancelled while the record was read: start and join nothing. Otherwise a load would start with nobody to
+    // wait for it, which nothing could ever abort, and it would read the archive for no one.
+    if (signal?.aborted) throw cancelledError();
     const cached = this.cache.get(versionId);
     if (cached) {
       if (

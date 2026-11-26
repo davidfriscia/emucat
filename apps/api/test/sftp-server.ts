@@ -76,6 +76,13 @@ export interface TestSftpServer {
   openConnections(): number;
   /** Delays every READ answer, to test deadlines and cancellation. */
   readDelayMs: number;
+  /**
+   * Holds every READ answer after the first `after` until the returned function is called, so that a test can act
+   * while a client is known to be waiting on the repository, without guessing at timing. Reads are still counted when
+   * they arrive; `heldReads()` says how many answers are held now.
+   */
+  holdReads(after?: number): () => void;
+  heldReads(): number;
   close(): Promise<void>;
 }
 
@@ -118,6 +125,7 @@ export async function startSftpServer(): Promise<TestSftpServer> {
   };
 
   const state = { hardlinks: true, readDelayMs: 0 };
+  let hold: { after: number; seen: number; held: Array<() => void> } | null = null;
   const stats = { bytesRead: 0, reads: [] as Array<[number, number]> };
   let handleCount = 0;
   const server = new Server({ hostKeys: [host.private] }, (connection) => {
@@ -227,7 +235,8 @@ export async function startSftpServer(): Promise<TestSftpServer> {
                 // The client went away meanwhile.
               }
             };
-            if (state.readDelayMs > 0) setTimeout(answer, state.readDelayMs);
+            if (hold && hold.seen++ >= hold.after) hold.held.push(answer);
+            else if (state.readDelayMs > 0) setTimeout(answer, state.readDelayMs);
             else answer();
           });
           sftp.on('WRITE', (reqid, handle, offset, data) => {
@@ -333,6 +342,15 @@ export async function startSftpServer(): Promise<TestSftpServer> {
       stats.bytesRead = 0;
       stats.reads = [];
     },
+    holdReads(after = 0) {
+      const current = { after, seen: 0, held: [] as Array<() => void> };
+      hold = current;
+      return () => {
+        if (hold === current) hold = null;
+        for (const answer of current.held.splice(0)) answer();
+      };
+    },
+    heldReads: () => hold?.held.length ?? 0,
     openHandles: () => handleCount,
     openConnections: () => connections.size,
     get readDelayMs() {

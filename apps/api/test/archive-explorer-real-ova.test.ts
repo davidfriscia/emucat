@@ -27,6 +27,7 @@ import { DEFAULT_ARCHIVE_POLICY } from '../src/archives/policy.js';
 import { insertVm } from './browser-app.js';
 import { closeServers, serverWorld } from './server-world.js';
 import { closeWorlds, errorCode } from './version-world.js';
+import { redirectTemporaryDirectory } from './platform.js';
 
 afterEach(async () => {
   await closeWorlds();
@@ -84,9 +85,7 @@ describe.skipIf(!fixture || !existsSync(fixture))('Archive Explorer: a real OVA'
     const base = `/admin/vms/virtualbox/${vm.vmName}/versions/${id}/archive`;
 
     const scratch = mkdtempSync(join(tmpdir(), 'emucat-real-ova-'));
-    const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
-    Object.assign(process.env, { TMPDIR: scratch, TEMP: scratch, TMP: scratch });
-    expect(tmpdir()).toBe(scratch);
+    const restoreTemporary = redirectTemporaryDirectory(scratch);
     const repository = readdirSync(dirname(object)).sort();
     const measured: Record<string, number> = { archiveBytes: before.size };
     const step = async <T>(name: string, run: () => Promise<T>): Promise<T> => {
@@ -189,9 +188,7 @@ describe.skipIf(!fixture || !existsSync(fixture))('Archive Explorer: a real OVA'
         JSON.stringify({ entries: entries.map((e) => [e.name, e.sizeBytes]), ...measured }),
       );
     } finally {
-      Object.assign(process.env, saved);
-      for (const [name, value] of Object.entries(saved))
-        if (value === undefined) delete process.env[name];
+      restoreTemporary();
     }
     expect(readdirSync(scratch)).toEqual([]);
     rmSync(scratch, { recursive: true });

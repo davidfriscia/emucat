@@ -15,6 +15,7 @@ import {
   TestClient,
   type BrowserTestContext,
 } from './browser-app.js';
+import { expectFileMode, fileLinksRefusable, linkDirectory } from './platform.js';
 
 let context: BrowserTestContext;
 let admin: TestClient;
@@ -88,7 +89,7 @@ describe('VM notes', () => {
     expect(await readdir(join(notesRoot, '86box', 'Windows 95'))).toEqual([
       'Windows 95 - notes.md',
     ]);
-    expect((await stat(path)).mode & 0o777).toBe(0o640);
+    await expectFileMode(path, 0o640);
 
     expect(await load()).toEqual(first);
 
@@ -198,9 +199,9 @@ describe('VM notes', () => {
     const outside = await mkdtemp(join(tmpdir(), 'emucat-outside-'));
     try {
       await writeFile(join(outside, 'Windows 95 - notes.md'), 'secret');
-      // The VM's directory is a link to somewhere else.
+      // The VM's directory is a link to somewhere else (a junction on Windows).
       await mkdir(join(notesRoot, '86box'), { recursive: true });
-      await symlink(outside, join(notesRoot, '86box', 'Windows 95'));
+      await linkDirectory(outside, join(notesRoot, '86box', 'Windows 95'));
       const read = await admin.get(url('86box', 'Windows 95'));
       expect(read.statusCode).toBe(500);
       expect(read.json<{ error: { code: string } }>().error.code).toBe('notes_storage_unsafe');
@@ -210,20 +211,23 @@ describe('VM notes', () => {
       expect(write.statusCode).toBe(500);
       expect(await readFile(join(outside, 'Windows 95 - notes.md'), 'utf8')).toBe('secret');
 
-      // The notes file itself is a link.
+      // The notes file itself is a link. Refused with O_NOFOLLOW, which Windows does not have (see platform.ts):
+      // this case is checked where the API runs in production, on Linux, and on macOS.
       await rm(join(notesRoot, '86box', 'Windows 95'));
       await mkdir(join(notesRoot, '86box', 'Windows 95'));
-      await symlink(
-        join(outside, 'Windows 95 - notes.md'),
-        join(notesRoot, '86box', 'Windows 95', 'Windows 95 - notes.md'),
-      );
-      expect((await admin.get(url('86box', 'Windows 95'))).statusCode).toBe(500);
-      expect((await save('overwrite', notesEtag('secret'))).statusCode).toBe(500);
-      expect(await readFile(join(outside, 'Windows 95 - notes.md'), 'utf8')).toBe('secret');
+      if (fileLinksRefusable) {
+        await symlink(
+          join(outside, 'Windows 95 - notes.md'),
+          join(notesRoot, '86box', 'Windows 95', 'Windows 95 - notes.md'),
+        );
+        expect((await admin.get(url('86box', 'Windows 95'))).statusCode).toBe(500);
+        expect((await save('overwrite', notesEtag('secret'))).statusCode).toBe(500);
+        expect(await readFile(join(outside, 'Windows 95 - notes.md'), 'utf8')).toBe('secret');
+      }
 
       // The emulator's directory is a link.
       await rm(join(notesRoot, '86box'), { recursive: true });
-      await symlink(outside, join(notesRoot, '86box'));
+      await linkDirectory(outside, join(notesRoot, '86box'));
       expect((await admin.get(url('86box', 'Windows 95'))).statusCode).toBe(500);
     } finally {
       await rm(outside, { recursive: true, force: true });
@@ -289,7 +293,7 @@ describe('NotesStorage', () => {
   it('refuses a notes root that is a link', async () => {
     const real = join(root, 'real');
     await mkdir(real);
-    await symlink(real, join(root, 'link'));
+    await linkDirectory(real, join(root, 'link'));
     const storage = new NotesStorage(join(root, 'link'));
     await expect(storage.read({ emulatorType: 'qemu', vmName: 'Win98' })).rejects.toMatchObject({
       kind: 'unsafe',
