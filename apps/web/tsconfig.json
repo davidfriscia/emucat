@@ -6,7 +6,10 @@
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "types": ["vite/client", "node"],
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@emucat/contracts/archive-preview": ["../../packages/contracts/dist/archive-preview.d.ts"]
+    }
   },
-  "include": ["src", "test", "vite.config.ts", "vditor-assets.ts", "pdfjs-assets.ts"]
+  "include": ["src", "test", "e2e", "vite.config.ts", "vditor-assets.ts", "pdfjs-assets.ts"]
 }

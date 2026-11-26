@@ -1006,7 +1006,6 @@ main.container:has(> .page-wide) {
 }
 .archive-icon {
   flex: 0 0 auto;
-  font-size: 0.85em;
 }
 .archive-tree-more {
   color: var(--bs-link-color);
@@ -1017,12 +1016,8 @@ main.container:has(> .page-wide) {
 .archive-facts dd code {
   word-break: break-all;
 }
-.archive-toolbar {
-  margin-bottom: 0.5rem;
-}
 .archive-text,
 .archive-hex {
-  max-height: 60vh;
   overflow: auto;
   margin: 0;
   padding: 0.5rem;
@@ -1048,23 +1043,26 @@ main.container:has(> .page-wide) {
   width: 4rem;
 }
 .archive-image {
-  max-height: 65vh;
   overflow: auto;
   background: repeating-conic-gradient(var(--bs-tertiary-bg) 0% 25%, transparent 0% 50%) 50% / 16px
     16px;
   border-radius: var(--bs-border-radius);
   padding: 0.5rem;
 }
+.archive-image-fit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .archive-image-fit img {
   max-width: 100%;
-  max-height: calc(65vh - 1rem);
+  max-height: 100%;
   object-fit: contain;
 }
 .archive-pixelated {
   image-rendering: pixelated;
 }
 .archive-pdf {
-  max-height: 70vh;
   overflow: auto;
   background: var(--bs-tertiary-bg);
   border-radius: var(--bs-border-radius);
@@ -1076,7 +1074,6 @@ main.container:has(> .page-wide) {
   box-shadow: 0 1px 3px rgb(0 0 0 / 30%);
 }
 .archive-markdown {
-  max-height: 65vh;
   overflow: auto;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--bs-border-color);
@@ -1277,4 +1274,416 @@ main.container:has(> .page-wide) {
 
 .catalog-summary .stat-value {
   font-size: 1.25rem;
+}
+
+/*
+ * Icon buttons, toolbars and information popovers (decision 0058). Reusable: nothing here is specific to Archive
+ * Explorer. Colours are Bootstrap's variables, so the light and dark themes both apply.
+ */
+.icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-width: 2rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: var(--bs-border-radius);
+  background: transparent;
+  color: var(--bs-body-color);
+  font-size: 0.8125rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+.icon-button:hover:not(:disabled) {
+  background: var(--bs-tertiary-bg);
+  border-color: var(--bs-border-color);
+}
+.icon-button:active:not(:disabled) {
+  background: var(--bs-secondary-bg);
+}
+.icon-button:focus-visible {
+  outline: 2px solid var(--bs-primary);
+  outline-offset: 1px;
+  z-index: 2;
+}
+.icon-button:disabled {
+  color: var(--bs-secondary-color);
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.icon-button-pressed,
+.icon-button-pressed:hover:not(:disabled) {
+  background: var(--bs-primary-bg-subtle);
+  border-color: var(--bs-primary-border-subtle);
+  color: var(--bs-primary-text-emphasis);
+}
+.icon-button-primary {
+  background: var(--bs-primary);
+  color: #fff;
+}
+.icon-button-text {
+  padding-inline: 0.6rem;
+  font-weight: 500;
+}
+@media (pointer: coarse) {
+  .icon-button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+}
+.icon-spin {
+  animation: icon-spin 1s linear infinite;
+}
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-spin {
+    animation-duration: 3s;
+  }
+}
+/* Visual only: every button's name is its aria-label. Shown on hover and on keyboard focus. */
+.icon-tooltip {
+  position: absolute;
+  z-index: 1080;
+  left: 50%;
+  top: calc(100% + 4px);
+  transform: translateX(-50%);
+  padding: 0.2rem 0.45rem;
+  border-radius: var(--bs-border-radius-sm);
+  background: var(--bs-emphasis-color);
+  color: var(--bs-body-bg);
+  font-size: 0.75rem;
+  font-weight: 400;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s ease 0.25s;
+}
+.icon-tooltip-above {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+.icon-tooltip-start {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+.icon-button:hover .icon-tooltip,
+.icon-button:focus-visible .icon-tooltip {
+  opacity: 1;
+}
+.icon-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+}
+.icon-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+}
+.icon-toolbar-slot {
+  display: contents;
+}
+.icon-toolbar-separator {
+  width: 1px;
+  align-self: stretch;
+  margin-inline: 0.25rem;
+  background: var(--bs-border-color);
+}
+.icon-toolbar-spacer {
+  flex: 1 1 auto;
+}
+.toolbar-text {
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.toolbar-select {
+  max-width: 14rem;
+}
+.toolbar-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.info-popover-root {
+  position: relative;
+  display: inline-flex;
+}
+.info-popover {
+  position: absolute;
+  z-index: 1070;
+  top: calc(100% + 6px);
+  width: min(22rem, calc(100vw - 2rem));
+  max-height: min(70vh, 32rem);
+  overflow: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: var(--bs-border-radius-lg);
+  background: var(--bs-body-bg);
+  color: var(--bs-body-color);
+  box-shadow: var(--bs-box-shadow);
+  font-size: 0.8125rem;
+}
+.info-popover:focus-visible {
+  outline: 2px solid var(--bs-primary);
+}
+.info-popover-wide {
+  width: min(30rem, calc(100vw - 2rem));
+}
+.info-popover-end {
+  right: 0;
+}
+.info-popover-start {
+  left: 0;
+}
+.info-popover-title {
+  font-size: 0.9375rem;
+  margin-bottom: 0.5rem;
+  overflow-wrap: anywhere;
+}
+.info-section {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bs-secondary-color);
+  margin: 0.75rem 0 0.25rem;
+}
+.info-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.2rem 0.75rem;
+  margin: 0;
+}
+.info-facts dt {
+  font-weight: 500;
+}
+.info-facts dd {
+  margin: 0;
+  min-width: 0;
+}
+.info-note {
+  color: var(--bs-secondary-color);
+  font-size: 0.75rem;
+}
+.info-hash {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.25rem;
+  max-width: 100%;
+}
+.info-hash code {
+  word-break: break-all;
+  user-select: all;
+}
+.info-list {
+  margin: 0;
+  padding-inline-start: 1.1rem;
+}
+
+/* Archive Explorer's compact layout (decision 0058): header, view switch, then the split with the preview filling it. */
+.archive-explorer-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.archive-identity {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--bs-secondary-color);
+}
+.archive-explorer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.archive-search {
+  display: flex;
+  gap: 0.125rem;
+  margin-bottom: 0.25rem;
+}
+.archive-search-field {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.archive-search-field .form-control {
+  padding-inline-start: 1.75rem;
+}
+.archive-search-icon {
+  position: absolute;
+  inset-inline-start: 0.55rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--bs-secondary-color);
+  pointer-events: none;
+}
+.archive-search-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-bottom: 0.25rem;
+}
+.archive-tree-unreadable .archive-tree-name {
+  color: var(--bs-secondary-color);
+  text-decoration: line-through dotted;
+}
+.archive-twisty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.file-type-archive {
+  color: var(--bs-warning-text-emphasis);
+}
+.file-type-directory,
+.file-type-directory-open {
+  color: var(--bs-primary-text-emphasis);
+}
+.archive-file-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-height: 100%;
+}
+.archive-file-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.archive-file-name {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.archive-breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.125rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+}
+.archive-breadcrumb li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.crumb-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--bs-link-color);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.crumb-link:focus-visible {
+  outline: 2px solid var(--bs-primary);
+}
+.crumb-archive {
+  font-weight: 600;
+}
+.archive-file-toolbar {
+  padding: 0.125rem;
+  border: 1px solid var(--bs-border-color-translucent);
+  border-radius: var(--bs-border-radius);
+  background: var(--bs-tertiary-bg);
+}
+.archive-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.archive-viewer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0.25rem;
+}
+.archive-viewer > .archive-text,
+.archive-viewer > .archive-hex,
+.archive-viewer > .archive-image,
+.archive-viewer > .archive-pdf,
+.archive-viewer > .archive-markdown {
+  max-height: 70vh;
+}
+.archive-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+  padding: 0.25rem 0.375rem;
+  border-top: 1px solid var(--bs-border-color-translucent);
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+}
+.archive-status-slot {
+  display: contents;
+}
+.status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.status-item svg {
+  flex: 0 0 auto;
+}
+.status-success {
+  color: var(--bs-success-text-emphasis);
+}
+.status-warning {
+  color: var(--bs-warning-text-emphasis);
+}
+.status-danger {
+  color: var(--bs-danger-text-emphasis);
+}
+@media (min-width: 768px) {
+  .archive-split[data-pane] .archive-file-pane {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .archive-file-panel {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: 100%;
+  }
+  /* The preview takes all the height between the toolbar and the status bar, and scrolls only once, inside. */
+  .archive-preview,
+  .archive-preview > .archive-viewer {
+    flex: 1 1 auto;
+  }
+  .archive-viewer > .archive-text,
+  .archive-viewer > .archive-hex,
+  .archive-viewer > .archive-image,
+  .archive-viewer > .archive-pdf,
+  .archive-viewer > .archive-markdown {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .archive-tree-pane {
+    display: flex;
+    flex-direction: column;
+  }
 }

@@ -1255,7 +1255,8 @@ describe('view archive contents', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Archive Explorer' });
     const files = within(await within(dialog).findByRole('tree', { name: 'Archive files' }));
     expect(await files.findByRole('treeitem', { name: 'vm.cfg' })).toBeTruthy();
-    fireEvent.click(within(dialog).getByText('Archive details'));
+    // The archive's details are on demand, in Archive information.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Archive information' }));
     expect(within(dialog).getByText(`${MASTER}.zip`)).toBeTruthy();
     expect(within(dialog).getByText(/complete archive/)).toBeTruthy();
     expect(within(dialog).getByText(/verified when this version was registered/)).toBeTruthy();

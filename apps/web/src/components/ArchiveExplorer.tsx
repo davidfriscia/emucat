@@ -1,28 +1,41 @@
-import type {
-  ArchiveEntry,
-  ArchiveSummary,
-  ArchiveView,
-  VersionNode,
-  VmIdentity,
-} from '@emucat/contracts';
-import { useCallback, useId, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import type { ArchiveSummary, ArchiveView, VersionNode, VmIdentity } from '@emucat/contracts';
+import { Info, ShieldAlert, X } from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from 'react';
 import { fetchArchiveSummary } from '../api';
+import { LocalArchiveClient, type WorkerLike } from '../archive-local/client';
+import { DEFAULT_LOCAL_LIMITS, type LocalArchiveLimits } from '../archive-local/limits';
 import { useAsync } from '../useAsync';
 import { formatBytes, formatTime } from './Agents';
 import { FilePanel } from './archive-explorer/FilePanel';
 import { PreviewProblem } from './archive-explorer/problems';
-import { ArchiveTree } from './archive-explorer/Tree';
+import type { FileSource } from './archive-explorer/source';
+import { ArchiveTree, type TreeRequest } from './archive-explorer/Tree';
 import { useModalDialog } from './Gallery';
 import { versionLabel } from './Snapshots';
 import { LoadingState } from './States';
+import { IconButton, ToolbarGroup } from './ui/IconButton';
+import { InfoPopover } from './ui/Popover';
 
 /**
- * Archive Explorer (decisions 0055 and 0056): what a version's archive holds, and any one file in it, read by the
- * server over its own repository connection. Nothing is downloaded whole, extracted to disk or changed; no agent is
- * involved. A tree of directories, listed as they are opened, sits beside the selected file's details and preview.
+ * Archive Explorer (decisions 0055, 0056 and 0058): what a version's archive holds, and any one file in it, read by
+ * the server over its own repository connection. Nothing is downloaded whole, extracted to disk or changed; no agent
+ * is involved. A tree of directories, listed as they are opened, sits beside the selected file's preview.
  *
- * These are the files stored in the archive itself (configuration, NVRAM, ROMs, documents, disk images as files).
- * What is inside a virtual disk (its guest filesystem) is not explored.
+ * An archive inside the version's archive can be opened in the tree: that one file is downloaded through the
+ * existing single-file API, and the browser's archive worker reads it, and archives inside it, in memory. The worker
+ * belongs to this dialog and is terminated, with everything it holds, when the dialog closes.
+ *
+ * These are files of archives (configuration, NVRAM, ROMs, documents, disk images as files). What is inside a virtual
+ * disk (its guest filesystem) is not explored.
  */
 
 const VIEW_TEXT: Record<ArchiveView, string> = {
@@ -86,6 +99,18 @@ function Summary({ summary }: { summary: ArchiveSummary }) {
         This is a complete archive: restoring this version needs nothing else, and it is never a
         difference from another version.
       </p>
+      <p className="small text-body-secondary mb-2">
+        Read through the server’s own repository connection. Nothing is downloaded whole, extracted
+        or changed. <strong>VM files</strong> lists the VM’s files from the manifest;{' '}
+        <strong>Stored entries</strong> lists what the archive file holds.
+      </p>
+      <p className="small text-body-secondary mb-0">
+        Opening an archive inside it downloads that one file, whole, through the server’s
+        single-file download (verified as it arrives), and reads it in this browser, in memory. Up
+        to {formatBytes(DEFAULT_LOCAL_LIMITS.maxArchiveBytes)} an archive and{' '}
+        {DEFAULT_LOCAL_LIMITS.maxDepth} levels deep; {formatBytes(DEFAULT_LOCAL_LIMITS.cacheBytes)}{' '}
+        of opened archives are kept, the least recently used released first.
+      </p>
     </>
   );
 }
@@ -108,27 +133,21 @@ function Warnings({ summary }: { summary: ArchiveSummary }) {
   );
 }
 
-function Placeholder({ summary, view }: { summary: ArchiveSummary; view: ArchiveView }) {
+function Placeholder({ view }: { view: ArchiveView }) {
   return (
     <div className="archive-placeholder">
-      <p className="small mb-2">Select a file to see its details and a preview.</p>
+      <p className="small mb-2">Select a file to see its preview.</p>
       <p className="small text-body-secondary mb-2">
         {view === 'logical'
           ? 'The VM’s files as this version restores them, from the archive’s manifest.'
           : 'The entries stored in the archive file itself.'}{' '}
         Text, images, PDF and Markdown files can be previewed; any file can be shown as bytes, and
-        downloaded individually up to the server’s limit.
+        downloaded individually up to the server’s limit. ZIP, TAR, OVA and GZIP archives inside it
+        can be expanded and browsed in your browser.
       </p>
       <p className="small text-body-secondary mb-0">
-        Only the files of the archive itself are shown. What is inside a virtual disk image is not
-        explored.
+        What is inside a virtual disk image (its guest filesystem) is not explored.
       </p>
-      <details className="mt-3">
-        <summary className="small">Archive details</summary>
-        <div className="mt-2">
-          <Summary summary={summary} />
-        </div>
-      </details>
     </div>
   );
 }
@@ -137,10 +156,15 @@ export function ArchiveExplorerDialog({
   vm,
   node,
   onClose,
+  localLimits,
+  createWorker,
 }: {
   vm: VmIdentity;
   node: VersionNode;
   onClose: () => void;
+  /** For tests: other browser-local limits, and a worker that runs in the same thread. */
+  localLimits?: LocalArchiveLimits;
+  createWorker?: () => WorkerLike;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
   const close = useRef<HTMLButtonElement>(null);
@@ -150,10 +174,22 @@ export function ArchiveExplorerDialog({
     vm.emulatorType === 'virtualbox' ? 'physical' : 'logical',
   );
   const [visited, setVisited] = useState<Set<ArchiveView>>(() => new Set([view]));
-  const [selected, setSelected] = useState<{ view: ArchiveView; entry: ArchiveEntry } | null>(null);
+  const [selected, setSelected] = useState<{ view: ArchiveView; source: FileSource } | null>(null);
+  const [request, setRequest] = useState<{ view: ArchiveView; request: TreeRequest } | null>(null);
   const [pane, setPane] = useState<'tree' | 'file'>('tree');
   const [split, setSplit] = useState(readSplit);
   const body = useRef<HTMLDivElement>(null);
+  // One archive worker for this dialog, started on first use and terminated with the dialog.
+  const client = useMemo(
+    () => new LocalArchiveClient(localLimits ?? DEFAULT_LOCAL_LIMITS, createWorker),
+    [localLimits, createWorker],
+  );
+  useEffect(() => () => client.dispose(), [client]);
+  // The nested archives the shown file is in: the cache keeps them while it is shown.
+  const pinned = useRef<string[]>([]);
+  useEffect(() => {
+    pinned.current = selected?.source.container?.archiveIds ?? [];
+  }, [selected]);
 
   const { emulatorType, vmName } = vm;
   const load = useCallback(
@@ -170,9 +206,17 @@ export function ArchiveExplorerDialog({
     setView(next);
     setVisited((current) => new Set([...current, next]));
   };
-  const select = (entry: ArchiveEntry) => {
-    setSelected({ view: shownView, entry });
+  const select = (source: FileSource) => {
+    setSelected({ view: shownView, source });
     setPane('file');
+  };
+  const nonce = useRef(0);
+  const ask = (key: string, open: boolean) => {
+    if (!selected) return;
+    nonce.current += 1;
+    setRequest({ view: selected.view, request: { key, open, nonce: nonce.current } });
+    if (selected.view !== shownView) chooseView(selected.view);
+    setPane('tree');
   };
 
   const saveSplit = (value: number) => {
@@ -215,6 +259,15 @@ export function ArchiveExplorerDialog({
     saveSplit(next);
   };
 
+  const kindWord = node.kind === 'master' ? 'Master' : 'Snapshot';
+  const identity = [
+    kindWord,
+    label === kindWord ? null : label,
+    summary ? summary.archive.format.toUpperCase() : null,
+    summary ? formatBytes(summary.archive.sizeBytes) : null,
+    summary ? summary.archive.repositoryName : null,
+  ].filter(Boolean);
+
   return (
     <div className="modal-backdrop-custom">
       <div
@@ -225,53 +278,79 @@ export function ArchiveExplorerDialog({
         aria-labelledby={`${ids}-title`}
       >
         <div className="card-body d-flex flex-column archive-explorer-body">
-          <div className="d-flex justify-content-between align-items-start gap-2">
-            <div className="min-w-0">
-              <h2 id={`${ids}-title`} className="h5 card-title mb-1">
+          <header className="archive-explorer-header">
+            <div className="min-w-0 flex-grow-1">
+              <h2 id={`${ids}-title`} className="h6 card-title mb-0">
                 Archive Explorer
               </h2>
-              <p className="small mb-2 text-break">
-                {node.kind === 'master' ? 'Master' : 'Snapshot'}: {label}
-                {summary ? ` · created ${formatTime(summary.version.createdAt)}` : null}
-                {summary
-                  ? ` · ${summary.archive.format.toUpperCase()}, ${formatBytes(summary.archive.sizeBytes)} in ${summary.archive.repositoryName}`
-                  : null}
+              <p
+                className="archive-identity text-break"
+                title={summary ? `Created ${formatTime(summary.version.createdAt)}` : undefined}
+              >
+                {identity.join(' · ')}
               </p>
             </div>
-            <button
+            {summary?.manifest?.matchesRegistration === false ? (
+              <ShieldAlert
+                size={18}
+                className="text-danger flex-shrink-0"
+                aria-label="Manifest differs from the verified one"
+                role="img"
+              />
+            ) : null}
+            <InfoPopover
+              icon={Info}
+              label="Archive information"
+              title="This archive"
+              disabled={!summary}
+              wide
+            >
+              {() =>
+                summary ? (
+                  <>
+                    <dl className="info-facts">
+                      <dt>Version</dt>
+                      <dd>
+                        {node.kind === 'master' ? 'Master' : 'Snapshot'}: {label}
+                      </dd>
+                      <dt>Created</dt>
+                      <dd>{formatTime(summary.version.createdAt)}</dd>
+                    </dl>
+                    <Summary summary={summary} />
+                  </>
+                ) : null
+              }
+            </InfoPopover>
+            <IconButton
               ref={close}
-              type="button"
-              className="btn-close"
-              aria-label="Close"
+              icon={X}
+              label="Close"
               onClick={onClose}
+              tooltipPlacement="start"
             />
-          </div>
+          </header>
           {state.status === 'loading' ? <LoadingState label="Reading the archive" /> : null}
           {state.status === 'error' ? <PreviewProblem error={state.error} /> : null}
           {summary ? (
             <>
               <Warnings summary={summary} />
-              <div className="d-flex flex-wrap align-items-center gap-2 mb-2">
-                {views.length > 1 ? (
-                  <div className="btn-group btn-group-sm" role="group" aria-label="View">
+              {views.length > 1 ? (
+                <div className="archive-explorer-toolbar">
+                  <ToolbarGroup label="View">
                     {views.map((option) => (
                       <button
                         key={option}
                         type="button"
-                        className={`btn ${option === shownView ? 'btn-primary' : 'btn-outline-secondary theme-button'}`}
+                        className={`icon-button icon-button-text ${option === shownView ? 'icon-button-pressed' : ''}`}
                         aria-pressed={option === shownView}
                         onClick={() => chooseView(option)}
                       >
                         {VIEW_TEXT[option]}
                       </button>
                     ))}
-                  </div>
-                ) : null}
-                <span className="small text-body-secondary d-none d-md-inline">
-                  Read through the server’s own repository connection. Nothing is downloaded whole,
-                  extracted or changed.
-                </span>
-              </div>
+                  </ToolbarGroup>
+                </div>
+              ) : null}
               <div
                 ref={body}
                 className="archive-split"
@@ -286,8 +365,12 @@ export function ArchiveExplorerDialog({
                           vm={vm}
                           versionId={node.id}
                           view={option}
-                          selectedPath={selected?.view === option ? selected.entry.path : null}
+                          rootLabel={VIEW_TEXT[option]}
+                          client={client}
+                          pinned={pinned}
+                          selectedKey={selected?.view === option ? selected.source.key : null}
                           onSelect={select}
+                          request={request?.view === option ? request.request : null}
                         />
                       </div>
                     ) : null,
@@ -307,15 +390,14 @@ export function ArchiveExplorerDialog({
                 <div className="archive-pane archive-file-pane">
                   {selected ? (
                     <FilePanel
-                      key={`${selected.view}\0${selected.entry.path}`}
-                      vm={vm}
-                      versionId={node.id}
-                      view={selected.view}
-                      entry={selected.entry}
+                      key={`${selected.view}\0${selected.source.key}`}
+                      source={selected.source}
                       onBack={() => setPane('tree')}
+                      onReveal={(key) => ask(key, false)}
+                      onBrowse={(key) => ask(key, true)}
                     />
                   ) : (
-                    <Placeholder summary={summary} view={shownView} />
+                    <Placeholder view={shownView} />
                   )}
                 </div>
               </div>

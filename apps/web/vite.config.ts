@@ -15,6 +15,16 @@ export default defineConfig(({ mode }) => {
 
   return {
     envDir: repositoryRoot,
+    resolve: {
+      alias: {
+        // The archive worker needs only the contracts' byte-level helpers (content detection, text decoding), which
+        // import nothing at run time. Importing them directly keeps zod and every schema out of the worker
+        // (decision 0058). The package itself is unchanged.
+        '@emucat/contracts/archive-preview': fileURLToPath(
+          new URL('../../packages/contracts/dist/archive-preview.js', import.meta.url),
+        ),
+      },
+    },
     plugins: [react(), vditorAssets(), pdfjsAssets()],
     server: { host: '127.0.0.1', port: 5173, strictPort: true, proxy },
     preview: { host: '127.0.0.1', port: 4173, strictPort: true, proxy },

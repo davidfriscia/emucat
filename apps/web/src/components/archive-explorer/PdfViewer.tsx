@@ -1,16 +1,19 @@
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
+import { ChevronLeft, ChevronRight, Maximize, ZoomIn, ZoomOut } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ArchivePreviewBytes } from '../../api';
 import { LoadingState } from '../States';
-import { IntegrityNote, Toolbar } from './viewers';
+import { IconButton, IconToggleButton, ToolbarGroup, ToolbarSeparator } from '../ui/IconButton';
+import { IntegrityStatus, StatusItem, ViewerStatus, ViewerTools } from './chrome';
 
 /**
  * PDF preview with PDF.js (Apache-2.0), loaded only when a PDF is opened (decision 0056). Pages are drawn on a canvas
  * and nothing else: no annotation layer (so no links, forms or actions), no text layer, no scripting (PDF.js only runs
  * a document's JavaScript through its viewer's scripting sandbox, which is never loaded here). The worker and every
  * data file come from this application's own origin. The document is destroyed, with its worker, when the file
- * changes or the dialog closes.
+ * changes or the dialog closes. A PDF inside a nested archive (decision 0058) is handed over as bytes the browser read
+ * itself, the same way.
  */
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -132,84 +135,72 @@ export default function PdfViewer({
 
   return (
     <div className="archive-viewer">
-      <Toolbar label="PDF options">
-        <div className="btn-group btn-group-sm" role="group" aria-label="Pages">
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
+      <ViewerTools>
+        <ToolbarSeparator />
+        <ToolbarGroup label="Pages">
+          <IconButton
+            icon={ChevronLeft}
+            label="Previous page"
             disabled={page <= 1}
             onClick={() => {
               setPageInput(null);
               setPage((value) => value - 1);
             }}
+          />
+          <form
+            className="toolbar-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = Number(pageInput);
+              if (Number.isInteger(value) && value >= 1 && value <= pages) setPage(value);
+              setPageInput(null);
+            }}
           >
-            Previous page
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
+            <label htmlFor={`${ids}-page`} className="visually-hidden">
+              Page
+            </label>
+            <input
+              id={`${ids}-page`}
+              className="form-control form-control-sm archive-page"
+              inputMode="numeric"
+              value={pageInput ?? String(page)}
+              onChange={(event) => setPageInput(event.target.value)}
+            />
+            <span className="toolbar-text" role="status">
+              of {pages || '…'}
+            </span>
+          </form>
+          <IconButton
+            icon={ChevronRight}
+            label="Next page"
             disabled={page >= pages}
             onClick={() => {
               setPageInput(null);
               setPage((value) => value + 1);
             }}
-          >
-            Next page
-          </button>
-        </div>
-        <form
-          className="d-flex align-items-center gap-1 small"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const value = Number(pageInput);
-            if (Number.isInteger(value) && value >= 1 && value <= pages) setPage(value);
-            setPageInput(null);
-          }}
-        >
-          <label htmlFor={`${ids}-page`}>Page</label>
-          <input
-            id={`${ids}-page`}
-            className="form-control form-control-sm archive-page"
-            inputMode="numeric"
-            value={pageInput ?? String(page)}
-            onChange={(event) => setPageInput(event.target.value)}
           />
-          <span role="status">of {pages || '…'}</span>
-        </form>
-        <div className="btn-group btn-group-sm" role="group" aria-label="Zoom">
-          <button
-            type="button"
-            className={`btn ${zoom === 'width' ? 'btn-primary' : 'btn-outline-secondary theme-button'}`}
-            aria-pressed={zoom === 'width'}
-            onClick={() => setZoom('width')}
-          >
-            Fit width
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
-            aria-label="Zoom out"
-            onClick={() => step(-1)}
-          >
-            −
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
-            aria-label="Zoom in"
-            onClick={() => step(1)}
-          >
-            +
-          </button>
-        </div>
-        <span className="small align-self-center">
-          {scale === null ? 'Fitted to the width' : `${Math.round(scale * 100)}%`}
+        </ToolbarGroup>
+        <ToolbarGroup label="Zoom">
+          <IconToggleButton
+            icon={Maximize}
+            label="Fit to the width"
+            pressed={zoom === 'width'}
+            onPressedChange={() => setZoom('width')}
+          />
+          <IconButton icon={ZoomOut} label="Zoom out" onClick={() => step(-1)} />
+          <IconButton icon={ZoomIn} label="Zoom in" onClick={() => step(1)} />
+        </ToolbarGroup>
+        <span className="toolbar-text">
+          {scale === null ? 'Width' : `${Math.round(scale * 100)}%`}
         </span>
-      </Toolbar>
-      <IntegrityNote preview={preview} />
-      <p className="small text-body-secondary mb-1">
-        Drawn as an image: links, forms, attachments and scripts in the PDF are not active.
-      </p>
+      </ViewerTools>
+      <IntegrityStatus preview={preview} />
+      <ViewerStatus>
+        <StatusItem icon={null}>
+          {pages ? `Page ${page} of ${pages}. ` : ''}Drawn as an image: links, forms, attachments
+          and scripts in the PDF are not active.
+        </StatusItem>
+      </ViewerStatus>
       {failed ? (
         <div className="alert alert-warning small" role="alert">
           {failed}

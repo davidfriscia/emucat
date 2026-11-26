@@ -8,62 +8,40 @@ import {
   detectEncoding,
   type ArchiveEntryDetails,
   type TextEncoding,
-  type VmIdentity,
 } from '@emucat/contracts';
 import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type FormEvent,
-  type ReactNode,
-} from 'react';
-import { fetchArchivePreview, type ArchiveFileRef, type ArchivePreviewBytes } from '../../api';
+  ArrowRight,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  Code,
+  Copy,
+  Maximize,
+  Scan,
+  WrapText,
+  X,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
+import type { ArchivePreviewBytes } from '../../api';
 import { useAsync } from '../../useAsync';
 import { formatBytes } from '../Agents';
 import { LoadingState } from '../States';
+import { IconButton, IconToggleButton, ToolbarGroup, ToolbarSeparator } from '../ui/IconButton';
+import { IntegrityStatus, StatusItem, ViewerStatus, ViewerTools } from './chrome';
 import { highlight, loadHighlighter, type HighlightJs } from './highlight';
 import { sanitizeArchiveHtml } from './safe-html';
 import { PreviewProblem } from './problems';
 
 /**
- * The ways Archive Explorer shows one file (decision 0056). Every viewer shows bytes the server sent as data: text is
- * text nodes (or sanitized highlighting spans), HTML and SVG are source, images are drawn by the browser from a local
- * object URL, and nothing here ever runs, embeds or fetches what a file contains.
+ * The ways Archive Explorer shows one file (decisions 0056 and 0058). Every viewer shows bytes as data, whether the
+ * server sent them or the browser's archive worker read them from a nested archive: text is text nodes (or sanitized
+ * highlighting spans), HTML and SVG are source, images are drawn by the browser from a local object URL, and nothing
+ * here ever runs, embeds or fetches what a file contains. Each viewer's controls go into the file's toolbar, and its
+ * status into the status bar (`chrome.tsx`), so the preview itself fills the panel.
  */
-
-export function Toolbar({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="archive-toolbar btn-toolbar gap-2 flex-wrap" role="toolbar" aria-label={label}>
-      {children}
-    </div>
-  );
-}
-
-export function IntegrityNote({ preview }: { preview: ArchivePreviewBytes }) {
-  if (preview.truncated) {
-    return (
-      <p className="small text-body-secondary mb-1" role="status">
-        Showing the first {formatBytes(preview.bytes.length)} of {formatBytes(preview.totalBytes)}.
-        Only this part was read: its structure was checked, but no checksum covers part of a file.
-      </p>
-    );
-  }
-  if (preview.integrity === 'verified') {
-    return (
-      <p className="small text-success-emphasis mb-1">
-        The whole file was read and matched its recorded checksum.
-      </p>
-    );
-  }
-  return (
-    <p className="small text-body-secondary mb-1">
-      The whole file was read. This archive format records no checksum for it.
-    </p>
-  );
-}
 
 // --- Text ------------------------------------------------------------------------------------------------------
 
@@ -119,72 +97,70 @@ export function TextViewer({
     }
   };
 
+  const encodingNote =
+    encoding === initial.name
+      ? initial.confidence === 'bom'
+        ? 'from the byte-order mark'
+        : initial.confidence === 'valid'
+          ? 'valid throughout'
+          : 'a guess from the bytes: choose another encoding if characters look wrong'
+      : 'chosen by you';
+
   return (
     <div className="archive-viewer">
-      <Toolbar label="Text options">
-        <div className="d-flex align-items-center gap-1">
-          <label htmlFor={`${ids}-encoding`} className="small mb-0">
-            Encoding
-          </label>
-          <select
-            id={`${ids}-encoding`}
-            className="form-select form-select-sm w-auto"
-            value={encoding}
-            onChange={(event) => setEncoding(event.target.value as TextEncoding)}
-          >
-            {TEXT_ENCODINGS.map((name) => (
-              <option key={name} value={name}>
-                {TEXT_ENCODING_LABELS[name]}
-                {name === initial.name ? ' (detected)' : ''}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-check form-switch small mb-0 align-self-center">
-          <input
-            id={`${ids}-wrap`}
-            className="form-check-input"
-            type="checkbox"
-            checked={wrap}
-            onChange={(event) => setWrap(event.target.checked)}
+      <ViewerTools>
+        <ToolbarSeparator />
+        <ToolbarGroup label="Text options">
+          <IconToggleButton
+            icon={WrapText}
+            label="Wrap lines"
+            pressed={wrap}
+            onPressedChange={setWrap}
           />
-          <label className="form-check-label" htmlFor={`${ids}-wrap`}>
-            Wrap lines
-          </label>
-        </div>
-        {language ? (
-          <div className="form-check form-switch small mb-0 align-self-center">
-            <input
-              id={`${ids}-colors`}
-              className="form-check-input"
-              type="checkbox"
-              checked={colors}
-              onChange={(event) => setColors(event.target.checked)}
+          {language ? (
+            <IconToggleButton
+              icon={Code}
+              label={`Highlight (${language})`}
+              pressed={colors}
+              onPressedChange={setColors}
             />
-            <label className="form-check-label" htmlFor={`${ids}-colors`}>
-              Highlight ({language})
-            </label>
-          </div>
-        ) : null}
-        <button
-          type="button"
-          className="btn btn-sm btn-outline-secondary theme-button"
-          onClick={() => void copy()}
+          ) : null}
+          <IconButton
+            icon={copied === 'done' ? Check : Copy}
+            label={copied === 'done' ? 'Copied' : copied === 'failed' ? 'Copy failed' : 'Copy text'}
+            onClick={() => void copy()}
+          />
+        </ToolbarGroup>
+        <label htmlFor={`${ids}-encoding`} className="visually-hidden">
+          Encoding
+        </label>
+        <select
+          id={`${ids}-encoding`}
+          className="form-select form-select-sm w-auto toolbar-select"
+          value={encoding}
+          title="Encoding"
+          onChange={(event) => setEncoding(event.target.value as TextEncoding)}
         >
-          {copied === 'done' ? 'Copied' : copied === 'failed' ? 'Copy failed' : 'Copy text'}
-        </button>
-      </Toolbar>
-      <p className="small text-body-secondary mb-1">
-        {TEXT_ENCODING_LABELS[encoding]}
-        {encoding === initial.name
-          ? initial.confidence === 'bom'
-            ? ', from the byte-order mark.'
-            : initial.confidence === 'valid'
-              ? ', valid throughout.'
-              : ', a guess from the bytes: choose another encoding if characters look wrong.'
-          : ', chosen by you.'}
-      </p>
-      <IntegrityNote preview={preview} />
+          {TEXT_ENCODINGS.map((name) => (
+            <option key={name} value={name}>
+              {TEXT_ENCODING_LABELS[name]}
+              {name === initial.name ? ' (detected)' : ''}
+            </option>
+          ))}
+        </select>
+      </ViewerTools>
+      <ViewerStatus>
+        <StatusItem
+          tone={
+            initial.confidence === 'heuristic' && encoding === initial.name ? 'warning' : 'info'
+          }
+          icon={null}
+        >
+          {TEXT_ENCODING_LABELS[encoding]}, {encodingNote}.
+        </StatusItem>
+        {language ? <StatusItem icon={null}>{language}</StatusItem> : null}
+      </ViewerStatus>
+      <IntegrityStatus preview={preview} />
       <pre
         className={`archive-text hljs ${wrap ? 'archive-wrap' : ''}`}
         tabIndex={0}
@@ -215,11 +191,13 @@ export function MarkdownViewer({ preview, path }: { preview: ArchivePreviewBytes
   const { state } = useAsync(render);
   return (
     <div className="archive-viewer">
-      <p className="small text-body-secondary mb-1">
-        Rendered read-only. Scripts, embedded HTML and images are removed, and links are not
-        followed.
-      </p>
-      <IntegrityNote preview={preview} />
+      <ViewerStatus>
+        <StatusItem icon={null}>
+          Rendered read-only: scripts, embedded HTML and images are removed, and links are not
+          followed.
+        </StatusItem>
+      </ViewerStatus>
+      <IntegrityStatus preview={preview} />
       {state.status === 'loading' ? <LoadingState label="Rendering" /> : null}
       {state.status === 'error' ? (
         <div className="alert alert-warning small" role="alert">
@@ -242,7 +220,16 @@ export function MarkdownViewer({ preview, path }: { preview: ArchivePreviewBytes
 
 const ZOOMS = [0.25, 0.5, 1, 2, 4, 8];
 
-export function ImageViewer({ preview, path }: { preview: ArchivePreviewBytes; path: string }) {
+export function ImageViewer({
+  preview,
+  path,
+  converter = 'by the server',
+}: {
+  preview: ArchivePreviewBytes;
+  path: string;
+  /** Who converted a legacy format: the server, or the browser for a file inside a nested archive. */
+  converter?: string;
+}) {
   const [zoom, setZoom] = useState<'fit' | number>('fit');
   const [failed, setFailed] = useState(false);
   const element = useRef<HTMLImageElement>(null);
@@ -268,52 +255,38 @@ export function ImageViewer({ preview, path }: { preview: ArchivePreviewBytes; p
     if (next) setZoom(next);
   };
   return (
-    <div className="archive-viewer">
-      <Toolbar label="Image options">
-        <div className="btn-group btn-group-sm" role="group" aria-label="Zoom">
-          <button
-            type="button"
-            className={`btn ${zoom === 'fit' ? 'btn-primary' : 'btn-outline-secondary theme-button'}`}
-            aria-pressed={zoom === 'fit'}
-            onClick={() => setZoom('fit')}
-          >
-            Fit
-          </button>
-          <button
-            type="button"
-            className={`btn ${zoom === 1 ? 'btn-primary' : 'btn-outline-secondary theme-button'}`}
-            aria-pressed={zoom === 1}
-            onClick={() => setZoom(1)}
-          >
-            100%
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
-            aria-label="Zoom out"
-            onClick={() => step(-1)}
-          >
-            −
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
-            aria-label="Zoom in"
-            onClick={() => step(1)}
-          >
-            +
-          </button>
-        </div>
-        <span className="small align-self-center" role="status">
-          {current === null ? 'Fitted to the panel' : `${Math.round(current * 100)}%`}
+    <div className="archive-viewer archive-viewer-fill">
+      <ViewerTools>
+        <ToolbarSeparator />
+        <ToolbarGroup label="Zoom">
+          <IconToggleButton
+            icon={Maximize}
+            label="Fit to the panel"
+            pressed={zoom === 'fit'}
+            onPressedChange={() => setZoom('fit')}
+          />
+          <IconToggleButton
+            icon={Scan}
+            label="Actual size"
+            pressed={zoom === 1}
+            onPressedChange={() => setZoom(1)}
+          />
+          <IconButton icon={ZoomOut} label="Zoom out" onClick={() => step(-1)} />
+          <IconButton icon={ZoomIn} label="Zoom in" onClick={() => step(1)} />
+        </ToolbarGroup>
+        <span className="toolbar-text" role="status">
+          {current === null ? 'Fit' : `${Math.round(current * 100)}%`}
         </span>
-      </Toolbar>
+      </ViewerTools>
       {image ? (
-        <p className="small text-body-secondary mb-1">
-          {image.format.toUpperCase()}, {image.width} × {image.height} pixels
-          {image.converted ? ', converted to PNG by the server for display' : ''}.
-        </p>
+        <ViewerStatus>
+          <StatusItem icon={null}>
+            {image.format.toUpperCase()}, {image.width} × {image.height} pixels
+            {image.converted ? `, converted to PNG ${converter} for display` : ''}
+          </StatusItem>
+        </ViewerStatus>
       ) : null}
+      <IntegrityStatus preview={preview} />
       {failed ? (
         <div className="alert alert-warning small" role="alert">
           The browser could not display this image: it may be damaged, or a variant the browser does
@@ -321,19 +294,17 @@ export function ImageViewer({ preview, path }: { preview: ArchivePreviewBytes; p
         </div>
       ) : null}
       <div className={`archive-image ${zoom === 'fit' ? 'archive-image-fit' : ''}`}>
-        {
-          <img
-            ref={element}
-            alt={`Preview of ${path}`}
-            style={
-              current !== null && image
-                ? { width: image.width * current, height: image.height * current, maxWidth: 'none' }
-                : undefined
-            }
-            className={current !== null && current > 1 ? 'archive-pixelated' : undefined}
-            onError={() => setFailed(true)}
-          />
-        }
+        <img
+          ref={element}
+          alt={`Preview of ${path}`}
+          style={
+            current !== null && image
+              ? { width: image.width * current, height: image.height * current, maxWidth: 'none' }
+              : undefined
+          }
+          className={current !== null && current > 1 ? 'archive-pixelated' : undefined}
+          onError={() => setFailed(true)}
+        />
       </div>
     </div>
   );
@@ -388,14 +359,11 @@ function parseOffset(text: string): number | null {
 }
 
 export function HexViewer({
-  vm,
-  versionId,
-  file,
+  read,
   details,
 }: {
-  vm: VmIdentity;
-  versionId: string;
-  file: ArchiveFileRef;
+  /** One window of bytes from `offset`: from the server, or from the browser's archive worker. */
+  read: (offset: number, signal: AbortSignal) => Promise<ArchivePreviewBytes>;
   details: ArchiveEntryDetails;
 }) {
   const ids = useId();
@@ -405,12 +373,7 @@ export function HexViewer({
   const [targetProblem, setTargetProblem] = useState<string | null>(null);
   const { windowBytes, maxOffset, seekable } = details.hex;
   const size = details.entry.sizeBytes ?? 0;
-  const { emulatorType, vmName } = vm;
-  const load = useCallback(
-    (signal: AbortSignal) =>
-      fetchArchivePreview({ emulatorType, vmName }, versionId, file, 'hex', { offset, signal }),
-    [emulatorType, vmName, versionId, file, offset],
-  );
+  const load = useCallback((signal: AbortSignal) => read(offset, signal), [read, offset]);
   const { state } = useAsync(load);
   const digits = Math.max(8, Math.ceil(Math.log2(Math.max(size, 2)) / 4));
   const dump = useMemo(
@@ -451,34 +414,29 @@ export function HexViewer({
 
   return (
     <div className="archive-viewer">
-      <Toolbar label="Hexadecimal view options">
-        <div className="btn-group btn-group-sm" role="group" aria-label="Move through the file">
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
+      <ViewerTools>
+        <ToolbarSeparator />
+        <ToolbarGroup label="Move through the file">
+          <IconButton
+            icon={ChevronsLeft}
+            label="Start of the file"
             disabled={offset === 0}
             onClick={() => go(0)}
-          >
-            Start
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
+          />
+          <IconButton
+            icon={ChevronLeft}
+            label="Previous bytes"
             disabled={offset === 0}
             onClick={() => go(offset - windowBytes)}
-          >
-            Previous
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline-secondary theme-button"
+          />
+          <IconButton
+            icon={ChevronRight}
+            label="Next bytes"
             disabled={end >= size || end > maxOffset}
             onClick={() => go(offset + windowBytes)}
-          >
-            Next
-          </button>
-        </div>
-        <form className="d-flex gap-1" onSubmit={submit}>
+          />
+        </ToolbarGroup>
+        <form className="toolbar-form" onSubmit={submit}>
           <label htmlFor={`${ids}-offset`} className="visually-hidden">
             Go to offset
           </label>
@@ -489,45 +447,51 @@ export function HexViewer({
             value={target}
             onChange={(event) => setTarget(event.target.value)}
           />
-          <button type="submit" className="btn btn-sm btn-outline-secondary theme-button">
-            Go
-          </button>
+          <IconButton icon={ArrowRight} label="Go to the offset" type="submit" />
         </form>
-        <div className="btn-group btn-group-sm" role="group" aria-label="Characters">
+        <ToolbarGroup label="Characters">
           {(['ascii', 'cp437'] as const).map((option) => (
             <button
               key={option}
               type="button"
-              className={`btn ${charset === option ? 'btn-primary' : 'btn-outline-secondary theme-button'}`}
+              className={`icon-button icon-button-text ${charset === option ? 'icon-button-pressed' : ''}`}
               aria-pressed={charset === option}
               onClick={() => setCharset(option)}
             >
               {option === 'ascii' ? 'ASCII' : 'CP437'}
             </button>
           ))}
-        </div>
-      </Toolbar>
+        </ToolbarGroup>
+      </ViewerTools>
       {targetProblem ? (
-        <p className="small text-danger mb-1" role="alert">
-          {targetProblem}
-        </p>
+        <div
+          className="alert alert-warning small py-1 px-2 mb-1 d-flex align-items-center gap-2"
+          role="alert"
+        >
+          <span className="flex-grow-1">{targetProblem}</span>
+          <IconButton icon={X} label="Dismiss" onClick={() => setTargetProblem(null)} />
+        </div>
       ) : null}
       {!seekable && size > maxOffset + 1 ? (
-        <p className="small text-body-secondary mb-1">
-          This entry is deflated: reaching a byte means decompressing everything before it, so only
-          the first {formatBytes(maxOffset + 1)} can be shown here. Download the file to see the
-          rest.
-        </p>
+        <ViewerStatus>
+          <StatusItem tone="warning">
+            Compressed entry: only the first {formatBytes(maxOffset + 1)} can be shown here, since
+            reaching a byte means decompressing everything before it. Download the file to see the
+            rest.
+          </StatusItem>
+        </ViewerStatus>
       ) : null}
       {state.status === 'loading' ? <LoadingState label="Reading bytes" /> : null}
       {state.status === 'error' ? <PreviewProblem error={state.error} /> : null}
       {state.status === 'success' ? (
         <>
-          <p className="small text-body-secondary mb-1" role="status">
-            Bytes 0x{state.data.offset.toString(16)}–0x
-            {Math.max(state.data.offset, end - 1).toString(16)} of {formatBytes(size)} (
-            {size.toLocaleString('en')} bytes).
-          </p>
+          <ViewerStatus>
+            <StatusItem icon={null} live>
+              Bytes 0x{state.data.offset.toString(16)}–0x
+              {Math.max(state.data.offset, end - 1).toString(16)} of {formatBytes(size)} (
+              {size.toLocaleString('en')} bytes)
+            </StatusItem>
+          </ViewerStatus>
           <pre ref={scroller} className="archive-hex" tabIndex={0} aria-label="Hexadecimal bytes">
             {dump}
           </pre>

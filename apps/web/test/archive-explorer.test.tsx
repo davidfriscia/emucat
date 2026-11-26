@@ -334,7 +334,21 @@ describe('Archive Explorer', () => {
     const api = mockApi(routes());
     open();
     const view = await dialog();
-    expect(await view.findByText('Select a file to see its details and a preview.')).toBeTruthy();
+    expect(await view.findByText('Select a file to see its preview.')).toBeTruthy();
+    // The archive's identity is one compact line; its details are on demand.
+    expect(view.getByText('Master · ZIP · 4.0 KiB · NAS')).toBeTruthy();
+    expect(view.queryByText(/SHA-256/)).toBeNull();
+    fireEvent.click(view.getByRole('button', { name: 'Archive information' }));
+    const info = within(view.getByRole('dialog', { name: 'This archive' }));
+    expect(info.getByText(SHA)).toBeTruthy();
+    expect(info.getByText(/3 files in 1 directories/)).toBeTruthy();
+    expect(info.getByText(/the one verified when this version was registered/)).toBeTruthy();
+    expect(info.getByText(/Nothing is downloaded whole/)).toBeTruthy();
+    fireEvent.keyDown(view.getByRole('dialog', { name: 'This archive' }), { key: 'Escape' });
+    expect(view.queryByRole('dialog', { name: 'This archive' })).toBeNull();
+    // Escape closed only the information, never the explorer.
+    expect(screen.getByRole('dialog', { name: 'Archive Explorer' })).toBeTruthy();
+    expect(document.activeElement).toBe(view.getByRole('button', { name: 'Archive information' }));
     const tree = within(view.getByRole('tree', { name: 'Archive files' }));
     expect(await tree.findByRole('treeitem', { name: 'vm.cfg' })).toBeTruthy();
     expect(api.calls.filter((call) => call.query.get('path') === 'docs')).toHaveLength(0);
@@ -360,7 +374,7 @@ describe('Archive Explorer', () => {
     });
     open(SNAPSHOT, 'snapshot');
     const view = await dialog();
-    expect(await view.findByText(/Snapshot:/)).toBeTruthy();
+    expect(await view.findByText(/^Snapshot · /)).toBeTruthy();
     expect(await view.findByRole('treeitem', { name: 'vm.cfg' })).toBeTruthy();
     expect(api.calls.every((call) => call.path.includes(SNAPSHOT))).toBe(true);
   });
@@ -377,13 +391,27 @@ describe('Archive Explorer', () => {
     mockApi(routes());
     open();
     const panel = await selectFile('vm.cfg');
-    expect(await panel.findByText('0badf00d')).toBeTruthy();
-    expect(panel.getByText(SHA)).toBeTruthy();
     const text = await panel.findByLabelText('Contents of vm.cfg');
+    // Metadata no longer sits above the preview: it is under File information.
+    expect(panel.queryByText('0badf00d')).toBeNull();
+    fireEvent.click(panel.getByRole('button', { name: 'File information' }));
+    const info = within(panel.getByRole('dialog', { name: 'vm.cfg' }));
+    expect(info.getByText('0badf00d')).toBeTruthy();
+    expect(info.getByText(SHA)).toBeTruthy();
+    expect(info.getByText(/Declared by the archive/)).toBeTruthy();
+    expect(info.getByText(/From the EmuCat manifest/)).toBeTruthy();
+    expect(info.getByText(/Deflated/)).toBeTruthy();
+    expect(info.getByText(/Text, from its contents/)).toBeTruthy();
+    expect(info.getByText(/Can be downloaded/)).toBeTruthy();
+    fireEvent.click(panel.getByRole('button', { name: 'File information' }));
+    expect(panel.queryByRole('dialog', { name: 'vm.cfg' })).toBeNull();
     await waitFor(() => expect(text.querySelector('.hljs-section')).not.toBeNull());
     expect(text.querySelector('img')).toBeNull();
     expect(text.innerHTML).not.toMatch(/onerror/);
     expect(panel.getByText(/matched its recorded checksum/)).toBeTruthy();
+    expect(
+      panel.getByRole('button', { name: 'Highlight (ini)' }).getAttribute('aria-pressed'),
+    ).toBe('true');
     fireEvent.click(panel.getByRole('button', { name: 'Copy text' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('[General]\nmachine = ibm5150\n'));
   });
@@ -403,8 +431,11 @@ describe('Archive Explorer', () => {
     expect(api.calls.filter((call) => call.path.endsWith('/entry/preview')).length).toBe(previews);
     // Plain text starts wrapped; wrapping is a toggle of its own.
     expect(text.className).toContain('archive-wrap');
-    fireEvent.click(panel.getByLabelText('Wrap lines'));
+    const wrap = panel.getByRole('button', { name: 'Wrap lines' });
+    expect(wrap.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(wrap);
     expect(text.className).not.toContain('archive-wrap');
+    expect(wrap.getAttribute('aria-pressed')).toBe('false');
   });
 
   it('renders Markdown inert, and shows its source from the same bytes', async () => {
@@ -436,8 +467,14 @@ describe('Archive Explorer', () => {
     const image = await panel.findByRole('img', { name: 'Preview of screen.png' });
     expect(image.getAttribute('src')).toMatch(/^blob:test\//);
     expect(panel.getByText(/PNG, 640 × 480 pixels/)).toBeTruthy();
-    fireEvent.click(panel.getByRole('button', { name: '100%' }));
+    expect(
+      panel.getByRole('button', { name: 'Fit to the panel' }).getAttribute('aria-pressed'),
+    ).toBe('true');
+    fireEvent.click(panel.getByRole('button', { name: 'Actual size' }));
     expect(image.style.width).toBe('640px');
+    expect(panel.getByRole('button', { name: 'Actual size' }).getAttribute('aria-pressed')).toBe(
+      'true',
+    );
     fireEvent.click(panel.getByRole('button', { name: 'Zoom in' }));
     expect(panel.getByText('200%')).toBeTruthy();
     expect(image.className).toBe('archive-pixelated');
@@ -466,12 +503,14 @@ describe('Archive Explorer', () => {
     const api = mockApi(routes());
     open();
     const panel = await selectFile('bios.bin');
-    expect(panel.getByText(/No preview is available/)).toBeTruthy();
     const dump = await panel.findByLabelText('Hexadecimal bytes');
+    expect(panel.getByText(/No preview for this kind of file/)).toBeTruthy();
+    // Hex is the only mode, so there is no mode switch.
+    expect(panel.queryByRole('group', { name: 'Preview mode' })).toBeNull();
     expect(dump.textContent).toContain('00000000  4d 5a 90 00 01');
     expect(dump.textContent).toContain('MZ..');
     expect(panel.getByText(/only the first 128\.0 KiB can be shown/)).toBeTruthy();
-    fireEvent.click(panel.getByRole('button', { name: 'Next' }));
+    fireEvent.click(panel.getByRole('button', { name: 'Next bytes' }));
     await waitFor(() =>
       expect(
         api.calls.some(
@@ -480,7 +519,7 @@ describe('Archive Explorer', () => {
       ).toBe(true),
     );
     fireEvent.change(panel.getByLabelText('Go to offset'), { target: { value: '0x30000' } });
-    fireEvent.click(panel.getByRole('button', { name: 'Go' }));
+    fireEvent.click(panel.getByRole('button', { name: 'Go to the offset' }));
     expect(panel.getByRole('alert').textContent).toMatch(/compressed/);
     fireEvent.click(panel.getByRole('button', { name: 'CP437' }));
     expect((await panel.findByLabelText('Hexadecimal bytes')).textContent).toContain('MZÉ ☺');
@@ -524,7 +563,9 @@ describe('Archive Explorer', () => {
     open();
     const panel = await selectFile('bios.bin');
     expect(await panel.findByText(/larger than 1\.0 KiB cannot be downloaded/)).toBeTruthy();
-    expect(panel.queryByRole('button', { name: 'Download file' })).toBeNull();
+    expect(
+      (panel.getByRole('button', { name: 'Download file' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it('cancels a file’s requests when another is selected, and never shows a late answer', async () => {
@@ -619,7 +660,7 @@ describe('Archive Explorer', () => {
     await view.findByRole('treeitem', { name: 'f000.txt' });
     await selectFile('vm.cfg');
     expect(split.dataset.pane).toBe('file');
-    fireEvent.click(view.getByRole('button', { name: '← Back to files' }));
+    fireEvent.click(view.getByRole('button', { name: 'Back to files' }));
     expect(split.dataset.pane).toBe('tree');
     expect(view.getByRole('treeitem', { name: 'f000.txt' })).toBeTruthy();
   });
