@@ -5,10 +5,18 @@ import {
   TRANSFER_MIN_CHUNK_BYTES,
 } from '@emucat/contracts';
 import { z } from 'zod';
+import { DEFAULT_ARCHIVE_POLICY as ARCHIVE, type ArchivePolicy } from './archives/policy.js';
 import { REPOSITORY_ROOT } from './env.js';
 import { DEFAULT_MEDIA_POLICY, type MediaPolicy } from './media/uploads.js';
 import type { RepositoryAccessSettings } from './repository-access/ssh.js';
 import { DEFAULT_TRANSFER_POLICY, type TransferPolicy } from './transfers/policy.js';
+
+const intIn = (min: number, max: number, fallback: number) =>
+  emptyAsUndefined(z.coerce.number().int().min(min).max(max).default(fallback));
+
+const KiB = 1024;
+const MiB = 1024 * KiB;
+const GiB = 1024 * MiB;
 
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
@@ -138,6 +146,30 @@ const envSchema = z.object({
     .min(0)
     .max(30 * 86400)
     .default(DEFAULT_TRANSFER_POLICY.retentionSeconds),
+  // Archive inspection and Archive Explorer (decisions 0055 and 0056). All optional; see docs/deployment.md.
+  ARCHIVE_INSPECTION_MAX_ENTRIES: intIn(1000, 500_000, ARCHIVE.inspection.maxEntries),
+  ARCHIVE_INSPECTION_MAX_DIRECTORY_BYTES: intIn(
+    MiB,
+    128 * MiB,
+    ARCHIVE.inspection.maxDirectoryBytes,
+  ),
+  ARCHIVE_INSPECTION_MAX_MANIFEST_BYTES: intIn(MiB, 128 * MiB, ARCHIVE.inspection.maxManifestBytes),
+  ARCHIVE_INSPECTION_MAX_CONCURRENT: intIn(1, 16, ARCHIVE.inspection.maxConcurrent),
+  ARCHIVE_INSPECTION_TIMEOUT_SECONDS: intIn(5, 3600, ARCHIVE.inspection.timeoutMs / 1000),
+  ARCHIVE_CACHE_MAX_INDEXES: intIn(0, 256, ARCHIVE.cache.maxIndexes),
+  ARCHIVE_CACHE_TTL_SECONDS: intIn(0, 86_400, ARCHIVE.cache.ttlMs / 1000),
+  ARCHIVE_CACHE_MAX_BYTES: intIn(0, 4 * GiB, ARCHIVE.cache.maxBytes),
+  ARCHIVE_PREVIEW_TEXT_BYTES: intIn(4 * KiB, 16 * MiB, ARCHIVE.preview.textBytes),
+  ARCHIVE_PREVIEW_HEX_BYTES: intIn(KiB, 4 * MiB, ARCHIVE.preview.hexBytes),
+  ARCHIVE_PREVIEW_IMAGE_BYTES: intIn(64 * KiB, 256 * MiB, ARCHIVE.preview.imageBytes),
+  ARCHIVE_PREVIEW_IMAGE_PIXELS: intIn(4096, 268_402_689, ARCHIVE.preview.imagePixels),
+  ARCHIVE_PREVIEW_PDF_BYTES: intIn(64 * KiB, 512 * MiB, ARCHIVE.preview.pdfBytes),
+  ARCHIVE_PREVIEW_SEEK_BYTES: intIn(0, GiB, ARCHIVE.preview.maxSeekBytes),
+  ARCHIVE_PREVIEW_MAX_CONCURRENT: intIn(1, 16, ARCHIVE.preview.maxConcurrent),
+  ARCHIVE_PREVIEW_TIMEOUT_SECONDS: intIn(5, 600, ARCHIVE.preview.timeoutMs / 1000),
+  ARCHIVE_DOWNLOAD_MAX_BYTES: intIn(0, 64 * GiB, ARCHIVE.download.maxBytes),
+  ARCHIVE_DOWNLOAD_MAX_CONCURRENT: intIn(1, 16, ARCHIVE.download.maxConcurrent),
+  ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS: intIn(10, 86_400, ARCHIVE.download.timeoutMs / 1000),
 });
 
 export interface Config {
@@ -167,6 +199,7 @@ export interface Config {
   /** The server's own repository connection. `undefined` when no key is configured. */
   repositoryAccess: RepositoryAccessSettings | undefined;
   transfers: TransferPolicy;
+  archives: ArchivePolicy;
 }
 
 function absolute(path: string): string {
@@ -261,6 +294,35 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxConcurrent: values.TRANSFER_MAX_CONCURRENT,
       inactivityTimeoutSeconds: values.TRANSFER_INACTIVITY_TIMEOUT_SECONDS,
       retentionSeconds: values.TRANSFER_RETENTION_SECONDS,
+    },
+    archives: {
+      inspection: {
+        maxEntries: values.ARCHIVE_INSPECTION_MAX_ENTRIES,
+        maxDirectoryBytes: values.ARCHIVE_INSPECTION_MAX_DIRECTORY_BYTES,
+        maxManifestBytes: values.ARCHIVE_INSPECTION_MAX_MANIFEST_BYTES,
+        maxConcurrent: values.ARCHIVE_INSPECTION_MAX_CONCURRENT,
+        timeoutMs: values.ARCHIVE_INSPECTION_TIMEOUT_SECONDS * 1000,
+      },
+      cache: {
+        maxIndexes: values.ARCHIVE_CACHE_MAX_INDEXES,
+        ttlMs: values.ARCHIVE_CACHE_TTL_SECONDS * 1000,
+        maxBytes: values.ARCHIVE_CACHE_MAX_BYTES,
+      },
+      preview: {
+        textBytes: values.ARCHIVE_PREVIEW_TEXT_BYTES,
+        hexBytes: values.ARCHIVE_PREVIEW_HEX_BYTES,
+        imageBytes: values.ARCHIVE_PREVIEW_IMAGE_BYTES,
+        imagePixels: values.ARCHIVE_PREVIEW_IMAGE_PIXELS,
+        pdfBytes: values.ARCHIVE_PREVIEW_PDF_BYTES,
+        maxSeekBytes: values.ARCHIVE_PREVIEW_SEEK_BYTES,
+        maxConcurrent: values.ARCHIVE_PREVIEW_MAX_CONCURRENT,
+        timeoutMs: values.ARCHIVE_PREVIEW_TIMEOUT_SECONDS * 1000,
+      },
+      download: {
+        maxBytes: values.ARCHIVE_DOWNLOAD_MAX_BYTES,
+        maxConcurrent: values.ARCHIVE_DOWNLOAD_MAX_CONCURRENT,
+        timeoutMs: values.ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS * 1000,
+      },
     },
   };
 }

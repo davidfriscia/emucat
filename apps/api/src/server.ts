@@ -57,6 +57,7 @@ async function main(): Promise<void> {
       ? new SshRepositoryAccess(config.repositoryAccess)
       : NO_REPOSITORY_ACCESS,
     transfers: config.transfers,
+    archives: config.archives,
     deployment: {
       client: config.deployer ? socketDeploymentClient(config.deployer) : null,
       environment: config.environment,

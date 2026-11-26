@@ -190,7 +190,13 @@ export interface VerifiedObject {
 /** Random access to one stored object, for reading an archive's structure without downloading it. */
 export interface ObjectReader {
   readonly sizeBytes: number;
-  read(offset: number, length: number): Promise<Buffer>;
+  /**
+   * The object's modification time on the repository server, in seconds, when it says. Archives are immutable once
+   * published (decision 0055), so a change means the object was replaced and cached locators must not be used.
+   */
+  readonly modifiedAt: number | null;
+  /** Reads `[offset, offset + length)`, shorter only at the end of the object. Stops early when `signal` aborts. */
+  read(offset: number, length: number, signal?: AbortSignal): Promise<Buffer>;
   close(): Promise<void>;
 }
 
@@ -597,13 +603,32 @@ class SshSession implements RepositorySession {
       );
     };
     while (next < end && pending.length < WINDOW) issue();
+    // Requests still in flight when this stops early are settled, so that none of them is an unhandled rejection.
+    const abandon = () => {
+      for (const request of pending.splice(0)) void request.catch(() => undefined);
+    };
     while (pending.length > 0) {
-      if (signal?.aborted) throw new RepositoryAccessError('cancelled', 'Cancelled');
-      const piece = await (pending.shift() as Promise<Buffer>);
+      if (signal?.aborted) {
+        abandon();
+        throw new RepositoryAccessError('cancelled', 'Cancelled');
+      }
+      let piece: Buffer;
+      try {
+        piece = await (pending.shift() as Promise<Buffer>);
+      } catch (error) {
+        abandon();
+        throw error;
+      }
       if (piece.length === 0) {
+        abandon();
         throw new RepositoryAccessError('upload_interrupted', 'The object ended early');
       }
-      await sink(piece);
+      try {
+        await sink(piece);
+      } catch (error) {
+        abandon();
+        throw error;
+      }
       done += piece.length;
       // A short read: ask for the rest, in order, before anything later is used.
       const expected = Math.min(READ_CHUNK, end - (done - piece.length));
@@ -760,25 +785,37 @@ class SshSession implements RepositorySession {
   async openReader(key: string): Promise<ObjectReader> {
     let handle: Buffer;
     let size: number;
+    let modifiedAt: number | null;
     try {
       handle = await this.openHandle(this.path(key), 'r', 'Cannot read from the repository');
-      const stats = await this.request<{ size: number }>('Checking', (done) =>
+      const stats = await this.request<{ size: number; mtime?: number }>('Checking', (done) =>
         this.sftp.fstat(handle, done),
       );
       size = Number(stats.size);
+      modifiedAt = Number.isFinite(Number(stats.mtime)) ? Number(stats.mtime) : null;
     } catch (error) {
       throw mapSftpError(error, 'Cannot read from the repository');
     }
-    const read = async (offset: number, length: number): Promise<Buffer> => {
+    const read = async (offset: number, length: number, signal?: AbortSignal): Promise<Buffer> => {
+      if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || length < 0) {
+        throw new RepositoryAccessError('repository_error', 'A read outside the object');
+      }
       const end = Math.min(size, offset + length);
       if (offset < 0 || offset > end) {
         throw new RepositoryAccessError('repository_error', 'A read outside the object');
       }
+      if (signal?.aborted) throw new RepositoryAccessError('cancelled', 'Cancelled');
       const pieces: Buffer[] = [];
-      await this.stream(handle, offset, end, (piece) => void pieces.push(Buffer.from(piece)));
+      await this.stream(
+        handle,
+        offset,
+        end,
+        (piece) => void pieces.push(Buffer.from(piece)),
+        signal,
+      );
       return Buffer.concat(pieces);
     };
-    return { sizeBytes: size, read, close: () => this.closeHandle(handle) };
+    return { sizeBytes: size, modifiedAt, read, close: () => this.closeHandle(handle) };
   }
 
   async probe(

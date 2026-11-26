@@ -161,9 +161,45 @@ export class TransferService {
         this.runJob(row.id, () => this.stageDownload(row.id));
       }
     }
+    await this.staging.reportUnexpected(this.log).catch((error: unknown) => {
+      this.log.warn({ err: error }, 'Cannot check the staging area for unexpected files');
+    });
     if (sweepIntervalMs > 0) {
-      this.sweeper = setInterval(() => void this.sweep().catch(() => undefined), sweepIntervalMs);
+      this.sweeper = setInterval(() => void this.sweepAndReport(), sweepIntervalMs);
       this.sweeper.unref();
+    }
+  }
+
+  private sweepFailures = 0;
+  private sweepFailureLoggedAt = 0;
+
+  /**
+   * One periodic sweep. A failure is logged at warning level (assessment R7): the first at once, then at most every
+   * 15 minutes while they persist, with how many there were; a recovery is logged once.
+   */
+  async sweepAndReport(): Promise<void> {
+    try {
+      await this.sweep();
+      await this.staging.reportUnexpected(this.log);
+      if (this.sweepFailures > 0) {
+        this.log.info({ failures: this.sweepFailures }, 'Staging cleanup works again');
+      }
+      this.sweepFailures = 0;
+    } catch (error) {
+      this.sweepFailures += 1;
+      const now = this.now();
+      if (this.sweepFailures === 1 || now - this.sweepFailureLoggedAt >= 15 * 60_000) {
+        this.sweepFailureLoggedAt = now;
+        this.log.warn(
+          {
+            err: error,
+            operation: 'transfer staging sweep',
+            stagingRoot: this.staging.root,
+            consecutiveFailures: this.sweepFailures,
+          },
+          'Staging cleanup failed; it will be tried again',
+        );
+      }
     }
   }
 

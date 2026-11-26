@@ -30,3 +30,4 @@ export * from './vm-name.js';
 export * from './capture.js';
 export * from './archive-inspection.js';
 export * from './transfers.js';
+export * from './archive-preview.js';

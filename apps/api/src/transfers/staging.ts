@@ -62,6 +62,55 @@ export class StagingArea {
     await rm(this.directory(kind, id), { recursive: true, force: true });
   }
 
+  /**
+   * What is in `transfers/` or `clones/` and is not a UUID-named entry: nothing EmuCat made. It is reported, never
+   * removed, since only names the server issued are ever deleted (assessment R8).
+   */
+  async unexpected(kind: StagingKind): Promise<string[]> {
+    try {
+      return (await readdir(join(this.root, kind))).filter((name) => !UUID.test(name)).sort();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+  }
+
+  private reportedUnexpected = '';
+
+  /**
+   * Logs unexpected artifacts once, and again only when what is there changes, so that a persistent stray file does
+   * not fill the log. Names are truncated and never interpreted as paths.
+   */
+  async reportUnexpected(log: {
+    warn(object: object, message: string): void;
+    info(object: object, message: string): void;
+  }): Promise<void> {
+    const found: Record<StagingKind, string[]> = {
+      transfers: await this.unexpected('transfers'),
+      clones: await this.unexpected('clones'),
+    };
+    const signature = JSON.stringify(found);
+    if (signature === this.reportedUnexpected) return;
+    const hadAny =
+      this.reportedUnexpected !== '' && this.reportedUnexpected !== '{"transfers":[],"clones":[]}';
+    this.reportedUnexpected = signature;
+    const count = found.transfers.length + found.clones.length;
+    if (count === 0) {
+      if (hadAny) log.info({}, 'The staging area no longer holds unexpected files');
+      return;
+    }
+    const sample = (names: string[]) => names.slice(0, 10).map((name) => name.slice(0, 80));
+    log.warn(
+      {
+        stagingRoot: this.root,
+        transfers: sample(found.transfers),
+        clones: sample(found.clones),
+        count,
+      },
+      'The staging area holds files EmuCat did not create (not UUID-named). They are left in place: check and remove them by hand',
+    );
+  }
+
   /** The UUID-named directories present, for recovery: whatever no record claims is removed. */
   async present(kind: StagingKind): Promise<string[]> {
     try {

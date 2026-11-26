@@ -18,7 +18,9 @@ import { WorkspaceCoordinator } from './workspaces/coordinator.js';
 import type { ReadinessCheck } from './readiness.js';
 import { registerAgentWebSocket } from './routes/agent-ws.js';
 import { registerBrowserRoutes, type BrowserDependencies } from './routes/browser.js';
+import { ArchiveExplorer } from './archives/explorer.js';
 import { ArchiveInspection } from './archives/inspection.js';
+import { DEFAULT_ARCHIVE_POLICY } from './archives/policy.js';
 import { ServerCloneRunner } from './clones/server-runner.js';
 import { NO_REPOSITORY_ACCESS } from './repository-access/ssh.js';
 import { DEFAULT_TRANSFER_POLICY } from './transfers/policy.js';
@@ -226,7 +228,9 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           staging,
           app.log,
         );
-        const inspection = new ArchiveInspection(browser.pool, access, app.log);
+        const archivePolicy = browser.archives ?? DEFAULT_ARCHIVE_POLICY;
+        const inspection = new ArchiveInspection(browser.pool, access, app.log, archivePolicy);
+        const explorer = new ArchiveExplorer(inspection, app.log, archivePolicy);
         app.addHook('onReady', async () => {
           // Recovery only: the API starts even when the database or the staging disk is not there yet.
           await transfers.start().catch((error: unknown) => {
@@ -257,6 +261,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
               access,
               transfers,
               inspection,
+              explorer,
               clones: serverClones,
               chunkBytes: transferPolicy.chunkBytes,
             },

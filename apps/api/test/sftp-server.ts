@@ -68,15 +68,39 @@ export interface TestSftpServer {
   directory: string;
   /** Turns hard links off, as on a filesystem without them. */
   hardlinks: boolean;
+  /** What clients read, for checking that only the needed byte ranges cross the wire. */
+  stats: { bytesRead: number; reads: Array<[offset: number, length: number]> };
+  resetStats(): void;
+  /** Open SFTP file handles and SSH connections right now: both must return to 0. */
+  openHandles(): number;
+  openConnections(): number;
+  /** Delays every READ answer, to test deadlines and cancellation. */
+  readDelayMs: number;
   close(): Promise<void>;
+}
+
+/**
+ * ssh2's generator occasionally (about 1 in 300) writes an ed25519 key its own parser then refuses. A test server
+ * must not fail because of that, so keys are generated until one parses.
+ */
+function parseableKeyPair() {
+  for (;;) {
+    const pair = utils.generateKeyPairSync('ed25519');
+    if (
+      !(utils.parseKey(pair.private) instanceof Error) &&
+      !(utils.parseKey(pair.public) instanceof Error)
+    ) {
+      return pair;
+    }
+  }
 }
 
 export async function startSftpServer(): Promise<TestSftpServer> {
   const directory = await mkdtemp(join(tmpdir(), 'emucat-sftp-'));
   const root = join(directory, 'repo');
   mkdirSync(root);
-  const host = utils.generateKeyPairSync('ed25519');
-  const client = utils.generateKeyPairSync('ed25519');
+  const host = parseableKeyPair();
+  const client = parseableKeyPair();
   const clientKeyPath = join(directory, 'id_ed25519');
   writeFileSync(clientKeyPath, client.private, { mode: 0o600 });
   const allowed = utils.parseKey(client.public);
@@ -93,7 +117,9 @@ export async function startSftpServer(): Promise<TestSftpServer> {
     return target === root || target.startsWith(root + sep) ? target : null;
   };
 
-  const state = { hardlinks: true };
+  const state = { hardlinks: true, readDelayMs: 0 };
+  const stats = { bytesRead: 0, reads: [] as Array<[number, number]> };
+  let handleCount = 0;
   const server = new Server({ hostKeys: [host.private] }, (connection) => {
     connections.add(connection);
     connection.on('close', () => connections.delete(connection));
@@ -140,6 +166,16 @@ export async function startSftpServer(): Promise<TestSftpServer> {
           };
           const handles = new Map<number, number>();
           let next = 0;
+          // As OpenSSH does: a session that ends closes whatever its client left open.
+          const closeAll = () => {
+            for (const fd of handles.values()) {
+              closeSync(fd);
+              handleCount -= 1;
+            }
+            handles.clear();
+          };
+          sftp.once('close', closeAll);
+          sftp.once('end', closeAll);
           const handleOf = (buffer: Buffer) => handles.get(buffer.readUInt32BE(0));
           const fail = (reqid: number, error: unknown) => {
             const code = (error as NodeJS.ErrnoException).code;
@@ -168,6 +204,7 @@ export async function startSftpServer(): Promise<TestSftpServer> {
               const fd = openSync(path, mode);
               const id = next++;
               handles.set(id, fd);
+              handleCount += 1;
               const buffer = Buffer.alloc(4);
               buffer.writeUInt32BE(id);
               sftp.handle(reqid, buffer);
@@ -180,8 +217,18 @@ export async function startSftpServer(): Promise<TestSftpServer> {
             if (fd === undefined) return sftp.status(reqid, STATUS.FAILURE);
             const buffer = Buffer.alloc(length);
             const read = readSync(fd, buffer, 0, length, offset);
-            if (read === 0) return sftp.status(reqid, STATUS.EOF);
-            sftp.data(reqid, buffer.subarray(0, read));
+            stats.bytesRead += read;
+            stats.reads.push([offset, read]);
+            const answer = () => {
+              try {
+                if (read === 0) sftp.status(reqid, STATUS.EOF);
+                else sftp.data(reqid, buffer.subarray(0, read));
+              } catch {
+                // The client went away meanwhile.
+              }
+            };
+            if (state.readDelayMs > 0) setTimeout(answer, state.readDelayMs);
+            else answer();
           });
           sftp.on('WRITE', (reqid, handle, offset, data) => {
             const fd = handleOf(handle);
@@ -192,7 +239,10 @@ export async function startSftpServer(): Promise<TestSftpServer> {
           sftp.on('CLOSE', (reqid, handle) => {
             const id = handle.readUInt32BE(0);
             const fd = handles.get(id);
-            if (fd !== undefined) closeSync(fd);
+            if (fd !== undefined) {
+              closeSync(fd);
+              handleCount -= 1;
+            }
             handles.delete(id);
             sftp.status(reqid, STATUS.OK);
           });
@@ -278,6 +328,19 @@ export async function startSftpServer(): Promise<TestSftpServer> {
     clientKeyPath,
     knownHostsPath,
     directory,
+    stats,
+    resetStats() {
+      stats.bytesRead = 0;
+      stats.reads = [];
+    },
+    openHandles: () => handleCount,
+    openConnections: () => connections.size,
+    get readDelayMs() {
+      return state.readDelayMs;
+    },
+    set readDelayMs(value: number) {
+      state.readDelayMs = value;
+    },
     get hardlinks() {
       return state.hardlinks;
     },

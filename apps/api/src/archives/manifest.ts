@@ -251,6 +251,8 @@ function parseManifest(raw: Buffer): Manifest {
 
 export interface InspectedZip {
   entries: ZipEntry[];
+  /** Where the central directory starts: no entry's data may reach it. */
+  directoryOffset: number;
   manifest: Manifest;
   manifestRaw: Buffer;
   manifestSha256: string;
@@ -267,8 +269,9 @@ export async function inspectZip(
   limits: ArchiveLimits = DEFAULT_ARCHIVE_LIMITS,
 ): Promise<InspectedZip> {
   let entries: ZipEntry[];
+  let directoryOffset: number;
   try {
-    ({ entries } = await readCentralDirectory(source, {
+    ({ entries, directoryOffset } = await readCentralDirectory(source, {
       maxEntries: limits.maxEntries,
       maxDirectoryBytes: limits.maxDirectoryBytes,
     }));
@@ -341,7 +344,13 @@ export async function inspectZip(
         .find((name) => name !== MANIFEST_ENTRY_NAME && !listed.has(name)) ?? 'An entry';
     throw manifestProblem(`${extra} is in the archive and not in the manifest`);
   }
-  return { entries, manifest, manifestRaw: raw, manifestSha256: sha256Hex(raw) };
+  return {
+    entries,
+    directoryOffset,
+    manifest,
+    manifestRaw: raw,
+    manifestSha256: sha256Hex(raw),
+  };
 }
 
 export function toCheckError(error: unknown): ArchiveCheckError {

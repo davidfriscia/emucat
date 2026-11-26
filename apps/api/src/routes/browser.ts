@@ -26,7 +26,9 @@ import { registerAdminCatalogRoutes } from './admin-catalog.js';
 import { registerAdminCloneRoutes } from './admin-clones.js';
 import { registerAdminArchiveRoutes } from './admin-archives.js';
 import { registerAgentRepositoryRelayRoutes } from './agent-repository-relay.js';
+import type { ArchiveExplorer } from '../archives/explorer.js';
 import type { ArchiveInspection } from '../archives/inspection.js';
+import type { ArchivePolicy } from '../archives/policy.js';
 import type { ServerCloneRunner } from '../clones/server-runner.js';
 import type { RepositoryAccess } from '../repository-access/ssh.js';
 import type { TransferPolicy } from '../transfers/policy.js';
@@ -79,6 +81,8 @@ export interface BrowserDependencies {
   repositoryAccess?: RepositoryAccess;
   /** The relay's and server-side clones' staging (decision 0055). */
   transfers?: TransferPolicy;
+  /** Archive inspection and Archive Explorer limits (decision 0056). */
+  archives?: ArchivePolicy;
 }
 
 /** What the server does in repositories itself (decision 0055). */
@@ -86,6 +90,7 @@ export interface RepositoryServices {
   access: RepositoryAccess;
   transfers: TransferService;
   inspection: ArchiveInspection;
+  explorer: ArchiveExplorer;
   clones: ServerCloneRunner;
   chunkBytes: number;
 }
@@ -133,7 +138,7 @@ export async function registerBrowserRoutes(
     authenticateAgent,
     repositories.chunkBytes,
   );
-  registerAdminArchiveRoutes(api, dependencies, repositories.inspection);
+  registerAdminArchiveRoutes(api, dependencies, repositories.inspection, repositories.explorer);
   registerAdminRestoreRoutes(api, dependencies, restores);
   registerAdminExecutionRoutes(api, dependencies, execution, captures);
   registerAdminVersionRoutes(

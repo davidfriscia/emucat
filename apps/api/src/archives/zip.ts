@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { crc32, createInflateRaw, deflateRawSync, inflateRawSync } from 'node:zlib';
+import { promisify } from 'node:util';
+import { crc32, createInflateRaw, deflateRawSync, inflateRaw } from 'node:zlib';
+
+const inflateRawAsync = promisify(inflateRaw);
 
 /**
  * The parts of ZIP the server needs (decision 0055): reading a central directory and one small entry through
@@ -281,7 +284,10 @@ async function localDataOffset(
   };
 }
 
-/** Reads one entry whole, for a small one such as the manifest. Refuses more than `maxBytes`. */
+/**
+ * Reads one entry whole, for a small one such as the manifest. Refuses more than `maxBytes`. Decompression runs on
+ * zlib's thread pool, not on the event loop (decision 0056), and stops at `maxBytes + 1` whatever the data claims.
+ */
 export async function readSmallEntry(
   source: RandomAccess,
   entry: ZipEntry,
@@ -297,7 +303,7 @@ export async function readSmallEntry(
   if (entry.method === 0) data = compressed;
   else if (entry.method === 8) {
     try {
-      data = inflateRawSync(compressed, { maxOutputLength: maxBytes + 1 });
+      data = await inflateRawAsync(compressed, { maxOutputLength: maxBytes + 1 });
     } catch {
       throw malformed(`${entry.name} cannot be decompressed`);
     }
