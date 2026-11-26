@@ -132,7 +132,8 @@ single-package API or web run, if the contracts have changed.
 
 Each API test opens its own database with a pool of up to 10 connections. Close it when the test ends
 (`afterEach`), not when its file does: a file that keeps them all open until the end holds dozens of
-databases at once. The API suite runs **4 test files at a time** by default (`apps/api/vitest.config.ts`).
+databases at once. The API suite runs **2 test files at a time on Windows and 4 elsewhere** by default
+(`apps/api/vitest.config.ts`, which records the measurements; see [docs/testing.md](docs/testing.md)).
 Vitest's own default, one worker per CPU thread but one, exhausts MariaDB's default 151 connections on
 a machine with many threads. Set `EMUCAT_API_TEST_WORKERS` (or pass `--maxWorkers`) to change it, and
 keep workers × 12 well under `max_connections`. A run that is interrupted, or whose database setup
