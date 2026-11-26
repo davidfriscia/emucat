@@ -26,7 +26,9 @@ repository, with a dedicated key and strict `known_hosts` checks. It uses it for
 - **Archive Explorer** ([decision 0056](decisions/0056-archive-explorer.md)). It reads an archive's central directory and
   manifest to list it, then one file's own bytes to preview or stream it, without downloading the archive, writing
   anything to disk, using staging or changing anything. Only the archive's files are explored, never what is inside a
-  virtual disk image.
+  virtual disk image. An archive inside it (ZIP, TAR, OVA, GZIP) is downloaded once through the same single-file
+  download and opened in the browser, by a web worker, with everything deeper
+  ([decision 0058](decisions/0058-browser-local-nested-archives.md)); the server is not asked anything more.
 - **The HTTPS relay**, for an agent that cannot reach a repository at all: the agent sends or fetches the archive in
   resumable, hashed chunks over its authenticated HTTPS connection, the server stages it under `data/transfers`, and
   moves it to or from the repository over its own connection, with the same staging keys, verification and

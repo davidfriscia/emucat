@@ -13,6 +13,7 @@ production. The quick reference is in the [README](../README.md#testing-on-windo
 | `pnpm test:sftp`                                             | The agent's SFTP, packaging and restore tests against real OpenSSH, ZIP64    | Docker, `ssh-keygen`                       | Windows, Linux |
 | `pnpm test:e2e`                                              | The compiled agent, the API, a browser and a real OpenSSH server, end to end | MariaDB, Docker, `ssh-keygen`, Edge/Chrome | Windows        |
 | `pnpm test:deploy`                                           | The deployment tooling on disposable hosts, in a Linux container             | Docker                                     | Windows, Linux |
+| `pnpm --filter @emucat/web test:browser`                     | Archive Explorer's production bundle in a real browser (decision 0058)       | Edge, Chrome or `EMUCAT_BROWSER_PATH`      | Windows, Linux |
 | `pnpm test:compose`                                          | The production images under `deploy/compose.yaml`                            | Docker                                     | Windows, Linux |
 
 `pnpm test:e2e` also runs real QEMU and 86Box when they are installed, and skips only those tests otherwise.
@@ -143,6 +144,28 @@ npx vitest run --config e2e/vitest.config.ts e2e/restore.e2e.test.ts -t "interru
 
 The e2e tests in a file are one scenario around one running agent and run in order, so a filtered run still runs the
 file's `beforeAll` setup.
+
+## Browser tests of the web application
+
+`pnpm --filter @emucat/web test:browser` builds Archive Explorer alone (`apps/web/e2e/harness`) with the
+application's own Vite configuration, serves it the way the web container's nginx does (its MIME table, `nosniff`),
+and drives it with Playwright against a stand-in for the archive routes of the API. It needs no database, Docker or
+agent. It proves what jsdom cannot: the archive worker and PDF.js's worker load as module workers with nginx's types,
+nested archives open, preview (canvas, PDF, legacy images) and download with exact bytes, no request leaves the
+origin, no console error is logged, and the page stays responsive while the worker indexes archives of 1 to 64 MiB.
+
+It launches Edge, then Chrome. Elsewhere, name a Chromium binary:
+
+```powershell
+$env:EMUCAT_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+pnpm --filter @emucat/web test:browser
+```
+
+```bash
+EMUCAT_BROWSER_PATH=/usr/bin/chromium pnpm --filter @emucat/web test:browser
+```
+
+`EMUCAT_BROWSER_SCREENSHOTS=<directory>` also saves screenshots and the measurements as `measurements.json`.
 
 ## Linux validation from Windows
 

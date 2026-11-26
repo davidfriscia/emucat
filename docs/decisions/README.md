@@ -62,3 +62,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0055](0055-server-repository-access.md)                | The server's own repository connection, an HTTPS relay, server-made clones     |
 | [0056](0056-archive-explorer.md)                        | Archive Explorer reads one file of an archive through the server, diskless     |
 | [0057](0057-ova-tar-compatibility.md)                   | The agent and the server read an OVA's TAR by one policy                       |
+| [0058](0058-browser-local-nested-archives.md)           | Archive Explorer opens nested archives in the browser, in a compact viewer     |

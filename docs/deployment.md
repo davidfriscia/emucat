@@ -569,6 +569,13 @@ the database schema nor the agent: a host that already runs the release with the
 needs no configuration change. The step-by-step procedure, with its checks, is the
 [Archive Explorer runbook](runbook-0056-mars.md).
 
+### Upgrading to the release with the compact Archive Explorer and nested archives
+
+That release ([decision 0058](decisions/0058-browser-local-nested-archives.md)) changes the web application only: no
+`deploy/`, deployment service, configuration, schema, nginx or agent change. A host on the tooling of decision 0055
+or later updates with `emucatctl update` alone. Nested archives are opened in the browser, so the API's memory and
+the server's disk are unaffected. Procedure and checks: the [runbook](runbook-0058-mars.md).
+
 ## 13. Rolling back, and its limits
 
 - **Automatic:** if an update fails after the containers were replaced, and **no migration was applied**,
