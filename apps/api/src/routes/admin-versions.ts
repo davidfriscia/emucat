@@ -34,6 +34,7 @@ import {
   type ResumeWorkspaceRequest,
   type VersionTreeResponse,
   type VmIdentity,
+  type VmOperationListResponse,
   type VmSession,
 } from '@emucat/contracts';
 import type { FastifyInstance } from 'fastify';
@@ -91,6 +92,17 @@ export function registerAdminVersionRoutes(
           const vm = request.params as VmIdentity;
           await requireVm(vm);
           return versionTree(pool, vm, deletions);
+        },
+      );
+
+      // The operations that concern this VM's versions, while they run and for a while after (decision 0060).
+      api.get(
+        '/vms/:emulatorType/:vmName/operations',
+        { schema: { params: vmPathParamsSchema } },
+        async (request): Promise<VmOperationListResponse> => {
+          const vm = request.params as VmIdentity;
+          await requireVm(vm);
+          return registrations.listForVm(vm);
         },
       );
 

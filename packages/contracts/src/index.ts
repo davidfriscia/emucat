@@ -26,6 +26,7 @@ export * from './versions.js';
 export * from './virtualbox.js';
 export * from './virtualbox-management.js';
 export * from './vm-name.js';
+export * from './vm-operations.js';
 
 export * from './capture.js';
 export * from './archive-inspection.js';

@@ -9,6 +9,9 @@ import {
   isRegistrationTerminal,
   isRetryableCleanup,
   registrationRecovery,
+  VM_OPERATION_LIST_LIMIT,
+  VM_OPERATION_OWN_MODES,
+  VM_OPERATION_RETENTION_HOURS,
   type CloneRequestPayload,
   type CreateRegistrationRequest,
   type RegistrationAckPayload,
@@ -28,6 +31,7 @@ import {
   type VirtualBoxRegistrationRequestPayload,
   type VirtualBoxRegistrationResultPayload,
   type VmIdentity,
+  type VmOperationListResponse,
 } from '@emucat/contracts';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
@@ -1041,6 +1045,84 @@ export class RegistrationCoordinator {
       response.total = Number(counted[0]?.total ?? 0);
     }
     return response;
+  }
+
+  /**
+   * The operations that concern one VM's versions, for its management pages (decision 0060): the snapshots and
+   * remasters of this VM, and the clones made from any of its versions. Each is the durable row the operation always
+   * was, read as `get` reads it; nothing is tracked anew. Listed while active, while a partial success still needs
+   * attention, and for `retentionHours` after it ended. Active operations come first, so that ended ones can never
+   * crowd them out of the limit.
+   *
+   * Both halves use an index: this VM's rows by `ix_registration_vm_created`, and clones by
+   * `ix_registration_clone_source`, through the ids of this VM's own versions; a version of another VM cannot match.
+   */
+  async listForVm(
+    vm: VmIdentity,
+    retentionHours: number = VM_OPERATION_RETENTION_HOURS,
+  ): Promise<VmOperationListResponse> {
+    const recent =
+      '(op.attention_marker = 1 OR op.finished_at >= UTC_TIMESTAMP(3) - INTERVAL ? HOUR)';
+    const own = VM_OPERATION_OWN_MODES.map(() => '?').join(', ');
+    const [rows] = await this.pool.query<OperationRow[]>(
+      `SELECT * FROM (
+         (${OPERATION_QUERY}
+          WHERE op.emulator_type = ? AND op.vm_name = ? AND op.mode IN (${own}) AND ${recent})
+         UNION ALL
+         (${OPERATION_QUERY}
+          WHERE op.mode = 'clone' AND op.clone_source_version_id IN (
+            SELECT v.id FROM vm_versions AS v WHERE v.emulator_type = ? AND v.vm_name = ?)
+            AND ${recent})
+       ) AS listed
+       ORDER BY (state IN (${ACTIVE_STATES.map(() => '?').join(', ')})) DESC, created_at DESC, id DESC
+       LIMIT ${VM_OPERATION_LIST_LIMIT}`,
+      [
+        vm.emulatorType,
+        vm.vmName,
+        ...VM_OPERATION_OWN_MODES,
+        retentionHours,
+        vm.emulatorType,
+        vm.vmName,
+        retentionHours,
+        ...ACTIVE_STATES,
+      ],
+    );
+    // How each agent last reached each repository. Not recorded per operation, and said so where it is shown.
+    const pairs = [
+      ...new Set(
+        rows
+          .filter((row) => row.agent_id !== null)
+          .map((row) => `${row.agent_id as string}/${row.repository_id}`),
+      ),
+    ];
+    const transports = new Map<string, 'sftp' | 'relay'>();
+    if (pairs.length > 0) {
+      const [found] = await this.pool.query<RowDataPacket[]>(
+        `SELECT agent_id, repository_id, last_transport FROM agent_repositories
+         WHERE (agent_id, repository_id) IN (${pairs.map(() => '(?, ?)').join(', ')})`,
+        pairs.flatMap((pair) => pair.split('/')),
+      );
+      for (const row of found) {
+        if (row.last_transport === 'sftp' || row.last_transport === 'relay') {
+          transports.set(
+            `${row.agent_id as string}/${row.repository_id as string}`,
+            row.last_transport,
+          );
+        }
+      }
+    }
+    return {
+      operations: rows.map((row) => ({
+        relation: row.mode === 'clone' ? 'clone_source' : 'this_vm',
+        operation: toOperation(row, this.onlineOf(row)),
+        transport:
+          row.agent_id === null
+            ? 'server'
+            : (transports.get(`${row.agent_id}/${row.repository_id}`) ?? null),
+      })),
+      retentionHours,
+      serverTime: new Date().toISOString(),
+    };
   }
 
   /**
