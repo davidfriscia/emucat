@@ -452,6 +452,13 @@ describe.skipIf(CAPTURE_ONLY)('General', () => {
       expect(await label.locator('svg').count()).toBe(1);
     }
     expect(await noSidewaysScroll(page)).toBe(true);
+    // The metadata editor uses the content's full width, as Run and verify does.
+    const widths = await page.evaluate(() =>
+      ['.vm-general-metadata', '.execution-panel'].map((selector) =>
+        Math.round(document.querySelector(selector)!.getBoundingClientRect().width),
+      ),
+    );
+    expect(widths[0]).toBe(widths[1]);
     await shot(page, 'general-active-light');
     await shot(page, 'general-active-light-full', true);
 

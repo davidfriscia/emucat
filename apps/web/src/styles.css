@@ -2000,12 +2000,9 @@ main.container:has(> .page-wide) {
   }
 }
 
-/* General (decision 0060): the VM's toolbar, a metadata editor of a readable width, and Run and verify below. */
+/* General (decision 0060): the VM's toolbar, the metadata editor and Run and verify, each the content's full width. */
 .vm-general-toolbar {
   margin-bottom: 1rem;
-}
-.vm-general-metadata {
-  max-width: 60rem;
 }
 .vm-section-header {
   display: flex;

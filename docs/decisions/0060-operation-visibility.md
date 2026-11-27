@@ -102,7 +102,7 @@ Version History read its tree again (expanded branches and focus kept), and refr
 
 The page follows the conventions of 0058/0059: one "VM actions" toolbar (status chip, Make public/private with
 `Eye`/`EyeOff`, View public page as an `IconLink`, the operations summary, VM information); the permanent Details
-panel moved into VM information, every fact preserved; the metadata editor stays visible with explicit Save in its
+panel moved into VM information, every fact preserved; the metadata editor stays visible, at the content's full width like Run and verify (display name and description side by side from 992 px), with explicit Save in its
 section toolbar and an "Unsaved changes" status; tags still save as they change. Run and verify keeps its three
 labelled modes with icons (`HardDrive`, `Play`, `Camera`), its visible explanation of the selected mode, an Info panel
 for all of them, labelled icon actions, and Now lists archive operations apart from emulator sessions.
