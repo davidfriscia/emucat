@@ -9,6 +9,7 @@ import type { RunPreselection } from '../../../components/Execution';
 import { SidebarLayout } from '../../../components/SidebarLayout';
 import { EmptyState, ErrorState, LoadingState } from '../../../components/States';
 import { VirtualBoxManagementProvider } from '../../../components/VirtualBoxSource';
+import { VmOperationsProvider } from '../../../components/operations/VmOperationsProvider';
 import {
   CATALOG_PATH,
   useVmRouteIdentity,
@@ -145,6 +146,13 @@ function VmManage({ identity }: { identity: VmIdentity }) {
       <VirtualBoxManagementProvider vm={value.identity}>{content}</VirtualBoxManagementProvider>
     );
   }
+  // The VM's operations are followed once, for General and Version History alike (decision 0060). One that ends can
+  // change the VM's version count.
+  content = (
+    <VmOperationsProvider vm={value.identity} onEnded={refreshVm}>
+      {content}
+    </VmOperationsProvider>
+  );
   return (
     <VmManageContext.Provider value={value}>
       <SidebarLayout

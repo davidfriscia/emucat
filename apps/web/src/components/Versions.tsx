@@ -8,6 +8,8 @@ import {
   type VersionTreeEntry,
   type VirtualBoxManagementResponse,
   type VmIdentity,
+  type VmOperation,
+  vmOperationSourceVersionId,
 } from '@emucat/contracts';
 import {
   ArrowUpToLine,
@@ -36,7 +38,7 @@ import {
   Tags,
   Trash2,
 } from 'lucide-react';
-import { Fragment, useCallback, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   discardWorkspace,
   fetchRemasters,
@@ -51,7 +53,7 @@ import { usePolledData } from '../usePolledData';
 import { formatBytes, formatTime } from './Agents';
 import { DeleteSnapshotDialog, deletionReasonText } from './Cleanup';
 import { ArchiveExplorerDialog } from './ArchiveExplorer';
-import { CloneProgress, CloneVmDialog } from './Clone';
+import { CloneVmDialog } from './Clone';
 import { ConfirmDialog } from './Dialogs';
 import { VmLaunchDialog, WORKSPACE_STATE_TEXT, type RunPreselection } from './Execution';
 import {
@@ -63,12 +65,12 @@ import {
 } from './Remaster';
 import { RestoreDialog } from './Restore';
 import {
-  CreateSnapshotDialog,
-  shortId,
-  SnapshotProgress,
-  versionLabel,
-  type SnapshotRequest,
-} from './Snapshots';
+  OperationNotices,
+  OperationsSummary,
+  VersionOperations,
+} from './operations/OperationStatus';
+import { useVmOperations, WithVmOperations } from './operations/VmOperationsProvider';
+import { CreateSnapshotDialog, shortId, versionLabel, type SnapshotRequest } from './Snapshots';
 import { FormError } from './States';
 import { TagEditorDialog, TagList } from './Tags';
 import {
@@ -510,6 +512,8 @@ function VersionItem({
             </>
           ) : null}
           <ToolbarSpacer />
+          {/* Where an operation on this version stands (decision 0060): beside Info, on the card's one toolbar row. */}
+          <VersionOperations versionId={node.id} versionName={name} />
           <InfoPopover
             icon={Info}
             label={`Information about ${name}`}
@@ -880,10 +884,14 @@ function WorkspaceCard({
  * version and mode there (`onRun`), or, where there is no run panel, open it over the page.
  */
 export function VmVersionHistory(props: VersionHistoryProps) {
-  return props.vm.emulatorType === 'virtualbox' ? (
-    <VirtualBoxVersionHistory {...props} />
-  ) : (
-    <VersionHistory {...props} virtualbox={null} />
+  return (
+    <WithVmOperations vm={props.vm}>
+      {props.vm.emulatorType === 'virtualbox' ? (
+        <VirtualBoxVersionHistory {...props} />
+      ) : (
+        <VersionHistory {...props} virtualbox={null} />
+      )}
+    </WithVmOperations>
   );
 }
 
@@ -1000,7 +1008,7 @@ function VersionHistory({
   const [restoring, setRestoring] = useState<string | null>(null);
   const [running, setRunning] = useState<RunPreselection | null>(null);
   const [snapshotting, setSnapshotting] = useState<SnapshotRequest | null>(null);
-  const [snapshotOperation, setSnapshotOperation] = useState<string | null>(null);
+  const operations = useVmOperations();
   const [deleting, setDeleting] = useState<VersionNode | null>(null);
   const [importing, setImporting] = useState<VersionNode | null>(null);
   const [retryError, setRetryError] = useState<unknown>(null);
@@ -1010,14 +1018,12 @@ function VersionHistory({
   const [remastering, setRemastering] = useState(false);
   const [cloning, setCloning] = useState<VersionNode | null>(null);
   const [viewing, setViewing] = useState<VersionNode | null>(null);
-  const [clones, setClones] = useState<string[]>([]);
   const [startedRemaster, setStartedRemaster] = useState<string | null>(null);
   const runToken = useRef(0);
 
   // Only Milestone 7's manual working copies are managed here. Remote sessions belong to the run panel.
   const manual = (workspaces.data?.workspaces ?? []).filter((item) => item.purpose === 'manual');
   const busy =
-    snapshotOperation !== null ||
     manual.some((item) => item.state === 'preparing' || item.state === 'discarding') ||
     (tree.data?.versions.some((version) => version.deletion !== null) ?? false);
   if (busy !== fastPoll) setFastPoll(busy);
@@ -1028,6 +1034,16 @@ function VersionHistory({
     options.refresh();
     remasters.refresh();
   };
+  // Whatever an operation changed (a new snapshot, a copy's lineage, a remaster) is read once it is seen to end. The
+  // tree keeps its data meanwhile, so expanded branches and focus stay as they were.
+  const refreshRef = useRef(refresh);
+  useEffect(() => {
+    refreshRef.current = refresh;
+  });
+  const revision = operations?.revision ?? 0;
+  useEffect(() => {
+    if (revision > 0) refreshRef.current();
+  }, [revision]);
 
   if (tree.error && !tree.data) {
     return (
@@ -1115,9 +1131,17 @@ function VersionHistory({
     node.parentVersionId ? labelOf(node.parentVersionId) : null;
 
   const drawable = built.ok && built.root !== null;
+  // Which version an operation is drawn on, by the identifiers it carries: never by a name.
+  const operationVersionLabel = (entry: VmOperation) => {
+    const id = vmOperationSourceVersionId(entry);
+    if (!id) return null;
+    const found = tree.data?.versions.find((version) => version.id === id);
+    return found ? nameOf(found) : null;
+  };
   return (
     <div className="version-history">
       <VersionHistoryHeader headingId={headingId} count={built.ok ? built.count : undefined}>
+        <OperationsSummary versionLabel={operationVersionLabel} />
         {drawable && remasterChoices.length > 0 ? (
           <IconButton
             icon={RefreshCw}
@@ -1131,18 +1155,9 @@ function VersionHistory({
           />
         ) : null}
       </VersionHistoryHeader>
-      {snapshotOperation ? (
-        <SnapshotProgress
-          key={snapshotOperation}
-          operationId={snapshotOperation}
-          onFinished={refresh}
-        />
-      ) : null}
+      <OperationNotices />
       {followed.map((remasterId) => (
         <RemasterProgress key={remasterId} remasterId={remasterId} onChanged={refresh} />
-      ))}
-      {clones.map((operationId) => (
-        <CloneProgress key={operationId} operationId={operationId} onFinished={refresh} />
       ))}
       <FormError error={retryError} />
       {!built.ok ? (
@@ -1199,7 +1214,7 @@ function VersionHistory({
                 key={workspace.id}
                 workspace={workspace}
                 vmName={vmName}
-                onSnapshotStarted={(operation) => setSnapshotOperation(operation.id)}
+                onSnapshotStarted={(operation) => operations?.track(operation, 'this_vm')}
                 onChange={refresh}
               />
             ))}
@@ -1325,7 +1340,7 @@ function VersionHistory({
           onClose={() => setCloning(null)}
           onStarted={(operation) => {
             setCloning(null);
-            setClones((current) => [operation.id, ...current]);
+            operations?.track(operation, 'clone_source');
             refresh();
           }}
         />
@@ -1337,7 +1352,7 @@ function VersionHistory({
           onClose={() => setSnapshotting(null)}
           onStarted={(operation: RegistrationOperation) => {
             setSnapshotting(null);
-            setSnapshotOperation(operation.id);
+            operations?.track(operation, 'this_vm');
             refresh();
           }}
         />

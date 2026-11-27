@@ -17,6 +17,9 @@ export function InfoPopover({
   wide,
   tooltip,
   tooltipPlacement,
+  text,
+  iconClassName,
+  buttonClassName,
 }: {
   icon: LucideIcon;
   /** The button's accessible name, such as "File information". */
@@ -30,6 +33,11 @@ export function InfoPopover({
   /** The button's tooltip, when it should be shorter than its accessible name. */
   tooltip?: string;
   tooltipPlacement?: 'below' | 'above' | 'start';
+  /** Visible text beside the icon (decision 0060); the accessible name stays `label`. */
+  text?: string;
+  iconClassName?: string;
+  /** A class for the button, such as an operation's tone. */
+  buttonClassName?: string;
 }) {
   const ids = useId();
   const [open, setOpen] = useState(false);
@@ -75,6 +83,9 @@ export function InfoPopover({
         onPressedChange={setOpen}
         tooltip={open ? '' : tooltip}
         tooltipPlacement={tooltipPlacement}
+        {...(text !== undefined ? { text } : {})}
+        {...(iconClassName ? { iconClassName } : {})}
+        {...(buttonClassName ? { className: buttonClassName } : {})}
       />
       {open ? (
         <div

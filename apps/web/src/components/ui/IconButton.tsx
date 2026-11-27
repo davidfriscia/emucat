@@ -1,4 +1,5 @@
 import { LoaderCircle, type LucideIcon } from 'lucide-react';
+import { Link } from 'react-router';
 import {
   forwardRef,
   useId,
@@ -30,6 +31,13 @@ interface BaseProps extends Omit<
   loading?: boolean;
   /** Shows the label beside the icon. */
   showLabel?: boolean;
+  /**
+   * Visible text beside the icon, when it should be shorter than the accessible name (an operation's status, whose
+   * name also says what it concerns). The name stays `label`.
+   */
+  text?: string;
+  /** A class for the icon, such as `icon-spin` for an animated indicator. */
+  iconClassName?: string;
   /** Where the tooltip opens. */
   tooltipPlacement?: 'below' | 'above' | 'start';
   variant?: 'ghost' | 'primary';
@@ -49,6 +57,8 @@ function Content({
   label,
   loading,
   showLabel,
+  text,
+  iconClassName,
   tooltip,
   tooltipPlacement,
   children,
@@ -60,9 +70,15 @@ function Content({
       {loading ? (
         <LoaderCircle size={ICON_SIZE} aria-hidden="true" className="icon-spin" />
       ) : (
-        <Icon size={ICON_SIZE} aria-hidden="true" />
+        <Icon size={ICON_SIZE} aria-hidden="true" className={iconClassName} />
       )}
-      {showLabel ? <span className="icon-button-label">{label}</span> : null}
+      {text !== undefined ? (
+        <span className="icon-button-label" aria-hidden="true">
+          {text}
+        </span>
+      ) : showLabel ? (
+        <span className="icon-button-label">{label}</span>
+      ) : null}
       {children}
       {reason !== null ? (
         // The reason is written once: it is the button's description (aria-describedby names it) and the tooltip's
@@ -92,7 +108,7 @@ const className = (props: BaseProps, pressed?: boolean) =>
     'icon-button',
     props.variant === 'primary' ? 'icon-button-primary' : '',
     pressed ? 'icon-button-pressed' : '',
-    props.showLabel ? 'icon-button-with-label' : '',
+    props.showLabel || props.text !== undefined ? 'icon-button-with-label' : '',
     props.danger ? 'icon-button-danger' : '',
     props.className ?? '',
   ]
@@ -105,6 +121,8 @@ const CONTENT_KEYS = [
   'tooltip',
   'loading',
   'showLabel',
+  'text',
+  'iconClassName',
   'tooltipPlacement',
   'variant',
   'children',
@@ -259,4 +277,36 @@ export function ToolbarSeparator() {
 /** Pushes what follows it to the end of the toolbar. */
 export function ToolbarSpacer() {
   return <div className="icon-toolbar-spacer" aria-hidden="true" />;
+}
+
+/**
+ * A link that looks like an {@link IconButton}: navigation stays a link (decision 0060), so it opens in a new tab,
+ * can be copied and is announced as one. Its name is `label`; the tooltip repeats it and is hidden from readers.
+ */
+export function IconLink({
+  icon: Icon,
+  label,
+  tooltip,
+  tooltipPlacement,
+  to,
+  className: extra,
+}: {
+  icon: LucideIcon;
+  label: string;
+  tooltip?: string;
+  tooltipPlacement?: 'below' | 'above' | 'start';
+  to: string;
+  className?: string;
+}) {
+  return (
+    <Link to={to} className={`icon-button icon-link ${extra ?? ''}`} aria-label={label}>
+      <Icon size={ICON_SIZE} aria-hidden="true" />
+      <span
+        className={`icon-tooltip icon-tooltip-${tooltipPlacement ?? 'below'}`}
+        aria-hidden="true"
+      >
+        {tooltip ?? label}
+      </span>
+    </Link>
+  );
 }

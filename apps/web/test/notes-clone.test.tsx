@@ -461,15 +461,40 @@ describe('cloning a version', () => {
   }
 
   it('names the source and version, validates the name, and starts the clone', async () => {
+    // What the server lists for the source VM (decision 0060): nothing, then the clone, then the clone done.
+    let listed: RegistrationOperation | null = null;
     let polls = 0;
-    const operation = cloneOperation();
+    // The server clones by itself (decision 0055): no agent, so nothing ever waits for one.
+    const server = {
+      performedBy: 'server',
+      agentId: null,
+      agentName: null,
+      agentOnline: false,
+    } as const;
+    const operation = cloneOperation(server);
     const api = page({
       [`GET ${VM_PATH}/versions/${MASTER}/clone-options`]: options(),
-      [`POST ${VM_PATH}/versions/${MASTER}/clone`]: new Reply(202, operation),
-      [`GET /admin/registrations/${operation.id}`]: () =>
-        polls++ === 0
-          ? operation
-          : cloneOperation({ state: 'succeeded', progress: { doneBytes: null, totalBytes: null } }),
+      [`POST ${VM_PATH}/versions/${MASTER}/clone`]: () => {
+        listed = operation;
+        return new Reply(202, operation);
+      },
+      [`GET ${VM_PATH}/operations`]: () => {
+        if (listed && polls++ > 0) {
+          listed = cloneOperation({
+            ...server,
+            state: 'succeeded',
+            progress: { doneBytes: null, totalBytes: null },
+            finishedAt: new Date().toISOString(),
+          });
+        }
+        return {
+          operations: listed
+            ? [{ relation: 'clone_source', operation: listed, transport: 'server' }]
+            : [],
+          retentionHours: 24,
+          serverTime: new Date().toISOString(),
+        };
+      },
     });
     const dialog = await openDialog();
     expect(within(dialog).getByText(/Windows 98 SE/)).toBeTruthy();
@@ -505,16 +530,28 @@ describe('cloning a version', () => {
     expect(post?.body).toMatchObject({ vmName: 'Win98 - Office' });
     expect(post?.body).not.toHaveProperty('agentId');
     expect((post?.body as { requestId: string }).requestId).toMatch(/^[0-9a-f-]{36}$/);
-    const status = await screen.findByText(/Clone Win98 - Office/);
-    expect(status.closest('[role="status"]')?.textContent).toMatch(
-      /The server is downloading the source and writing the clone \(25%\)/,
+    // On the version it copies, not as a Master operation of anything else, with the server's measured progress.
+    const tree = screen.getByRole('tree', { name: 'Versions of Win98' });
+    const master = within(tree).getAllByRole('treeitem')[0] as HTMLElement;
+    const indicator = await within(master).findByRole('button', {
+      name: 'Cloning VM of Master: Copying the source archive 25%',
+    });
+    fireEvent.click(indicator);
+    const details = await within(master).findByRole('dialog', { name: 'Cloning VM' });
+    expect(within(details).getByText('The EmuCat server')).toBeTruthy();
+    expect(within(details).getByText(/reserved; created when the clone completes/)).toBeTruthy();
+    expect(within(details).getByText('The EmuCat server’s own repository connection')).toBeTruthy();
+    fireEvent.keyDown(details, { key: 'Escape' });
+    // The end says so, and leads to the new VM without leaving this one.
+    const notices = await screen.findByRole(
+      'list',
+      { name: 'Ended operations' },
+      { timeout: 6_000 },
     );
-    const link = await screen.findByRole(
-      'link',
-      { name: 'Open Win98 - Office' },
-      { timeout: 5_000 },
-    );
+    expect(within(notices).getByText('VM cloned: Win98 - Office')).toBeTruthy();
+    const link = within(notices).getByRole('link', { name: 'Open Win98 - Office' });
     expect(link.getAttribute('href')).toBe('/admin/vms/qemu/Win98%20-%20Office');
+    expect(screen.getByTestId('location').textContent).toBe(`${VM_PATH}/versions`);
   });
 
   it('shows the server’s refusal, and a version that cannot be cloned', async () => {

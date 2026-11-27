@@ -34,6 +34,13 @@ const DEFAULTS: Record<string, Handler> = {
   'GET /catalog/vms': emptyPage(),
 };
 
+const OPERATIONS_PATH = /^\/admin\/vms\/[^/]+\/[^/]+\/operations$/;
+
+/** A VM with no operation to show. */
+export function noOperations() {
+  return { operations: [], retentionHours: 24, serverTime: '2026-11-27T12:00:00.000Z' };
+}
+
 export function emptyPage() {
   return { items: [], pagination: { page: 1, pageSize: 24, total: 0, totalPages: 0 } };
 }
@@ -55,6 +62,10 @@ export function mockApi(routes: Record<string, Handler> = {}, { defaults = true 
     };
     calls.push(call);
     const key = `${method} ${call.path}`;
+    // Every VM's management follows its operations (decision 0060). Unless a test says otherwise, there are none.
+    if (!(key in table) && method === 'GET' && OPERATIONS_PATH.test(call.path)) {
+      return new Response(JSON.stringify(noOperations()));
+    }
     if (!(key in table)) throw new TypeError('Failed to fetch');
     const handler = table[key];
     const result = await (typeof handler === 'function' ? handler(call) : handler);

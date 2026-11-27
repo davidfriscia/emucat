@@ -995,10 +995,13 @@ describe('the requests the page of a VirtualBox VM makes', () => {
       // The running session's screenshots: every 15 s. Each ended session's: once.
       [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 15,
       ...Object.fromEntries(ENDED.map((id) => [`GET /admin/sessions/${id}/screenshots`, 1])),
+      // The VM's operations (decision 0060), once for every section: every 15 s while none runs.
+      [`GET ${VM_PATH}/operations`]: 15,
     });
     // Was 601, 444 of them for the three ended sessions, when every panel was on one page. General shows only the
-    // run panel: the version history, screenshots and notes are read only in their own sections.
-    expect(api.calls).toHaveLength(89);
+    // run panel: the version history, screenshots and notes are read only in their own sections. Decision 0060 adds
+    // the operations listing's 15.
+    expect(api.calls).toHaveLength(104);
   });
 
   it('requests nothing while the tab is hidden, and catches up when it shows', async () => {
@@ -1024,6 +1027,7 @@ describe('the requests the page of a VirtualBox VM makes', () => {
       'GET /admin/sessions': 1,
       [`GET ${MANAGEMENT_PATH}`]: 1,
       [`GET /admin/sessions/${SESSION_ID}/screenshots`]: 1,
+      [`GET ${VM_PATH}/operations`]: 1,
     });
   });
 

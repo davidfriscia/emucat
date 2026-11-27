@@ -76,6 +76,7 @@ import {
   vmSessionSchema,
   vmVerificationSchema,
   versionTreeResponseSchema,
+  vmOperationListResponseSchema,
   remoteSessionSchema,
   remoteSessionListResponseSchema,
   type AdminCatalogResponse,
@@ -92,6 +93,7 @@ import {
   type CreateSnapshotRequest,
   type CreateWorkspaceRequest,
   type VersionTreeResponse,
+  type VmOperationListResponse,
   type RemoteSession,
   type RemoteSessionListResponse,
   type DiscoveryOperation,
@@ -973,6 +975,16 @@ export function fetchVersionTree(
   signal?: AbortSignal,
 ): Promise<VersionTreeResponse> {
   return requestJson(`${relative(adminVmApiPath(vm))}/versions`, versionTreeResponseSchema, {
+    signal,
+  });
+}
+
+/** The operations that concern a VM's versions (decision 0060). Polled once per VM, by `VmOperationsProvider`. */
+export function fetchVmOperations(
+  vm: VmIdentity,
+  signal?: AbortSignal,
+): Promise<VmOperationListResponse> {
+  return requestJson(`${relative(adminVmApiPath(vm))}/operations`, vmOperationListResponseSchema, {
     signal,
   });
 }

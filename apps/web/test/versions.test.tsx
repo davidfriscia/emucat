@@ -181,6 +181,19 @@ function snapshotOperation(overrides: Partial<RegistrationOperation> = {}): Regi
   };
 }
 
+/** The VM's operations (decision 0060), as the server lists them now. */
+function operationsList(...operations: RegistrationOperation[]) {
+  return {
+    operations: operations.map((operation) => ({
+      relation: operation.mode === 'clone' ? 'clone_source' : 'this_vm',
+      operation,
+      transport: null,
+    })),
+    retentionHours: 24,
+    serverTime: new Date().toISOString(),
+  };
+}
+
 function base(routes: Record<string, unknown> = {}) {
   return mockApi({
     ...signedInAsAdmin,
@@ -321,12 +334,14 @@ describe('the version tree', () => {
 
 describe('creating a snapshot', () => {
   it('confirms, names the version the copy came from as the parent, and follows progress', async () => {
+    // What the server lists: nothing, then the snapshot it accepted, then the snapshot published.
+    let listed: RegistrationOperation | null = null;
     const api = base({
-      [`POST ${VM_PATH}/snapshots`]: snapshotOperation(),
-      [`GET /admin/registrations/${registrationOperation().id}`]: snapshotOperation({
-        state: 'succeeded',
-        progress: { doneBytes: null, totalBytes: null },
-      }),
+      [`POST ${VM_PATH}/snapshots`]: () => {
+        listed = snapshotOperation();
+        return listed;
+      },
+      [`GET ${VM_PATH}/operations`]: () => operationsList(...(listed ? [listed] : [])),
     });
     const tree = await history();
     // Only the version the local copy came from offers a snapshot from it.
@@ -347,7 +362,50 @@ describe('creating a snapshot', () => {
     expect(body.parentVersionId).toBe(SNAP_B);
     expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(Object.keys(body).sort()).toEqual(['agentId', 'parentVersionId', 'requestId']);
-    expect(await screen.findByText(/Snapshot created/)).toBeTruthy();
+
+    // On the parent's card, beside its Info: what it is doing, with the agent's measured progress.
+    const parent = within(tree).getAllByRole('treeitem')[3] as HTMLElement;
+    const indicator = await within(parent).findByRole('button', {
+      name: 'Creating snapshot of Win98_202601010002: Transferring 50%',
+    });
+    expect(indicator.textContent).toMatch(/Creating snapshot · Transferring 50%/);
+    expect(indicator.querySelector('.icon-spin')).not.toBeNull();
+    // And in the page's header, which counts what runs even on a collapsed branch.
+    expect(
+      screen.getByRole('button', { name: /^Operations of this VM: 1 operation running/ }),
+    ).toBeTruthy();
+    fireEvent.click(indicator);
+    const details = await within(parent).findByRole('dialog', { name: 'Creating snapshot' });
+    expect(within(details).getByText('Snapshot of a local copy')).toBeTruthy();
+    expect(within(details).getByText(/50 bytes of 100 bytes \(50%\)/)).toBeTruthy();
+    expect(within(details).getByText(registrationOperation().id)).toBeTruthy();
+    fireEvent.keyDown(details, { key: 'Escape' });
+
+    const treeReads = api.callsTo('GET', `${VM_PATH}/versions`).length;
+    listed = snapshotOperation({
+      state: 'succeeded',
+      progress: { doneBytes: null, totalBytes: null },
+      finishedAt: new Date().toISOString(),
+    });
+    // The explicit end, in view until dismissed, and the tree read again for the new snapshot.
+    const notices = await screen.findByRole(
+      'list',
+      { name: 'Ended operations' },
+      { timeout: 5_000 },
+    );
+    const notice = within(notices).getByText('Snapshot created: Win98_202601010010');
+    expect(notice.closest('.alert-success')).not.toBeNull();
+    // Announced once, politely, by the one live region of the VM's pages.
+    const live = document.querySelector('.operation-announcer');
+    await waitFor(() => expect(live?.textContent).toBe('Snapshot created: Win98_202601010010'));
+    await waitFor(() =>
+      expect(api.callsTo('GET', `${VM_PATH}/versions`).length).toBeGreaterThan(treeReads),
+    );
+    expect(within(parent).queryByRole('button', { name: /Creating snapshot/ })).toBeNull();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Dismiss: Snapshot created: Win98_202601010010' }),
+    );
+    expect(screen.queryByRole('list', { name: 'Ended operations' })).toBeNull();
   });
 
   it('shows why a snapshot was refused, and keeps the dialog open', async () => {
@@ -551,8 +609,8 @@ describe('manual working copies', () => {
       [`GET ${VM_PATH}/workspaces`]: { workspaces: [workspace()] },
       [`POST /admin/workspaces/${WORKSPACE}/snapshot`]: snapshotOperation({
         parentVersionId: SNAP_A,
+        workspaceId: WORKSPACE,
       }),
-      [`GET /admin/registrations/${registrationOperation().id}`]: snapshotOperation(),
     });
     renderAt(`${VM_PATH}/versions`);
     expect(await screen.findByText('May have unpreserved changes')).toBeTruthy();
@@ -564,7 +622,12 @@ describe('manual working copies', () => {
     await waitFor(() =>
       expect(api.callsTo('POST', `/admin/workspaces/${WORKSPACE}/snapshot`)).toHaveLength(1),
     );
-    expect(await screen.findByText(/Uploading to the repository/)).toBeTruthy();
+    // The server's answer is shown at once, on the working copy's version, until the listing has it.
+    expect(
+      await screen.findByRole('button', {
+        name: 'Publishing Remote Snapshot of Win98_202601010001: Transferring 50%',
+      }),
+    ).toBeTruthy();
   });
 
   it('asks for the VM’s name before discarding changes that may not be preserved', async () => {
