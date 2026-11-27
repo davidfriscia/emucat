@@ -616,6 +616,8 @@ describe('cloning a version', () => {
     };
     page({ [`GET ${VM_PATH}`]: adminVm({ clonedFrom: provenance }) });
     const first = renderAt(VM_PATH);
+    // Read-only facts are in the VM's Info panel (decision 0060).
+    fireEvent.click(await screen.findByRole('button', { name: 'VM information' }));
     const link = await screen.findByRole('link', { name: 'Windows 95' });
     expect(link.getAttribute('href')).toBe('/admin/vms/qemu/Windows%2095');
     expect(screen.getByText(/Snapshot — After Office Installation/)).toBeTruthy();
@@ -623,6 +625,7 @@ describe('cloning a version', () => {
 
     page({ [`GET ${VM_PATH}`]: adminVm({ clonedFrom: { ...provenance, sourceExists: false } }) });
     renderAt(VM_PATH);
+    fireEvent.click(await screen.findByRole('button', { name: 'VM information' }));
     expect(await screen.findByText(/no longer in the catalog/)).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Windows 95' })).toBeNull();
   });

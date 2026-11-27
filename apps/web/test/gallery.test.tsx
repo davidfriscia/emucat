@@ -314,7 +314,12 @@ describe('the cover notice on the administrator’s page', () => {
     expect(
       await screen.findByText('The main screenshot is the public catalog’s cover.'),
     ).toBeTruthy();
-    expect(screen.getByText(/all of its screenshots in the public catalog/)).toBeTruthy();
+    // The VM's status, in its toolbar (decision 0060): public, with what that means as the chip's statement.
+    expect(
+      screen.getByText(/all of its screenshots in the public catalog/, {
+        selector: '.status-chip .icon-tooltip',
+      }),
+    ).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Publish the main screenshot' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Publish' })).toBeNull();
     expect(
@@ -344,7 +349,9 @@ describe('the cover notice on the administrator’s page', () => {
       within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', { name: 'General' }),
     );
     expect(
-      await screen.findByText(/Making it public publishes all of its screenshots/),
+      await screen.findByText(/Making it public publishes all of its screenshots/, {
+        selector: '.status-chip .icon-tooltip',
+      }),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Make public' }));
     await screen.findByText('The main screenshot is the public catalog’s cover.');

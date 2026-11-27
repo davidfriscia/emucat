@@ -129,6 +129,12 @@ beforeAll(async () => {
   answer(`GET ${VM_PATH}/media`, () => ({ media: [] }));
   answer('GET /admin/restores', () => ({ operations: [] }));
   answer('GET /admin/local-copy-removals', () => ({ removals: [] }));
+  // Decision 0060: the VM's operations. None here; e2e/operations.browser.test.ts shows them.
+  answer(`GET ${VM_PATH}/operations`, () => ({
+    operations: [],
+    retentionHours: 24,
+    serverTime: new Date().toISOString(),
+  }));
   browser = await launch();
 }, 180_000);
 

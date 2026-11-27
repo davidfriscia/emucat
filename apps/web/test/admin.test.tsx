@@ -159,19 +159,74 @@ describe('catalog management', () => {
 });
 
 describe('VM editor', () => {
-  it('opens on General: the VM’s actions, then metadata and details, then Run and verify', async () => {
+  it('opens on General: the VM’s toolbar, then metadata, then Run and verify', async () => {
     mockApi({ ...signedInAsAdmin, [`GET ${VM_PATH}`]: adminVm() });
     renderAt(VM_PATH);
     await screen.findByRole('heading', { level: 1, name: 'Windows 98 SE' });
     expect(document.querySelector('main > .page-wide')).toBeTruthy();
-    const actions = within(screen.getByRole('group', { name: 'VM actions' }));
-    expect(actions.getByRole('button', { name: /Make (public|private)/ })).toBeTruthy();
+    // One toolbar of icon actions (decision 0060): publication, then the VM's information at its end.
+    const actions = within(screen.getByRole('toolbar', { name: 'VM actions' }));
+    const publication = within(actions.getByRole('group', { name: 'Publication' }));
+    expect(publication.getByText('Private')).toBeTruthy();
+    const toggle = publication.getByRole('button', { name: 'Make public' });
+    expect(toggle.querySelector('svg')).not.toBeNull();
+    expect(
+      document.getElementById(toggle.getAttribute('aria-describedby') ?? '')?.textContent,
+    ).toMatch(/Making it public publishes all of its screenshots/);
+    // A private VM has no public page to view.
+    expect(actions.queryByRole('link', { name: 'View public page' })).toBeNull();
+    expect(actions.getByRole('button', { name: 'VM information' })).toBeTruthy();
     // Screenshots have their own section: no separate media page is linked any more.
     expect(screen.queryByRole('link', { name: 'Manage media' })).toBeNull();
     const headings = screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent);
-    expect(headings.slice(0, 3)).toEqual(['Metadata', 'Details', 'Run and verify']);
+    // The permanent Details panel is gone: its facts are in VM information.
+    expect(headings.slice(0, 2)).toEqual(['Metadata', 'Run and verify']);
+    expect(screen.queryByRole('heading', { name: 'Details' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Version history' })).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Notes' })).toBeNull();
+  });
+
+  it('gives every fact of the former Details panel in VM information', async () => {
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm({ versionCount: 3, mediaCount: 1, mainMediaId: null }),
+    });
+    renderAt(VM_PATH);
+    const info = await screen.findByRole('button', { name: 'VM information' });
+    expect(screen.queryByText('Registered')).toBeNull();
+    fireEvent.click(info);
+    const panel = within(await screen.findByRole('dialog', { name: 'Windows 98 SE' }));
+    for (const term of ['Emulator', 'VM name', 'Versions', 'Media', 'Registered', 'Updated']) {
+      expect(panel.getByText(term)).toBeTruthy();
+    }
+    expect(panel.getByText('3')).toBeTruthy();
+    expect(panel.getByText('1 image, no main image is selected')).toBeTruthy();
+    expect(panel.getByText(/Only signed-in administrators can see this VM/)).toBeTruthy();
+    expect(panel.getByText('No main screenshot is selected yet.')).toBeTruthy();
+    expect(panel.getByText(/Renaming the directory makes it a different VM/)).toBeTruthy();
+    fireEvent.keyDown(panel.getByText('Emulator'), { key: 'Escape' });
+    await waitFor(() => expect(document.activeElement).toBe(info));
+  });
+
+  it('says when the metadata holds unsaved changes, and when they are saved', async () => {
+    mockApi({
+      ...signedInAsAdmin,
+      [`GET ${VM_PATH}`]: adminVm(),
+      [`PATCH ${VM_PATH}`]: adminVm({ displayName: 'Renamed' }),
+    });
+    renderAt(VM_PATH);
+    await screen.findByRole('heading', { name: 'Windows 98 SE' });
+    const toolbar = within(screen.getByRole('toolbar', { name: 'Metadata actions' }));
+    expect(toolbar.queryByText('Unsaved changes')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Renamed' } });
+    expect(toolbar.getByText('Unsaved changes')).toBeTruthy();
+    // Explicit, as before: nothing is sent until Save.
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Windows 98 SE' } });
+    expect(toolbar.queryByText('Unsaved changes')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Renamed' } });
+    fireEvent.click(toolbar.getByRole('button', { name: 'Save metadata' }));
+    expect(await toolbar.findByText('Saved')).toBeTruthy();
+    expect(toolbar.queryByText('Unsaved changes')).toBeNull();
   });
 
   it('shows the identity as read-only text', async () => {
@@ -193,7 +248,7 @@ describe('VM editor', () => {
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
     fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Renamed' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'New text' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save metadata' }));
     expect(await screen.findByRole('heading', { name: 'Renamed' })).toBeTruthy();
     const [call] = api.callsTo('PATCH', VM_PATH);
     expect(call?.body).toEqual({ displayName: 'Renamed', description: 'New text' });
@@ -217,7 +272,7 @@ describe('VM editor', () => {
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
     fireEvent.change(screen.getByLabelText('Display name'), { target: { value: '   ' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: '' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save metadata' }));
     expect(await screen.findByRole('heading', { name: 'Win98' })).toBeTruthy();
     expect(api.callsTo('PATCH', VM_PATH)[0]?.body).toEqual({
       displayName: null,
@@ -246,7 +301,7 @@ describe('VM editor', () => {
     });
     renderAt(VM_PATH);
     await screen.findByRole('heading', { name: 'Windows 98 SE' });
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save metadata' }));
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('Control characters are not allowed');
     expect(alert.textContent).toContain('displayName');

@@ -20,6 +20,7 @@ import {
   type WorkspacePurpose,
   type WorkspaceState,
 } from '@emucat/contracts';
+import { Camera, HardDrive, Info, Play, ShieldCheck, type LucideIcon } from 'lucide-react';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import {
   createWorkspace,
@@ -42,6 +43,11 @@ import { useModalDialog } from './Gallery';
 import { restoreStateText, versionNamer, type VersionNamer } from './Restore';
 import { shortId, SNAPSHOT_STATE_TEXT, versionLabel } from './Snapshots';
 import { FormError } from './States';
+import { OperationIndicator } from './operations/OperationStatus';
+import { useVmOperations } from './operations/VmOperationsProvider';
+import { ICON_SIZE, IconButton } from './ui/IconButton';
+import { InfoPopover } from './ui/Popover';
+import { isVmOperationActive, vmOperationSourceVersionId } from '@emucat/contracts';
 import {
   STATE_BADGE as VIRTUALBOX_STATE_BADGE,
   STATE_TEXT as VIRTUALBOX_STATE_TEXT,
@@ -73,6 +79,13 @@ export const MODE_TEXT: Record<ExecutionMode, string> = {
   local: 'Local',
   remote_volatile: 'Remote Volatile',
   remote_snapshot: 'Remote Snapshot',
+};
+
+/** Each mode's icon, beside its name (decision 0060). The name stays visible: a mode is a choice, not an action. */
+const MODE_ICON: Record<ExecutionMode, LucideIcon> = {
+  local: HardDrive,
+  remote_volatile: Play,
+  remote_snapshot: Camera,
 };
 
 const MODE_EXPLANATION: Record<ExecutionMode, string> = {
@@ -762,6 +775,10 @@ function ModeSelector({
               data-available={mode.available ? 'true' : 'false'}
             >
               <span className="execution-mode-name">
+                {(() => {
+                  const ModeIcon = MODE_ICON[mode.mode];
+                  return <ModeIcon size={ICON_SIZE} aria-hidden="true" />;
+                })()}
                 {MODE_TEXT[mode.mode]}
                 {mode.available ? null : (
                   <>
@@ -799,6 +816,39 @@ function ModeSelector({
         })}
       </div>
     </fieldset>
+  );
+}
+
+/** What the run panel's Info says once: every mode's consequence, and how the emulator is started. */
+function RunInfo({ emulatorType }: { emulatorType: VmIdentity['emulatorType'] }) {
+  return (
+    <>
+      <h4 className="info-section mt-0">Execution modes</h4>
+      <dl className="info-facts">
+        {(Object.keys(MODE_TEXT) as ExecutionMode[]).map((mode) => (
+          <div key={mode} className="contents-row">
+            <dt>{MODE_TEXT[mode]}</dt>
+            <dd>{MODE_EXPLANATION[mode]}</dd>
+          </div>
+        ))}
+      </dl>
+      <h4 className="info-section">Starting the emulator</h4>
+      <p className="mb-1">
+        {EMULATOR_LABELS[emulatorType]} is started by the agent itself, from its own settings;
+        nothing typed here becomes part of a command.
+      </p>
+      <h4 className="info-section">Verifying</h4>
+      <p className="mb-0">
+        Verify local copy has the agent hash every file of its persistent copy and compare them with
+        the version’s manifest. It only reads. A verification counts only if it happened after the
+        agent’s latest connection.
+      </p>
+      <h4 className="info-section">Now</h4>
+      <p className="mb-0">
+        Now shows the emulator sessions of this VM and, apart from them, its archive operations: a
+        snapshot being published or a clone being made is not the emulator running.
+      </p>
+    </>
   );
 }
 
@@ -983,14 +1033,35 @@ export function VmExecutionSection({
     (!remote || (selectedVersion !== undefined && selectedVersion.repositoryEnabled));
   const localSession =
     chosen?.activeSession && !chosen.activeSession.workspaceId ? chosen.activeSession : null;
-  const nothingNow = !localSession && activeRemote.length === 0 && !chosen?.lastVerification;
+  // The VM's archive operations, from the one list every section shares (decision 0060). They are not sessions: a
+  // snapshot being published, or a clone being made, is shown as such, and never as the emulator running.
+  const operations = useVmOperations();
+  const archiveOperations =
+    operations?.visible.filter((entry) => isVmOperationActive(entry.operation)) ?? [];
+  const sessionsNow = localSession !== null || activeRemote.length > 0;
+  const nothingNow = !sessionsNow && archiveOperations.length === 0 && !chosen?.lastVerification;
 
   return (
     <section className="card execution-panel" aria-labelledby="vm-execution-heading">
       <div className="card-body">
-        <h2 id="vm-execution-heading" ref={heading} tabIndex={-1} className="h6 card-title">
-          Run and verify
-        </h2>
+        <div className="vm-section-header">
+          <h2 id="vm-execution-heading" ref={heading} tabIndex={-1} className="vm-section-title">
+            <Play size={ICON_SIZE + 2} aria-hidden="true" />
+            Run and verify
+          </h2>
+          <div className="vm-section-actions">
+            <InfoPopover
+              icon={Info}
+              label="About running and verifying"
+              tooltip="About running and verifying"
+              tooltipPlacement="start"
+              title="Running and verifying"
+              wide
+            >
+              <RunInfo emulatorType={emulatorType} />
+            </InfoPopover>
+          </div>
+        </div>
         {options.error && !options.data ? (
           <p className="small text-body-secondary">
             Sessions and verification are not available right now.
@@ -1077,27 +1148,33 @@ export function VmExecutionSection({
                   {started}
                 </div>
               ) : null}
-              <div className="d-flex flex-wrap gap-2 mb-2">
-                <button
-                  type="button"
-                  className="btn btn-primary"
+              <div className="d-flex flex-wrap gap-2 mb-2 execution-actions">
+                {/* Labelled as well as drawn: what starts, and in which mode, must be read, not guessed. */}
+                <IconButton
+                  icon={MODE_ICON[mode]}
+                  variant="primary"
+                  showLabel
+                  label={
+                    busy === 'launch'
+                      ? 'Starting…'
+                      : mode === 'local'
+                        ? 'Launch'
+                        : `Start ${MODE_TEXT[mode]}`
+                  }
+                  tooltip=""
+                  loading={busy === 'launch'}
                   disabled={!canStart}
                   onClick={() => void act('launch')}
-                >
-                  {busy === 'launch'
-                    ? 'Starting…'
-                    : mode === 'local'
-                      ? 'Launch'
-                      : `Start ${MODE_TEXT[mode]}`}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-outline-primary"
+                />
+                <IconButton
+                  icon={ShieldCheck}
+                  showLabel
+                  label={busy === 'verify' ? 'Starting…' : 'Verify local copy'}
+                  tooltip=""
+                  loading={busy === 'verify'}
                   disabled={busy !== null || !chosen.verify.eligible}
                   onClick={() => void act('verify')}
-                >
-                  {busy === 'verify' ? 'Starting…' : 'Verify local copy'}
-                </button>
+                />
               </div>
               {allowed && !allowed.eligible && allowed.text ? (
                 <p className="small text-body-secondary mb-1">
@@ -1117,6 +1194,8 @@ export function VmExecutionSection({
               </h3>
               {nothingNow ? (
                 <p className="small text-body-secondary mb-0">Nothing is running.</p>
+              ) : !sessionsNow && archiveOperations.length > 0 ? (
+                <p className="small text-body-secondary mb-2">No VM session is running.</p>
               ) : null}
               {localSession ? <SessionCard session={localSession} onChange={refresh} /> : null}
               {activeRemote.map((item) => (
@@ -1127,6 +1206,25 @@ export function VmExecutionSection({
                   onChange={refresh}
                 />
               ))}
+              {archiveOperations.length > 0 ? (
+                <div className="mb-2">
+                  <h4 className="info-section mt-0">Archive operations</h4>
+                  <ul className="list-unstyled d-flex flex-column align-items-start gap-1 mb-0">
+                    {archiveOperations.map((entry) => {
+                      const sourceId = vmOperationSourceVersionId(entry);
+                      return (
+                        <li key={entry.operation.id}>
+                          <OperationIndicator
+                            entry={entry}
+                            subject={sourceId ? nameVersion(sourceId) : null}
+                            align="start"
+                          />
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
               {chosen.lastVerification ? (
                 <VerificationResult verification={chosen.lastVerification} />
               ) : null}

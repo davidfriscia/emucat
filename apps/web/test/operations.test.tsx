@@ -167,7 +167,10 @@ function executionOptions(): ExecutionOptionsResponse {
 }
 
 /** The VM's pages, answering the operations listing with whatever `current` returns at the time. */
-function page(current: () => VmOperationListResponse | Error) {
+function page(
+  current: () => VmOperationListResponse | Error,
+  routes: Record<string, unknown> = {},
+) {
   return mockApi({
     ...signedInAsAdmin,
     [`GET ${VM_PATH}`]: adminVm(),
@@ -197,6 +200,7 @@ function page(current: () => VmOperationListResponse | Error) {
       if (value instanceof Error) throw value;
       return value;
     },
+    ...routes,
   });
 }
 
@@ -372,6 +376,77 @@ describe('the state of operations, kept by the server', () => {
     expect(back.querySelector('.icon-spin')).not.toBeNull();
   });
 
+  it('keep a failure in view, with what to do, across navigation, until it is dismissed', async () => {
+    const failed = cloneOf(MASTER, {
+      state: 'failed',
+      progress: { doneBytes: null, totalBytes: null },
+      error: { code: 'repository_unreachable', message: 'The repository did not answer.' },
+      recovery: 'Check that the SSH server is running and reachable, and try again.',
+      finishedAt: new Date().toISOString(),
+    });
+    page(() => listing(failed));
+    const drawn = await versionHistory();
+    const notices = within(await screen.findByRole('list', { name: 'Ended operations' }));
+    expect(notices.getByText('Clone failed: Win98_Copy')).toBeTruthy();
+    expect(notices.getByText('The repository did not answer.')).toBeTruthy();
+    expect(notices.getByText(/SSH server is running/)).toBeTruthy();
+    expect(notices.getByText('Clone failed: Win98_Copy').closest('.alert-danger')).not.toBeNull();
+    const indicator = within(item(drawn, 0)).getByRole('button', {
+      name: 'Clone failed of Master: Failed',
+    });
+    expect(indicator.className).toMatch(/operation-tone-danger/);
+
+    // General shows the same, from the same list.
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', { name: 'General' }),
+    );
+    const onGeneral = within(await screen.findByRole('list', { name: 'Ended operations' }));
+    expect(onGeneral.getByText('Clone failed: Win98_Copy')).toBeTruthy();
+    fireEvent.click(onGeneral.getByRole('button', { name: 'Dismiss: Clone failed: Win98_Copy' }));
+    expect(screen.queryByRole('list', { name: 'Ended operations' })).toBeNull();
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', {
+        name: 'Version History',
+      }),
+    );
+    await screen.findByRole('tree', { name: 'Versions of Win98' });
+    expect(screen.queryByRole('list', { name: 'Ended operations' })).toBeNull();
+    // Dismissed here only: the record itself was never touched.
+  });
+
+  it('come back after a refresh, and are followed by one request loop for every section', async () => {
+    const running = snapshotOn(MASTER, {
+      state: 'verifying',
+      progress: { doneBytes: 60, totalBytes: 120 },
+    });
+    const api = page(() => listing(running));
+    const first = renderAt(`${VM_PATH}/versions`);
+    await screen.findByRole('button', { name: 'Creating snapshot of Master: Verifying 50%' });
+    first.unmount();
+
+    // A new page load: nothing is remembered in the browser, and the server still lists it.
+    renderAt(VM_PATH);
+    const now = within(await screen.findByRole('region', { name: 'Now' }));
+    expect(
+      await now.findByRole('button', { name: 'Creating snapshot of Master: Verifying 50%' }),
+    ).toBeTruthy();
+    expect(now.getByText('No VM session is running.')).toBeTruthy();
+    expect(now.queryByText('Nothing is running.')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Operations of this VM: 1 operation running' }),
+    ).toBeTruthy();
+
+    const before = api.callsTo('GET', `${VM_PATH}/operations`).length;
+    fireEvent.click(
+      within(screen.getByRole('navigation', { name: 'VM' })).getByRole('link', {
+        name: 'Version History',
+      }),
+    );
+    await screen.findByRole('button', { name: 'Creating snapshot of Master: Verifying 50%' });
+    // The list is the layout's: changing section asks for nothing new.
+    expect(api.callsTo('GET', `${VM_PATH}/operations`).length).toBe(before);
+  });
+
   it('announce an ending once, and never each progress update', async () => {
     let running = snapshotOn(MASTER);
     page(() => listing(running));
@@ -392,6 +467,66 @@ describe('the state of operations, kept by the server', () => {
       timeout: 5_000,
     });
   });
+});
+
+describe('Remote Snapshot', () => {
+  it('shows the emulator running as a session, and only its publication as an operation', async () => {
+    const workspace = {
+      id: '018f47a0-7c2b-4f7e-9a3d-1b2c3d4e9020',
+      agentId: AGENT_ID,
+      agentName: 'Study PC',
+      agentOnline: true,
+      emulatorType: 'qemu',
+      vmName: 'Win98',
+      purpose: 'remote_snapshot',
+      state: 'running',
+      baseVersionId: MASTER,
+      sourceVersionId: MASTER,
+      mayHaveChanges: true,
+      launchOnReady: true,
+      restoreOperationId: null,
+      sessionId: null,
+      snapshotOperationId: null,
+      publishAttempts: 0,
+      nextRetryAt: null,
+      abandonedAt: null,
+      snapshotVersionId: null,
+      localDirectory: null,
+      error: null,
+      requestedByDisplayName: 'Ada Admin',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: null,
+      restore: null,
+      session: null,
+      snapshot: null,
+      recovery: null,
+    };
+    let publishing: RegistrationOperation | null = null;
+    page(() => listing(...(publishing ? [publishing] : [])), {
+      [`GET ${VM_PATH}/workspaces`]: { workspaces: [workspace] },
+    });
+    renderAt(VM_PATH);
+    const now = within(await screen.findByRole('region', { name: 'Now' }));
+    // The emulator runs: a remote session, not a synchronization, and nothing turns for an operation.
+    await waitFor(() => expect(now.queryByText('Nothing is running.')).toBeNull());
+    expect(now.queryByText('Archive operations')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Operations of this VM/ })).toBeNull();
+
+    // The emulator ended; the server publishes the working copy as a snapshot.
+    publishing = snapshotOn(MASTER, {
+      workspaceId: workspace.id,
+      state: 'archiving',
+      progress: { doneBytes: null, totalBytes: null },
+    });
+    expect(
+      await now.findByRole(
+        'button',
+        { name: 'Publishing Remote Snapshot of Master: Packaging' },
+        { timeout: 20_000 },
+      ),
+    ).toBeTruthy();
+  }, 30_000);
 });
 
 describe('the spinner', () => {

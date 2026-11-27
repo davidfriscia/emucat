@@ -1,19 +1,61 @@
 import {
+  EMULATOR_LABELS,
   publicVmRoute,
   VM_DESCRIPTION_MAX_LENGTH,
   VM_DISPLAY_NAME_MAX_LENGTH,
   type AdminVmDetail,
 } from '@emucat/contracts';
-import { useState, type FormEvent } from 'react';
-import { Link, Navigate, useLocation } from 'react-router';
+import {
+  CircleCheck,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Globe,
+  Image,
+  Info,
+  Lock,
+  PencilLine,
+  Save,
+} from 'lucide-react';
+import { useId, useState, type FormEvent } from 'react';
+import { Navigate, useLocation } from 'react-router';
 import { updateVmMetadata, updateVmVisibility } from '../../../api';
 import { ClonedFrom } from '../../../components/Clone';
 import { VirtualBoxExecutionSection, VmExecutionSection } from '../../../components/Execution';
+import {
+  OperationNotices,
+  OperationsSummary,
+} from '../../../components/operations/OperationStatus';
 import { FormError } from '../../../components/States';
 import { TagSelector } from '../../../components/Tags';
+import {
+  ICON_SIZE,
+  IconButton,
+  IconLink,
+  Toolbar,
+  ToolbarGroup,
+  ToolbarSpacer,
+} from '../../../components/ui/IconButton';
+import { InfoPopover } from '../../../components/ui/Popover';
+import { StatusChip } from '../../../components/ui/StatusChip';
 import { vmSectionRoute } from '../../../navigation';
 import { useVmManage } from './VmManageLayout';
 
+/**
+ * General (decision 0060): the VM's toolbar (publication, its operations, its information), the metadata editor, and
+ * Run and verify. Read-only facts are in the VM's Info panel; editable fields stay on the page.
+ */
+
+const VISIBILITY_TEXT = {
+  public: 'Anyone can see this VM and all of its screenshots in the public catalog.',
+  private:
+    'Only signed-in administrators can see this VM and its screenshots. Making it public publishes all of its screenshots.',
+} as const;
+
+/**
+ * Display name and description, saved together and only when asked, exactly as before. The form says when it holds
+ * changes the server does not have yet.
+ */
 function MetadataForm({
   vm,
   onSaved,
@@ -26,6 +68,8 @@ function MetadataForm({
   const [error, setError] = useState<unknown>(null);
   const [saved, setSaved] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const headingId = useId();
+  const dirty = displayName !== (vm.displayName ?? '') || description !== (vm.description ?? '');
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -38,6 +82,9 @@ function MetadataForm({
         description: description === '' ? null : description,
       });
       onSaved(updated);
+      // What the server kept: a blank name is cleared, so the field shows what is saved.
+      setDisplayName(updated.displayName ?? '');
+      setDescription(updated.description ?? '');
       setSaved(true);
     } catch (failure) {
       setError(failure);
@@ -47,89 +94,121 @@ function MetadataForm({
   };
 
   return (
-    <form onSubmit={(event) => void submit(event)}>
+    <form onSubmit={(event) => void submit(event)} aria-labelledby={headingId}>
+      <div className="vm-section-header">
+        <h2 id={headingId} className="vm-section-title">
+          <PencilLine size={ICON_SIZE + 2} aria-hidden="true" />
+          Metadata
+        </h2>
+        <Toolbar label="Metadata actions" className="vm-section-actions">
+          {dirty ? (
+            <StatusChip
+              icon={PencilLine}
+              tone="warning"
+              label="Unsaved changes"
+              detail="The display name or description differs from what is saved. Save to keep it."
+            />
+          ) : saved ? (
+            <span role="status">
+              <StatusChip icon={CircleCheck} tone="success" label="Saved" />
+            </span>
+          ) : null}
+          <IconButton
+            type="submit"
+            icon={Save}
+            label="Save metadata"
+            text="Save"
+            variant="primary"
+            tooltipPlacement="start"
+            loading={submitting}
+            disabled={submitting}
+          />
+        </Toolbar>
+      </div>
       <FormError error={error} />
-      {saved ? (
-        <div className="alert alert-success" role="status">
-          Saved.
+      <div className="vm-metadata-fields">
+        <div className="mb-3">
+          <label htmlFor="vm-display-name" className="form-label">
+            Display name
+          </label>
+          <input
+            id="vm-display-name"
+            className="form-control"
+            maxLength={VM_DISPLAY_NAME_MAX_LENGTH}
+            value={displayName}
+            aria-describedby="vm-display-name-help"
+            onChange={(event) => {
+              setDisplayName(event.target.value);
+              setSaved(false);
+            }}
+          />
+          <div id="vm-display-name-help" className="form-text">
+            The title in the catalog. Without one, the catalog shows the VM name.
+          </div>
         </div>
-      ) : null}
-      <div className="mb-3">
-        <label htmlFor="vm-display-name" className="form-label">
-          Display name
-        </label>
-        <input
-          id="vm-display-name"
-          className="form-control"
-          maxLength={VM_DISPLAY_NAME_MAX_LENGTH}
-          value={displayName}
-          aria-describedby="vm-display-name-help"
-          onChange={(event) => setDisplayName(event.target.value)}
-        />
-        <div id="vm-display-name-help" className="form-text">
-          The title in the catalog. Without one, the catalog shows the VM name.
+        <div className="mb-3">
+          <label htmlFor="vm-description" className="form-label">
+            Description
+          </label>
+          <textarea
+            id="vm-description"
+            className="form-control"
+            rows={5}
+            maxLength={VM_DESCRIPTION_MAX_LENGTH}
+            value={description}
+            onChange={(event) => {
+              setDescription(event.target.value);
+              setSaved(false);
+            }}
+          />
         </div>
       </div>
-      <div className="mb-3">
-        <label htmlFor="vm-description" className="form-label">
-          Description
-        </label>
-        <textarea
-          id="vm-description"
-          className="form-control"
-          rows={6}
-          maxLength={VM_DESCRIPTION_MAX_LENGTH}
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-        />
-      </div>
-      <button type="submit" className="btn btn-primary" disabled={submitting}>
-        {submitting ? 'Saving…' : 'Save'}
-      </button>
     </form>
   );
 }
 
+/** Makes the VM public or private, at once, as it always did. The consequence is the button's description. */
 function VisibilityControl({
   vm,
   onChanged,
+  onError,
 }: {
   vm: AdminVmDetail;
   onChanged: (vm: AdminVmDetail) => void;
+  onError: (error: unknown) => void;
 }) {
-  const [error, setError] = useState<unknown>(null);
   const [submitting, setSubmitting] = useState(false);
   const target = vm.visibility === 'public' ? 'private' : 'public';
+  const descriptionId = useId();
 
   const change = async () => {
-    setError(null);
+    onError(null);
     setSubmitting(true);
     try {
       onChanged(await updateVmVisibility(vm, target));
     } catch (failure) {
-      setError(failure);
+      onError(failure);
     } finally {
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="d-flex flex-column align-items-stretch">
-      <button
-        type="button"
-        className={`btn ${target === 'public' ? 'btn-primary' : 'btn-outline-danger'}`}
+    <>
+      <IconButton
+        icon={target === 'public' ? Eye : EyeOff}
+        label={target === 'public' ? 'Make public' : 'Make private'}
+        tooltip={target === 'public' ? 'Make public, with all its screenshots' : 'Make private'}
+        danger={target === 'private'}
+        loading={submitting}
         disabled={submitting}
-        aria-describedby="vm-visibility-text"
+        aria-describedby={descriptionId}
         onClick={() => void change()}
-      >
-        {target === 'public' ? 'Make public' : 'Make private'}
-      </button>
-      {error ? (
-        <div className="mt-2">
-          <FormError error={error} />
-        </div>
-      ) : null}
-    </div>
+      />
+      <span id={descriptionId} className="visually-hidden">
+        {VISIBILITY_TEXT[vm.visibility]}
+      </span>
+    </>
   );
 }
 
@@ -154,6 +233,60 @@ export function PublicCoverNotice({ vm }: { vm: AdminVmDetail }) {
   );
 }
 
+/** Everything the Details panel used to show, on demand: publication, identity, contents and history. */
+function VmInfo({ vm }: { vm: AdminVmDetail }) {
+  return (
+    <>
+      <h4 className="info-section">Publication</h4>
+      <p className="mb-1">
+        {vm.visibility === 'public' ? 'Public. ' : 'Private. '}
+        {VISIBILITY_TEXT[vm.visibility]}
+      </p>
+      {vm.visibility === 'public' && vm.publicCover !== 'shown' ? (
+        <p className="mb-0">
+          No main screenshot is selected, so the public catalog shows a placeholder.
+        </p>
+      ) : (
+        <PublicCoverNotice vm={vm} />
+      )}
+      <h4 className="info-section">Identity</h4>
+      <dl className="info-facts">
+        <dt>Emulator</dt>
+        <dd>
+          <span className="vm-identity">{vm.emulatorType}</span> ({EMULATOR_LABELS[vm.emulatorType]}
+          )
+        </dd>
+        <dt>VM name</dt>
+        <dd>
+          <code className="vm-identity info-copyable">{vm.vmName}</code>
+        </dd>
+      </dl>
+      <p className="info-note mt-1 mb-0">
+        The identity is the VM&apos;s directory name and cannot be changed here. Renaming the
+        directory makes it a different VM.
+      </p>
+      <h4 className="info-section">Contents</h4>
+      <dl className="info-facts">
+        <dt>Versions</dt>
+        <dd>{vm.versionCount}</dd>
+        <dt>Media</dt>
+        <dd>
+          {vm.mediaCount === 1 ? '1 image' : `${vm.mediaCount} images`},{' '}
+          {vm.mainMediaId ? 'a main image is selected' : 'no main image is selected'}
+        </dd>
+      </dl>
+      <h4 className="info-section">History</h4>
+      <dl className="info-facts">
+        {vm.clonedFrom ? <ClonedFrom provenance={vm.clonedFrom} /> : null}
+        <dt>{vm.clonedFrom ? 'Created' : 'Registered'}</dt>
+        <dd>{new Date(vm.createdAt).toLocaleString()}</dd>
+        <dt>Updated</dt>
+        <dd>{new Date(vm.updatedAt).toLocaleString()}</dd>
+      </dl>
+    </>
+  );
+}
+
 /**
  * General: what the VM is, editing it, and running and verifying it. Run and Verify stay one panel, the only place
  * that runs the VM; the version history chooses a version there.
@@ -161,75 +294,69 @@ export function PublicCoverNotice({ vm }: { vm: AdminVmDetail }) {
 export function VmGeneralPage() {
   const { identity, vm, title, setVm, preselect } = useVmManage();
   const { hash } = useLocation();
+  const [visibilityError, setVisibilityError] = useState<unknown>(null);
   // Links to a version used to point at this page; the versions are now in their own section.
   if (hash.startsWith('#version-')) {
     return <Navigate to={`${vmSectionRoute(identity, 'versions')}${hash}`} replace />;
   }
+  const isPublic = vm.visibility === 'public';
 
   return (
     <>
       <title>{`${title} · General · Manage · EmuCat`}</title>
-      <div className="vm-admin-actions mb-4" role="group" aria-label="VM actions">
-        <VisibilityControl vm={vm} onChanged={setVm} />
-        {vm.visibility === 'public' ? (
-          <Link to={publicVmRoute(vm)} className="btn btn-outline-secondary theme-button">
-            View public page
-          </Link>
-        ) : null}
-      </div>
-      <div className="vm-admin-top mb-4">
-        <section className="card" aria-labelledby="vm-metadata-heading">
-          <div className="card-body">
-            <h2 id="vm-metadata-heading" className="h6 card-title">
-              Metadata
-            </h2>
-            <MetadataForm vm={vm} onSaved={setVm} />
-            <hr />
-            <TagSelector
-              target={{ kind: 'vm', vm: identity }}
-              value={vm.tags}
-              onChange={(tags) => setVm({ ...vm, tags })}
-              label="Tags"
-              description="Saved as you change them. Shown in the catalog with the VM, and found by search. Screenshots and versions have their own tags."
+      <Toolbar label="VM actions" className="vm-general-toolbar">
+        <ToolbarGroup label="Publication">
+          <StatusChip
+            icon={isPublic ? Globe : Lock}
+            tone={isPublic ? 'success' : 'neutral'}
+            label={isPublic ? 'Public' : 'Private'}
+            detail={VISIBILITY_TEXT[vm.visibility]}
+          />
+          {isPublic && vm.publicCover === 'shown' ? (
+            <StatusChip
+              icon={Image}
+              label="Cover shown"
+              detail="The main screenshot is the public catalog’s cover."
             />
-          </div>
-        </section>
-        <section className="card" aria-labelledby="vm-details-heading">
-          <div className="card-body">
-            <h2 id="vm-details-heading" className="h6 card-title">
-              Details
-            </h2>
-            <p id="vm-visibility-text" className="small mb-0">
-              {vm.visibility === 'public'
-                ? 'Anyone can see this VM and all of its screenshots in the public catalog.'
-                : 'Only signed-in administrators can see this VM and its screenshots. Making it public publishes all of its screenshots.'}
-            </p>
-            <PublicCoverNotice vm={vm} />
-            <dl className="mt-3 mb-0 small settings-facts">
-              <dt>Emulator</dt>
-              <dd className="vm-identity">{vm.emulatorType}</dd>
-              <dt>VM name</dt>
-              <dd className="vm-identity">{vm.vmName}</dd>
-              <dt>Versions</dt>
-              <dd>{vm.versionCount}</dd>
-              <dt>Media</dt>
-              <dd>
-                {vm.mediaCount === 1 ? '1 image' : `${vm.mediaCount} images`},{' '}
-                {vm.mainMediaId ? 'a main image is selected' : 'no main image is selected'}
-              </dd>
-              {vm.clonedFrom ? <ClonedFrom provenance={vm.clonedFrom} /> : null}
-              <dt>{vm.clonedFrom ? 'Created' : 'Registered'}</dt>
-              <dd>{new Date(vm.createdAt).toLocaleString()}</dd>
-              <dt>Updated</dt>
-              <dd>{new Date(vm.updatedAt).toLocaleString()}</dd>
-            </dl>
-            <p className="small text-body-secondary mt-2 mb-0">
-              The identity is the VM&apos;s directory name and cannot be changed here. Renaming the
-              directory makes it a different VM.
-            </p>
-          </div>
-        </section>
-      </div>
+          ) : null}
+          <VisibilityControl vm={vm} onChanged={setVm} onError={setVisibilityError} />
+          {isPublic ? (
+            <IconLink icon={ExternalLink} label="View public page" to={publicVmRoute(vm)} />
+          ) : null}
+        </ToolbarGroup>
+        <ToolbarSpacer />
+        <OperationsSummary />
+        <InfoPopover
+          icon={Info}
+          label="VM information"
+          tooltip="VM information"
+          tooltipPlacement="start"
+          title={title}
+          wide
+        >
+          {() => <VmInfo vm={vm} />}
+        </InfoPopover>
+      </Toolbar>
+      <FormError error={visibilityError} />
+      {/* A problem that needs a person stays in view, never only behind Info. */}
+      {isPublic && vm.publicCover !== 'shown' ? (
+        <div className="mb-3">
+          <PublicCoverNotice vm={vm} />
+        </div>
+      ) : null}
+      <OperationNotices />
+      <section className="card vm-general-metadata mb-4">
+        <div className="card-body">
+          <MetadataForm key={`${vm.emulatorType}/${vm.vmName}`} vm={vm} onSaved={setVm} />
+          <TagSelector
+            target={{ kind: 'vm', vm: identity }}
+            value={vm.tags}
+            onChange={(tags) => setVm({ ...vm, tags })}
+            label="Tags"
+            description="Saved as you change them. Shown in the catalog with the VM, and found by search. Screenshots and versions have their own tags."
+          />
+        </div>
+      </section>
       <div className="vm-admin-panels">
         {identity.emulatorType === 'virtualbox' ? (
           // Run in place only: never restored, and no remote mode (decision 0045).
