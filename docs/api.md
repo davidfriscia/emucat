@@ -385,6 +385,7 @@ Administrators only, with the same-origin and CSRF rules as everything else here
 | `GET /admin/vms/:emulatorType/:vmName/versions`              | The version tree: every version with its parent, children, name, creation time, archive size and hash, what the agent verified, and who holds a copy             |
 | `POST /admin/vms/:emulatorType/:vmName/snapshots`            | Snapshots an agent's persistent copy: `{ agentId, parentVersionId, requestId, title?, description? }`. 202, with the registration operation (`mode: "snapshot"`) |
 | `PATCH /admin/vms/:emulatorType/:vmName/versions/:versionId` | Edits a version's `{ title, description }`, both required and nullable. Nothing else about the version changes                                                   |
+| `GET /admin/vms/:emulatorType/:vmName/operations`            | The operations that concern this VM's versions ([decision 0060](decisions/0060-operation-visibility.md)): see below                                              |
 | `GET /admin/vms/:emulatorType/:vmName/workspaces`            | The VM's remote sessions and manual working copies, active ones first, each with its restore, session and publication                                            |
 | `POST /admin/vms/:emulatorType/:vmName/workspaces`           | Starts a remote session of exactly one version: `{ agentId, versionId, mode, requestId }`, `mode` being `remote_volatile` or `remote_snapshot`. 202              |
 | `GET /admin/workspaces/:workspaceId`                         | One remote session or working copy                                                                                                                               |
@@ -397,6 +398,24 @@ Administrators only, with the same-origin and CSRF rules as everything else here
 A snapshot's parent must be the version the agent's copy came from. Creating one answers 404 with `version_not_found` (also for a version of another VM), and 409 with `agent_offline`, `agent_cannot_snapshot`, `agent_revoked`, `local_copy_missing`, `local_copy_unsafe`, `snapshot_parent_unknown`, `snapshot_parent_mismatch`, `repository_disabled`, `repository_not_authorized`, `vm_running` (any active session, `unknown` included), `operation_in_progress` or `request_id_reused`. A repeated `requestId` returns the same operation. Its progress, cancellation and reconciliation are the registration routes'.
 
 Starting a remote session answers 404 `version_not_found`, and 409 with `request_id_reused`, `execution_mode_unavailable` (the agent does not run the mode), `remote_session_pending` (one is still active for this VM on that agent, a failed publication included), `session_active`, or the reasons `execution-options` lists. A repeated `requestId` returns the same session. Everything after that is driven by the server ([decision 0040](decisions/0040-temporary-remote-sessions.md)): the restore into a temporary copy, the launch, then on exit the cleanup, or for Remote Snapshot the publication and then the cleanup. Retrying answers 409 `workspace_unavailable` unless the publication failed. Resuming answers 400 `confirmation_mismatch`, and 409 `workspace_unavailable` unless it is held, or `vm_running` if the agent says it runs again. Launching or preserving a remote session answers 409 `workspace_purpose_mismatch`. Discarding answers 400 `confirmation_required` (a held session, a failed publication, or a manual copy that may hold changes), and 409 with `vm_running` (any active session of the VM on that agent, `unknown` included), `operation_in_progress` (any operation on that agent) or `workspace_unavailable`. Snapshots also answer 409 `snapshot_lineage_unverified` for a copy discovery saw disappear and come back, until a verification proves what it is.
+
+### Operations of a VM
+
+`GET /admin/vms/:emulatorType/:vmName/operations` ([decision 0060](decisions/0060-operation-visibility.md); shapes in
+[`vm-operations.ts`](../packages/contracts/src/vm-operations.ts)) lists what Version History and General follow:
+
+- `relation: "this_vm"`: this VM's snapshots (of a local copy, or of a Remote Snapshot working copy, `workspaceId`
+  set) and remasters;
+- `relation: "clone_source"`: clones made from any of this VM's versions. `operation.vmName` is the new VM and
+  `operation.cloneSource` the version copied.
+
+Each `operation` is exactly the registration operation `GET /admin/registrations/:operationId` returns: state,
+`progress` (the byte count of the current stage, when measured), `agentOnline`, `performedBy`, error and recovery,
+timestamps. `transport` is `server` for the server's own work, `sftp` or `relay` for how the agent reached that
+repository in its latest health check (not recorded per operation), or `null`. Listed while active, while a partial
+success is unacknowledged, and for `retentionHours` (24) after `finishedAt`; at most 50, active first, then newest
+first. `serverTime` is the server's clock. A first registration, an import, or the clone that made this VM is not
+listed. 404 `vm_not_found`; administrators only, like every route here; nothing is added to a public route.
 
 ### Clones
 

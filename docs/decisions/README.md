@@ -64,3 +64,4 @@ file for a new decision. To change one, add a new record that supersedes it.
 | [0057](0057-ova-tar-compatibility.md)                   | The agent and the server read an OVA's TAR by one policy                       |
 | [0058](0058-browser-local-nested-archives.md)           | Archive Explorer opens nested archives in the browser, in a compact viewer     |
 | [0059](0059-version-history-icon-toolbars.md)           | Version History shows compact cards with icon toolbars, metadata on demand     |
+| [0060](0060-operation-visibility.md)                    | A VM's operations are shown from the registration record; General uses icons   |

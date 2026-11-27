@@ -176,6 +176,12 @@ sidebar icons, both themes, no sideways scrolling at 390 px, Archive Explorer op
 request other than `GET`, and no console error. Its screenshots are named `version-history-*.png`, or with the prefix
 in `EMUCAT_BROWSER_SCREENSHOT_PREFIX`, for before-and-after comparisons.
 
+`e2e/operations.browser.test.ts` (decision 0060) uses the same build against a stand-in whose operations listing each
+test sets: the spinner's animation (and 3 s under reduced motion), indicators within a card's one toolbar row, details
+inside the window, several operations on a 390 px phone, both themes, endings with the tree read again, an unavailable
+status and its recovery, and the General page. `EMUCAT_BROWSER_DIST=<built app> EMUCAT_BROWSER_CAPTURE_ONLY=1` captures
+only General from another build, for before-and-after screenshots.
+
 ## Linux validation from Windows
 
 The API runs on Linux in production, so the platform-specific assertions are also run there, from a Windows checkout,

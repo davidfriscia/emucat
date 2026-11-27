@@ -162,7 +162,7 @@ management directly. No menu leads there.
 | `/admin/repositories`                          | Administrator | Admin     | Repositories and connectivity tests                                   |
 | `/admin/appearance`                            | Administrator | Admin     | Theme                                                                 |
 | `/admin/updates`                               | Administrator | Admin     | Application updates and server facts                                  |
-| `/admin/vms/:emulatorType/:vmName`             | Administrator | VM Manage | General: visibility, metadata, tags, details, Run and verify          |
+| `/admin/vms/:emulatorType/:vmName`             | Administrator | VM Manage | General: visibility, metadata, tags, VM information, Run and verify   |
 | `/admin/vms/:emulatorType/:vmName/versions`    | Administrator | VM Manage | Version History, including restore of a version and Clone VM          |
 | `/admin/vms/:emulatorType/:vmName/copies`      | Administrator | VM Manage | Local copies and restore; a VirtualBox VM's linked machine            |
 | `/admin/vms/:emulatorType/:vmName/notes`       | Administrator | VM Manage | Notes                                                                 |
@@ -278,6 +278,15 @@ Browser ─► API ─► MariaDB          validates, reserves the new name (reg
 ```
 
 The commit creates the VM, its master and its provenance in one transaction. See [decision 0052](decisions/0052-vm-clones.md).
+
+## Following operations
+
+A VM's management pages follow its snapshots, remasters and the clones made from it through one read-only route,
+`GET /api/v1/admin/vms/:type/:name/operations`, over the registration rows that already record every state and
+progress report ([decision 0060](decisions/0060-operation-visibility.md)). The web app polls it once per open VM
+(`VmOperationsProvider` in the VM Manage layout): every 2 s while one runs, every 15 s otherwise, never while the tab is
+hidden. Nothing is tracked in the browser, so an operation is found again after navigation, a refresh or a restart of
+the browser or the API.
 
 ## VM notes
 

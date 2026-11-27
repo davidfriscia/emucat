@@ -2,7 +2,8 @@
 
 How EmuCat's web interface presents actions, navigation, metadata and status. They were set by Archive Explorer
 ([decision 0058](decisions/0058-browser-local-nested-archives.md)) and Version History
-([decision 0059](decisions/0059-version-history-icon-toolbars.md)); new areas follow them, and older areas move to them
+([decision 0059](decisions/0059-version-history-icon-toolbars.md)), and extended to General and background operations by
+[decision 0060](decisions/0060-operation-visibility.md); new areas follow them, and older areas move to them
 as they are reworked. The components are in [`apps/web/src/components/ui/`](../apps/web/src/components/ui/).
 
 ## Icons
@@ -76,6 +77,29 @@ stay in view as alerts, never only behind Info or a tooltip.
   reinforces it.
 - Keep distinct states distinct: one chip per agent's copy, and historical facts ("Verified when published") never
   presented as current ones.
+
+## Background operations
+
+Set by [decision 0060](decisions/0060-operation-visibility.md); the components are in
+[`apps/web/src/components/operations/`](../apps/web/src/components/operations/).
+
+- **Authoritative only.** An indicator shows what the server recorded (`useVmOperations()`, one poll per VM in the VM
+  Manage layout). Never a local loading flag, a timer or the length of a request. A page that starts an operation
+  calls `track(operation)` with the API's answer and lets the listing take over.
+- **Where.** On the subject it concerns, at the end of its toolbar before Info (`VersionOperations`,
+  `OperationIndicator`); a page-level `OperationsSummary` in the header for everything, including what is not
+  visible; `OperationNotices` for endings. Never a permanently visible empty panel.
+- **Spinner.** `LoaderCircle` with `icon-spin` (local CSS, 1 s; 3 s under `prefers-reduced-motion`), only while the
+  operation is active **and** its status is current. Waiting for an agent uses `Unplug`, an unreadable status
+  `CloudOff`, both without animation. The words always say the state; the animation and the colour only reinforce it.
+- **Progress.** Text, from recorded bytes of the current phase only, floored and never 100% while anything remains.
+  No estimate, no progress bar without measured bytes.
+- **Endings.** `CircleCheck` / `CircleX` / `CircleAlert`, a notice with the server's error and recovery text,
+  dismissible (browser-local; the record stays). One polite live-region announcement per ending, never per progress
+  update.
+- **Names.** The indicator's accessible name says what, on which subject, and the phase ("Creating snapshot of
+  Master: Transferring 62%"); its visible text may be shorter (`text`).
+- **Links that look like icons** are `IconLink`, not buttons, so they stay links.
 
 ## Responsive behaviour and themes
 
