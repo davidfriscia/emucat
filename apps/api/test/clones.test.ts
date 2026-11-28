@@ -17,11 +17,13 @@ import {
 import type { RowDataPacket } from 'mysql2/promise';
 import { afterEach, describe, expect, it } from 'vitest';
 import { inspectZip } from '../src/archives/manifest.js';
+import { readCentralDirectory, readSmallEntry, type ZipEntry } from '../src/archives/zip.js';
 import { waitFor } from './agent-helpers.js';
 import { insertMedia, insertVm, TestClient } from './browser-app.js';
 import { closeServers, serverWorld, type ServerWorld } from './server-world.js';
 import { closeWorlds, errorCode, world, type World } from './version-world.js';
-import { buildTar, sha256, vmZip } from './zip-builder.js';
+import { buildZip64Layout } from './archive-sources.js';
+import { buildTar, manifestFor, sha256, vmZip } from './zip-builder.js';
 
 afterEach(async () => {
   await closeWorlds();
@@ -80,10 +82,13 @@ async function rows(w: World, sql: string, values: unknown[] = []): Promise<RowD
 /** A world whose Win95 master is a real archive in the repository, registered with its manifest. */
 const WIN95 = { emulatorType: 'qemu' as const, vmName: 'Win95' };
 
-async function archivedWorld(options: Parameters<typeof serverWorld>[0] = {}) {
+async function archivedWorld(
+  options: Parameters<typeof serverWorld>[0] = {},
+  archive: { zip: Buffer; manifestSha256: string } = vmZip('qemu', 'Win95', FILES),
+) {
   const base = await serverWorld(options);
   await insertVm(base.context.pool, { vmName: 'Win95' });
-  const { zip, manifestSha256 } = vmZip('qemu', 'Win95', FILES);
+  const { zip, manifestSha256 } = archive;
   const { id, key } = await base.insertVersion(zip, { vm: WIN95 });
   const w: ServerWorld = { ...base, masterId: id };
   await w.context.pool.execute(
@@ -105,6 +110,31 @@ async function archivedWorld(options: Parameters<typeof serverWorld>[0] = {}) {
     ],
   );
   return { w, zip, manifestSha256, key };
+}
+
+/** For each central record: how many ZIP64 records its extra field holds, and the IDs of the others. */
+function zip64RecordCounts(zip: Buffer, directoryOffset: number) {
+  const result: Record<string, { zip64: number; others: number[] }> = {};
+  for (let at = directoryOffset; zip.readUInt32LE(at) === 0x02014b50;) {
+    const nameLength = zip.readUInt16LE(at + 28);
+    const extraLength = zip.readUInt16LE(at + 30);
+    const commentLength = zip.readUInt16LE(at + 32);
+    const counts = { zip64: 0, others: [] as number[] };
+    const extra = zip.subarray(at + 46 + nameLength, at + 46 + nameLength + extraLength);
+    for (let field = 0; field + 4 <= extra.length; field += 4 + extra.readUInt16LE(field + 2)) {
+      const id = extra.readUInt16LE(field);
+      if (id === 0x0001) counts.zip64 += 1;
+      else counts.others.push(id);
+    }
+    result[
+      zip
+        .subarray(at + 46, at + 46 + nameLength)
+        .toString('utf8')
+        .replace(/\/$/, '')
+    ] = counts;
+    at += 46 + nameLength + extraLength + commentLength;
+  }
+  return result;
 }
 
 async function insertSnapshot(w: ServerWorld, parentId: string, title: string | null = null) {
@@ -227,6 +257,66 @@ describe('cloning a version on the server', () => {
       clonedFrom: null,
     });
     expect(source.tags.map((tag) => tag.name)).toEqual(['retro']);
+  });
+
+  it('clones an archive whose entries carry the agent’s two ZIP64 records (F-4)', async () => {
+    // Every file as the agent writes one of 3.75 GiB or more: a placeholder ZIP64 record, then the real one.
+    // An unrelated extra field (extended timestamp) on the disk must survive the rewrite.
+    const timestamp = Buffer.from([0x55, 0x54, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    const { bytes, entries } = manifestFor('qemu', 'Win95', FILES);
+    const agentZip = buildZip64Layout(
+      entries.map((entry) =>
+        entry.name.endsWith('/')
+          ? { ...entry, zip64: false as const }
+          : {
+              ...entry,
+              stored: entry.name === 'disk.qcow2',
+              zip64: { fields: { uncompressed: true, compressed: true } },
+              ...(entry.name === 'disk.qcow2' ? { centralExtra: timestamp } : {}),
+            },
+      ),
+    ).toBuffer();
+    const { w } = await archivedWorld({}, { zip: agentZip, manifestSha256: sha256(bytes) });
+
+    const operation = await clone(w, w.masterId, 'Win95 - Big');
+    const done = await finished(w, operation.id);
+    expect(done.state, JSON.stringify(done.error)).toBe('succeeded');
+    expect(done.archive).toMatchObject({ format: 'zip', verifiedBy: 'server', fileCount: 3 });
+
+    const stored = await readFile(join(w.sftp.root, operation.archiveKey));
+    const source = {
+      sizeBytes: stored.length,
+      read: async (o: number, l: number) => stored.subarray(o, o + l),
+    };
+    const inspected = await inspectZip(source, {
+      emulatorType: 'qemu',
+      vmName: 'Win95 - Big',
+      manifestSha256: done.archive?.manifestSha256 ?? null,
+    });
+    // Each central record now has exactly one ZIP64 record, with the real values; nothing else was lost.
+    const { entries: rewritten } = await readCentralDirectory(source, {
+      maxEntries: 100,
+      maxDirectoryBytes: 1 << 20,
+    });
+    expect(zip64RecordCounts(stored, inspected.directoryOffset)).toEqual({
+      'disk.qcow2': { zip64: 1, others: [0x5455] },
+      firmware: { zip64: 0, others: [] },
+      'firmware/bios.bin': { zip64: 1, others: [] },
+      'vm.json': { zip64: 1, others: [] },
+      '.emucat-manifest.json': { zip64: 0, others: [] },
+    });
+    for (const [path, data] of Object.entries(FILES)) {
+      const entry = rewritten.find((item) => item.name === path);
+      expect(entry, path).toBeDefined();
+      expect(await readSmallEntry(source, entry as ZipEntry, 1 << 20), path).toEqual(data);
+    }
+    // The source archive is unchanged.
+    const [version] = await rows(w, 'SELECT archive_key FROM vm_versions WHERE id = ?', [
+      w.masterId,
+    ]);
+    expect(sha256(await readFile(join(w.sftp.root, String(version?.archive_key))))).toBe(
+      sha256(agentZip),
+    );
   });
 
   it('clones a snapshot from its exact archive, and records which one', async () => {

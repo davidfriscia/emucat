@@ -26,6 +26,7 @@ import { ADMIN_PASSWORD, insertVm, TestClient } from './browser-app.js';
 import { closeServers, serverWorld, type ServerWorld } from './server-world.js';
 import { closeWorlds } from './version-world.js';
 import { redirectTemporaryDirectory } from './platform.js';
+import { buildZip64Layout } from './archive-sources.js';
 import { buildTar, buildZip, manifestFor, sha256 } from './zip-builder.js';
 
 afterEach(async () => {
@@ -145,6 +146,8 @@ async function explorerVersion(
     stored?: string[];
     vmName?: string;
     snapshotOf?: string;
+    /** Every file's central record as the agent writes it for a large file: two ZIP64 records (F-4). */
+    agentZip64?: boolean;
   } = {},
 ) {
   const vmName = options.vmName ?? 'DOS622';
@@ -155,7 +158,16 @@ async function explorerVersion(
   if (existing.length === 0) await insertVm(w.context.pool, { emulatorType: '86box', vmName });
   const { bytes, entries } = manifestFor('86box', vmName, files);
   for (const entry of entries) if (options.stored?.includes(entry.name)) entry.stored = true;
-  const zip = buildZip(entries);
+  const zip = options.agentZip64
+    ? buildZip64Layout(
+        entries.map((entry) => ({
+          ...entry,
+          zip64: entry.name.endsWith('/')
+            ? false
+            : { fields: { uncompressed: true, compressed: true } },
+        })),
+      ).toBuffer()
+    : buildZip(entries);
   const { id, key } = await w.insertVersion(zip, {
     vm: { emulatorType: '86box', vmName },
     ...(options.snapshotOf
@@ -590,6 +602,53 @@ describe('Archive Explorer: download', () => {
     );
     expect(contentDisposition('..')).toMatch(/filename="download"/);
     expect(contentDisposition('a/b\\c')).toMatch(/filename="a_b_c"/);
+  });
+});
+
+describe('Archive Explorer: agent ZIP64 records (F-4)', () => {
+  it('lists, details, previews and downloads a version whose entries carry the agent’s two ZIP64 records', async () => {
+    const disk = Buffer.alloc(2 * 1024 * 1024, 0x5a);
+    const w = await serverWorld();
+    const { base, zip } = await explorerVersion(
+      w,
+      { 'disks/hdd.img': disk, 'vm.cfg': Buffer.from('[General]\n'), README: Buffer.from('Hi\n') },
+      { stored: ['disks/hdd.img'], agentZip64: true },
+    );
+    // Checked here, not assumed: the archive has the duplicated records that the reader refused before.
+    expect(
+      zip.indexOf(Buffer.from([0x01, 0x00, 0x10, 0x00, 0xff, 0xff, 0xff, 0xff])),
+    ).toBeGreaterThan(0);
+
+    const summary = await w.admin.get(base);
+    expect(summary.statusCode, summary.body).toBe(200);
+    expect(summary.json()).toMatchObject({
+      complete: true,
+      manifest: { vmName: 'DOS622', fileCount: 3, matchesRegistration: true },
+      warnings: [],
+    });
+    const listing = await w.admin.get(`${base}/entries?view=logical`);
+    expect(listing.statusCode, listing.body).toBe(200);
+    expect(
+      (listing.json() as { entries: Array<{ name: string }> }).entries.map((entry) => entry.name),
+    ).toEqual(['disks', 'README', 'vm.cfg']);
+    const physical = await w.admin.get(`${base}/entries?view=physical&path=disks`);
+    expect(physical.json()).toMatchObject({
+      entries: [{ name: 'hdd.img', method: 'stored', sizeBytes: disk.length }],
+    });
+
+    expect(await details(w, base, 'disks/hdd.img')).toMatchObject({
+      entry: { sizeBytes: disk.length },
+      compression: 'stored',
+      manifestSha256: sha256(disk),
+    });
+    const preview = await w.admin.get(`${base}/entry/preview?${q('vm.cfg', { kind: 'text' })}`);
+    expect(preview.statusCode, preview.body).toBe(200);
+    expect(preview.rawPayload.toString()).toBe('[General]\n');
+    expect(preview.headers[H.integrity]).toBe('verified');
+    const download = await w.admin.get(`${base}/entry/download?${q('disks/hdd.img')}`);
+    expect(download.statusCode).toBe(200);
+    expect(download.rawPayload.equals(disk)).toBe(true);
+    await released(w);
   });
 });
 
