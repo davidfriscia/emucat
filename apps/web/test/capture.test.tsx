@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { CaptureOperation, CaptureStatus, VmSession } from '@emucat/contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { CaptureScreenshot } from '../src/components/CaptureScreenshot';
 import { mockApi } from './mock-api';
 
@@ -61,6 +61,7 @@ describe('session screenshot controls', () => {
       let reads = 0;
       const published = vi.fn();
       window.addEventListener('emucat:media-published', published);
+      onTestFinished(() => window.removeEventListener('emucat:media-published', published));
       const api = mockApi({
         [`GET ${path}`]: (): CaptureStatus => {
           if (!requested) return { available: true, reason: null, operation: null };
@@ -87,12 +88,18 @@ describe('session screenshot controls', () => {
       expect(screen.getByRole('link', { name: 'Open screenshot' }).getAttribute('href')).toContain(
         `/media/${id}/full`,
       );
+      // The announcement is an effect of the render that shows "Screenshot published.", so it runs after that
+      // render is committed: wait for it, then make sure it was made once only.
+      await waitFor(() => expect(published).toHaveBeenCalled());
       expect(published).toHaveBeenCalledTimes(1);
+      expect((published.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+        emulatorType: 'qemu',
+        vmName: 'Test VM',
+      });
       expect(api.calls.find((call) => call.method === 'POST')?.body).toEqual({
         requestId: expect.any(String),
       });
       expect(screen.getByText(/Screenshots are public while this VM is public/)).toBeTruthy();
-      window.removeEventListener('emucat:media-published', published);
     },
   );
 
