@@ -1381,6 +1381,10 @@ async fn a_spooled_screenshot_the_server_no_longer_accepts_is_given_up() {
     let sync = world.sync();
     sync.detach_pending(&identity(EmulatorType::Qemu, "Reassigned"), &root);
     drop(sync);
+    // As in a removal, which detaches just before deleting the directory. Left in place, the running
+    // synchronizer could also find `shot.ppm` there and start uploading it as an ordinary file, before or after
+    // the check below.
+    fs::remove_dir_all(&root).unwrap();
     world
         .server
         .state

@@ -235,9 +235,11 @@ mod tests {
 
     #[test]
     fn a_timed_out_reply_cannot_satisfy_the_next_command() {
-        let channel = channel(|mut peer| {
+        let (first_received, first_was_received) = mpsc::channel();
+        let channel = channel(move |mut peer| {
             let mut reader = BufReader::new(peer.try_clone().unwrap());
             let first = request(&mut reader);
+            first_received.send(()).unwrap();
             let second = request(&mut reader);
             writeln!(peer, "{}", json!({"return": {}, "id": first["id"]})).unwrap();
             writeln!(peer, "{}", json!({"error": {"class": "GenericError", "desc": "second failed"}, "id": second["id"]})).unwrap();
@@ -246,6 +248,12 @@ mod tests {
             channel.execute(Command::Powerdown, Duration::from_millis(30)),
             Err(QmpError::Timeout)
         ));
+        // The writer holds one request at a time. Until it has written the first one, which a loaded machine may
+        // not schedule within 30 ms, the second would find it busy and time out at once; this test is about the
+        // reply, so the second command is sent only once QEMU has the first.
+        first_was_received
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
         assert!(
             matches!(channel.execute(Command::Quit, Duration::from_secs(1)), Err(QmpError::Refused { description, .. }) if description == "second failed")
         );

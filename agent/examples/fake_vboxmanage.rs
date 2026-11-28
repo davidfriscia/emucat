@@ -164,7 +164,12 @@ fn main() {
         .iter()
         .map(|argument| format!("{argument:?}"))
         .collect();
-    writeln!(calls, "[{}]", quoted.join(",")).unwrap();
+    // One write per line: the agent runs several VBoxManage commands at once, and `writeln!` would write the
+    // brackets, the arguments and the newline separately, so that two calls could interleave into one line. A
+    // single append of a short line is not split.
+    calls
+        .write_all(format!("[{}]\n", quoted.join(",")).as_bytes())
+        .unwrap();
 
     let sleep = |name: &str| {
         if let Some(milliseconds) = fs::read_to_string(directory.join(name))
@@ -335,7 +340,8 @@ fn main() {
                 .append(true)
                 .open(directory.join("deleted.txt"))
                 .unwrap();
-            writeln!(deleted, "{uuid}").unwrap();
+            // One write per line, as for `calls.jsonl`.
+            deleted.write_all(format!("{uuid}\n").as_bytes()).unwrap();
             println!("0%...100%");
         }
         ["controlvm", uuid, "screenshotpng", output] => {
