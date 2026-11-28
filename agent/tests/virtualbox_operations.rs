@@ -4,6 +4,8 @@
 //! Everything runs against `fake_vboxmanage`, which `cargo test` builds next to the test executables, and
 //! against a repository held in memory. Nothing here runs the real VBoxManage, or touches a real machine.
 
+mod support;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,24 +49,7 @@ fn uuid(text: &str) -> Uuid {
 // The fake VBoxManage.
 
 fn fake_vboxmanage() -> PathBuf {
-    let path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join(if cfg!(windows) {
-            "fake_vboxmanage.exe"
-        } else {
-            "fake_vboxmanage"
-        });
-    assert!(
-        path.is_file(),
-        "build the example first: {}",
-        path.display()
-    );
-    path
+    support::example("fake_vboxmanage")
 }
 
 /// A private copy of the fake, with its own machines.

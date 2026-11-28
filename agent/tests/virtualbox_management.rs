@@ -2,6 +2,8 @@
 //! memory. Nothing here runs the real VBoxManage, imports into or deletes from a real VirtualBox, or touches a real
 //! machine.
 
+mod support;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,24 +47,7 @@ fn uuid(text: &str) -> Uuid {
 }
 
 fn fake_vboxmanage() -> PathBuf {
-    let path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join(if cfg!(windows) {
-            "fake_vboxmanage.exe"
-        } else {
-            "fake_vboxmanage"
-        });
-    assert!(
-        path.is_file(),
-        "build the example first: {}",
-        path.display()
-    );
-    path
+    support::example("fake_vboxmanage")
 }
 
 struct Installation {

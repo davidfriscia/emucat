@@ -1323,8 +1323,9 @@ mod tests {
 
     fn planned(root: &Path) -> Vec<String> {
         // The configured executable is the system the launcher asks for, so it is used as it is.
+        // A native path, so that only its file name decides: on Linux, `C:\qemu\...` would be one file name.
         let plan = plan_qemu(
-            Path::new("C:\\qemu\\qemu-system-i386.exe"),
+            &installed("qemu", "qemu-system-i386.exe"),
             root.to_path_buf(),
         )
         .unwrap();
@@ -1460,23 +1461,29 @@ mod tests {
         assert!(stdio.message.contains("-monitor vc"), "{}", stdio.message);
     }
 
+    /// `name` in a directory `directory`, as a native absolute path (`C:\…` on Windows, `/…` elsewhere): the
+    /// checks under test read the file name, and a Windows literal would be a single file name on Linux.
+    fn installed(directory: &str, name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(directory).join(name)
+    }
+
     #[test]
     fn executable_names_are_checked() {
         assert!(expected_name(
             EmulatorType::Box86,
-            Path::new("C:\\e\\86Box.exe")
+            &installed("e", "86Box.exe")
         ));
         assert!(expected_name(
             EmulatorType::Qemu,
-            Path::new("C:\\q\\qemu-system-x86_64.exe")
+            &installed("q", "qemu-system-x86_64.exe")
         ));
         assert!(!expected_name(
             EmulatorType::Qemu,
-            Path::new("C:\\q\\cmd.exe")
+            &installed("q", "cmd.exe")
         ));
         assert!(!expected_name(
             EmulatorType::Box86,
-            Path::new("C:\\e\\86Box.bat")
+            &installed("e", "86Box.bat")
         ));
     }
 }

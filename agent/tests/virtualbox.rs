@@ -3,6 +3,8 @@
 //! Parsing is tested against recorded output. Running is tested against `fake_vboxmanage`, which
 //! `cargo test` builds next to the test executables. Nothing here runs the real VBoxManage.
 
+mod support;
+
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fs;
@@ -621,24 +623,7 @@ fn a_missing_vboxmanage_is_a_warning_and_virtualbox_alone_is_enough() {
 // The real runner, against the fake VBoxManage.
 
 fn fake_vboxmanage() -> PathBuf {
-    let path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join(if cfg!(windows) {
-            "fake_vboxmanage.exe"
-        } else {
-            "fake_vboxmanage"
-        });
-    assert!(
-        path.is_file(),
-        "build the example first: {}",
-        path.display()
-    );
-    path
+    support::example("fake_vboxmanage")
 }
 
 /// A private copy of the fake, with its own answers.
