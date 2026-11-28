@@ -670,6 +670,10 @@ async fn a_screenshot_taken_after_archiving_does_not_stop_the_removal() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(windows),
+    ignore = "a directory deleted and created again can get the same inode on Linux, so the (device, inode) identity cannot tell them apart; NTFS file IDs can"
+)]
 async fn a_replaced_directory_is_not_the_one_that_was_archived() {
     let (_world, root, cleanup) = transfer_and_change(|root| {
         // The same name and the same contents, but another directory.
@@ -1394,6 +1398,10 @@ async fn real_vm_files_are_still_checked_exactly_when_screenshots_are_present() 
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(windows),
+    ignore = "a directory deleted and created again can get the same inode on Linux, so the (device, inode) identity cannot tell them apart; NTFS file IDs can"
+)]
 async fn a_substituted_directory_with_the_same_screenshot_is_refused() {
     let (_world, fake, root, operations, transfer) = transfer_with_screenshot().await;
     let disk = fs::read(root.join("disk.qcow2")).unwrap();

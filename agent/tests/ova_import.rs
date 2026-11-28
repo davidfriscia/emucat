@@ -2054,6 +2054,10 @@ mod command_line {
     }
 
     #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "the agent stores its credential with DPAPI, on Windows only; elsewhere the command cannot be paired (see without_a_credential_store_the_command_says_so_and_exits_4)"
+    )]
     fn an_unpaired_agent_exits_4() {
         let setup = setup("http://127.0.0.1:9");
         let output = setup.run(&["--name", "DOS", "--json"]);
@@ -2061,7 +2065,24 @@ mod command_line {
         assert_eq!(json(&output)["error"]["code"], "not_paired");
     }
 
+    /// Off Windows the agent has no secure credential store, so it can never be paired: the command says that
+    /// the credential cannot be read and stops with the authentication exit code, before any request.
     #[test]
+    #[cfg(not(windows))]
+    fn without_a_credential_store_the_command_says_so_and_exits_4() {
+        let (url, requests) = server(200, "{}");
+        let setup = setup(&url);
+        let output = setup.run(&["--name", "DOS", "--json"]);
+        assert_eq!(output.status.code(), Some(4), "{}", text(&output));
+        assert_eq!(json(&output)["error"]["code"], "credential_unreadable");
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "the agent stores its credential with DPAPI, on Windows only; elsewhere the command cannot be paired (see without_a_credential_store_the_command_says_so_and_exits_4)"
+    )]
     fn a_credential_for_another_server_is_not_sent() {
         let (url, requests) = server(200, "{}");
         let setup = setup(&url);
@@ -2073,6 +2094,10 @@ mod command_line {
     }
 
     #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "the agent stores its credential with DPAPI, on Windows only; elsewhere the command cannot be paired (see without_a_credential_store_the_command_says_so_and_exits_4)"
+    )]
     fn an_unreachable_server_exits_6() {
         // A port nothing listens on.
         let port = TcpListener::bind("127.0.0.1:0")
@@ -2088,6 +2113,10 @@ mod command_line {
     }
 
     #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "the agent stores its credential with DPAPI, on Windows only; elsewhere the command cannot be paired (see without_a_credential_store_the_command_says_so_and_exits_4)"
+    )]
     fn a_refused_credential_exits_4_and_is_never_printed() {
         let (url, requests) = server(
             401,
@@ -2110,6 +2139,10 @@ mod command_line {
     }
 
     #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "the agent stores its credential with DPAPI, on Windows only; elsewhere the command cannot be paired (see without_a_credential_store_the_command_says_so_and_exits_4)"
+    )]
     fn a_taken_name_exits_5() {
         let (url, _) = server(
             409,
@@ -2125,6 +2158,10 @@ mod command_line {
     }
 
     #[test]
+    #[cfg_attr(
+        not(windows),
+        ignore = "the agent stores its credential with DPAPI, on Windows only; elsewhere the command cannot be paired (see without_a_credential_store_the_command_says_so_and_exits_4)"
+    )]
     fn a_server_without_imports_is_reported_as_unsupported() {
         let (url, _) = server(
             404,
