@@ -7,7 +7,7 @@ import { baseName, normalizeEntryPath } from './paths';
 /**
  * ZIP and ZIP64, read from bytes already in memory (decision 0058): the end records and the central directory, then
  * one entry's local header when that entry is read. The checks are the server's (decision 0056): a single disk, ZIP64
- * records where a field overflows, no entry whose data reaches the central directory, a local header that names the
+ * records where a field overflows (resolved over all of an entry's ZIP64 records, decision 0061), no entry whose data reaches the central directory, a local header that names the
  * same file with the same method. Unlike an EmuCat archive, an archive found inside one may hold anything, so an
  * entry that cannot be read safely (encrypted, a link, an unknown method, an unsafe name) is listed and marked,
  * not refused with its whole archive.
@@ -73,16 +73,51 @@ function dosTimestamp(time: number, date: number): string | null {
   return `${year}-${pad(month)}-${pad(day)}T${pad(time >> 11)}:${pad((time >> 5) & 0x3f)}:${pad((time & 0x1f) * 2)}`;
 }
 
-function zip64Field(extra: Uint8Array): Uint8Array | null {
+/** The data of every ZIP64 extended-information record (0x0001) of an extra field, in order. */
+function zip64Records(extra: Uint8Array): Uint8Array[] {
+  const records: Uint8Array[] = [];
   let at = 0;
   while (at + 4 <= extra.length) {
     const id = u16(extra, at);
     const length = u16(extra, at + 2);
     if (at + 4 + length > extra.length) throw malformed();
-    if (id === 0x0001) return extra.subarray(at + 4, at + 4 + length);
+    if (id === 0x0001) records.push(extra.subarray(at + 4, at + 4 + length));
     at += 4 + length;
   }
-  return null;
+  return records;
+}
+
+/**
+ * The real uncompressed size, compressed size and local header offset of a central record, resolved over every ZIP64
+ * record it carries, as the server does (decision 0061, F-4). Each record holds one 64-bit value per fixed field that
+ * is 0xFFFFFFFF, in that order (APPNOTE 4.5.3), so each must be long enough for all of them; bytes beyond are
+ * ignored. For each field, a record giving 0xFFFFFFFF yields to one giving anything else (the agent's zip 7.3 writes
+ * a placeholder record, then the real one); equal values agree; two different values other than 0xFFFFFFFF
+ * contradict each other and refuse the archive. When every record gives 0xFFFFFFFF, that is the value: the bounds,
+ * limits and CRC checks that follow refuse it if it is not real. A value above 2^53 − 1 is refused.
+ */
+function resolveZip64(
+  fixed: [number, number, number],
+  records: Uint8Array[],
+): [number, number, number] {
+  const wanted = fixed.filter((value) => value === MAX_U32).length;
+  if (wanted === 0) return fixed;
+  if (records.length === 0) throw malformed();
+  for (const data of records) if (data.length < 8 * wanted) throw malformed();
+  let position = 0;
+  return fixed.map((value) => {
+    if (value !== MAX_U32) return value;
+    let resolved = MAX_U32;
+    for (const data of records) {
+      const candidate = u64(data, position);
+      if (candidate === null) throw malformed();
+      if (candidate === MAX_U32 || candidate === resolved) continue;
+      if (resolved !== MAX_U32) throw malformed();
+      resolved = candidate;
+    }
+    position += 8;
+    return resolved;
+  }) as [number, number, number];
 }
 
 export function isZip(bytes: Uint8Array): boolean {
@@ -158,29 +193,10 @@ export function readZip(
     if (u16(directory, at + 34) !== 0) throw new LocalArchiveError('multi_volume');
     const rawName = directory.slice(at + 46, at + 46 + nameLength);
     const extra = directory.subarray(at + 46 + nameLength, at + 46 + nameLength + extraLength);
-    let uncompressedSize = u32(directory, at + 24);
-    let compressedSize = u32(directory, at + 20);
-    let localHeaderOffset = u32(directory, at + 42);
-    const zip64 = zip64Field(extra);
-    if (zip64) {
-      let position = 0;
-      const take = () => {
-        if (position + 8 > zip64.length) throw malformed();
-        const value = u64(zip64, position);
-        if (value === null) throw malformed();
-        position += 8;
-        return value;
-      };
-      if (uncompressedSize === MAX_U32) uncompressedSize = take();
-      if (compressedSize === MAX_U32) compressedSize = take();
-      if (localHeaderOffset === MAX_U32) localHeaderOffset = take();
-    } else if (
-      uncompressedSize === MAX_U32 ||
-      compressedSize === MAX_U32 ||
-      localHeaderOffset === MAX_U32
-    ) {
-      throw malformed();
-    }
+    const [uncompressedSize, compressedSize, localHeaderOffset] = resolveZip64(
+      [u32(directory, at + 24), u32(directory, at + 20), u32(directory, at + 42)],
+      zip64Records(extra),
+    );
     if (localHeaderOffset + 30 + compressedSize > directoryOffset) throw malformed();
 
     let name: string | null;
