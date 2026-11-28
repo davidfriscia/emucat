@@ -34,7 +34,13 @@ import {
 import type { FastifyInstance } from 'fastify';
 import type { RowDataPacket } from 'mysql2/promise';
 import { captureFailures, recordBrowser } from './artifacts.js';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from 'playwright-core';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { GENEROUS_RATE_LIMITS, waitFor } from '../test/agent-helpers.js';
@@ -81,6 +87,18 @@ function fingerprintOf(path: string): string {
 }
 
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+
+/** What assistive technology announces as an element's description: the text of its `aria-describedby` targets. */
+const accessibleDescription = (locator: Locator) =>
+  locator.evaluate((element) =>
+    (element.getAttribute('aria-describedby') ?? '')
+      .split(/\s+/)
+      .map((id: string) =>
+        id ? (element.ownerDocument.getElementById(id)?.textContent ?? '') : '',
+      )
+      .join(' ')
+      .trim(),
+  );
 
 const png = (width: number, height: number, background: string) =>
   sharp({ create: { width, height, channels: 3, background } })
@@ -624,12 +642,27 @@ describe('restore, public cover and VM details, end to end', () => {
         const adminPage = await adminContext.newPage();
         await signIn(adminPage);
         await adminPage.goto(webUrl(path));
-        await adminPage.getByText('Making it public publishes all of its screenshots.').waitFor();
+        // Decision 0060: publication is in General's "VM actions" toolbar. The consequence of making the VM public
+        // is the Make public button's own description (the Private chip repeats the same statement as its detail,
+        // which is why the text alone matches twice).
+        const publication = adminPage
+          .getByRole('toolbar', { name: 'VM actions' })
+          .getByRole('group', { name: 'Publication' });
+        const makePublic = publication.getByRole('button', { name: 'Make public', exact: true });
+        await makePublic.waitFor();
+        expect(await accessibleDescription(makePublic)).toContain(
+          'Making it public publishes all of its screenshots.',
+        );
         await shot(adminPage, '1-admin-private-vm');
         expect(await adminPage.getByRole('button', { name: 'Publish' }).count()).toBe(0);
-        await adminPage.getByRole('button', { name: 'Make public' }).click();
-        await adminPage.getByText('The main screenshot is the public catalog’s cover.').waitFor();
+        await makePublic.click();
+        // The page shows the server's answer: the VM is public, with its main screenshot as the cover.
+        await publication.getByRole('button', { name: 'Make private', exact: true }).waitFor();
+        await publication.getByText('The main screenshot is the public catalog’s cover.').waitFor();
         await adminContext.close();
+        const published = await admin.request({ method: 'GET', url: path });
+        expect(published.statusCode, published.body).toBe(200);
+        expect(published.json()).toMatchObject({ visibility: 'public', publicCover: 'shown' });
         expect((await mediaOf('86box', VM)).find((item) => item.id === main)?.isMain).toBe(true);
       },
       LONG,

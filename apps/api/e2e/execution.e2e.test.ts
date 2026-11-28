@@ -1364,8 +1364,25 @@ describe('running and verifying VMs, end to end', () => {
         expect(
           await sections.getByRole('link', { name: 'Screenshots', exact: true }).isVisible(),
         ).toBe(true);
+        // Decision 0060: General's permanent Details panel moved into the VM information panel of its toolbar,
+        // every fact preserved; the page's sections are the metadata editor and Run and verify.
         const headings = await page.getByRole('heading', { level: 2 }).allTextContents();
-        expect(headings.slice(0, 3)).toEqual(['Metadata', 'Details', 'Run and verify']);
+        expect(headings.slice(0, 2)).toEqual(['Metadata', 'Run and verify']);
+        await page
+          .getByRole('toolbar', { name: 'VM actions' })
+          .getByRole('button', { name: 'VM information' })
+          .click();
+        const information = page.getByRole('dialog');
+        await information.waitFor();
+        expect(await information.getByRole('heading', { level: 4 }).allTextContents()).toEqual([
+          'Publication',
+          'Identity',
+          'Contents',
+          'History',
+        ]);
+        expect(await information.locator('code.vm-identity').textContent()).toBe(VM);
+        await page.keyboard.press('Escape');
+        await information.waitFor({ state: 'detached' });
         await sections.getByRole('link', { name: 'Local copies and restore', exact: true }).click();
         await page.waitForURL(`**/admin/vms/qemu/${encodeURIComponent(VM)}/copies`);
         expect(
