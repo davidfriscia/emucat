@@ -58,12 +58,12 @@ snapshot is never downloaded.
 Implemented with EmuCat's own ZIP and TAR readers in TypeScript and `fflate` (MIT, pure JavaScript, no WebAssembly)
 for deflate:
 
-| Format            | Read                                                                                                     |
-| ----------------- | -------------------------------------------------------------------------------------------------------- |
-| ZIP, JAR          | Central directory; stored and deflated entries; CP437 names without the UTF-8 flag                       |
-| ZIP64             | End records, locator and per-entry fields                                                                |
-| TAR, OVA          | 0057's endings: zero blocks, or none at an exact entry boundary; ustar, GNU long names, PAX path/size    |
-| GZIP, TAR.GZ, TGZ | One member; the trailer's size checked before decompressing, its CRC-32 after; TAR detected by its bytes |
+| Format            | Read                                                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------- |
+| ZIP, JAR          | Central directory; stored and deflated entries; CP437 names without the UTF-8 flag                                    |
+| ZIP64             | End records, locator and per-entry fields, resolved over every ZIP64 record ([0061](0061-zip64-duplicate-records.md)) |
+| TAR, OVA          | 0057's endings: zero blocks, or none at an exact entry boundary; ustar, GNU long names, PAX path/size                 |
+| GZIP, TAR.GZ, TGZ | One member; the trailer's size checked before decompressing, its CRC-32 after; TAR detected by its bytes              |
 
 Recognized and **not** opened (the node is a file; the reason is shown): 7z, RAR, BZIP2, XZ, Zstandard, CAB, ARJ, LHA,
 compress, other legacy archivers; ZIP methods other than stored and deflate (Deflate64, BZIP2, LZMA, PPMd, Implode…);

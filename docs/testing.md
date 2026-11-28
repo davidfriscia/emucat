@@ -226,6 +226,18 @@ It prints the resolved central directory, inspects the archive against its own m
 `--rewrite <target.zip> <new VM name>` also writes a server clone of it and checks that too: the target must not
 exist, and needs as much free space as the archive. The archive itself is only read.
 
+The browser-local reader of nested archives follows the same policy (decision 0061, "The browser-local reader").
+`apps/web/test/archive-local/zip64.test.ts` mirrors the server's cases one for one, and adds the browser's own limits
+on resolved values (a small archive declaring 5 GiB, a size that lies, the memory budget, the depth limit, nested
+ZIP64 inside ZIP and ZIP64). `zip64Layout` in `apps/web/test/archive-local/fixtures.ts` builds those archives in
+memory with exactly the ZIP64 records asked for (`agent`: the placeholder record, then the real one; `single`; `none`;
+or raw records from `zip64Data`), so they are a few KiB each. `test/archive-nested.test.tsx` opens one through the
+interface. Both run with the rest of the web suite:
+
+```bash
+pnpm --filter @emucat/web exec vitest run test/archive-local/zip64.test.ts test/archive-nested.test.tsx
+```
+
 ## Troubleshooting
 
 | Symptom                                                 | Cause and remedy                                                                                                                                                                                          |

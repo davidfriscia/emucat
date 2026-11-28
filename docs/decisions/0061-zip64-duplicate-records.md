@@ -1,8 +1,9 @@
 # 0061: The server resolves the agent's duplicated ZIP64 records
 
-**Status:** Accepted. Amends [0055](0055-server-repository-access.md) (archive inspection, server-made clones) and
-[0056](0056-archive-explorer.md) (Archive Explorer). Corrects defect F-4 of the Seekable Deflate feasibility
-assessment; changes no archive, no agent and no protocol.
+**Status:** Accepted. Amends [0055](0055-server-repository-access.md) (archive inspection, server-made clones),
+[0056](0056-archive-explorer.md) (Archive Explorer) and, since M0.1, [0058](0058-browser-local-nested-archives.md)
+(browser-local nested archives). Corrects defect F-4 of the Seekable Deflate feasibility assessment, in the server's
+reader and in the browser's; changes no archive, no agent and no protocol.
 
 ## Context
 
@@ -78,7 +79,28 @@ length there, to find the data. The same defect cannot occur in local headers.
   refused as malformed. No known EmuCat writer produces one.
 - A clone made by the server from an affected version has one ZIP64 record per entry. Every reader tested accepts it,
   7-Zip without the warning it gives for the agent's own layout, and so does a release before this one.
-- Not changed: the browser-local reader of nested archives (`apps/web/src/archive-local/zip.ts`, 0058) still takes the
-  first ZIP64 record. A nested archive is held in memory and never reaches (B); it reaches (A) only when it is an agent
-  archive of a 3.75 GiB file that compresses to fit the nested-archive limit. Applying this policy there is a separate
-  change.
+- The browser-local reader of nested archives follows this decision too (next section).
+
+## The browser-local reader (M0.1)
+
+The browser-local reader of nested archives (`apps/web/src/archive-local/zip.ts`, 0058) had the same defect:
+`zip64Field()` returned the first ZIP64 record and `readZip()` took the sizes from it, so a nested agent archive with
+an entry under (A) was refused as damaged when expanded in Archive Explorer, by the same bounds check
+(`localHeaderOffset + 30 + compressedSize > directoryOffset`). It now resolves every field over every record exactly
+as the table above says, with `resolveZip64()`, a port of the server's function. The two readers agree on every case
+of that table; where they differ, it is in how they say it, and in limits:
+
+| Difference                   | Server                                  | Browser                                                                              | Why                                                                       |
+| ---------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| Errors                       | `archive_malformed` with a message      | `malformed`: "The archive is damaged or is not the format it appears to be"          | 0058's error codes carry no internal detail                               |
+| An entry that cannot be read | Refuses the archive (an EmuCat archive) | Lists and marks it (a local header that does not match, an unsupported method)       | 0058: a nested archive may hold anything; as before                       |
+| Reading a resolved size      | Server limits (0056)                    | 64 MiB archive, 100 MiB download, 256 KiB text, 16 MiB seek, 128 MiB cache, depth 5  | 0058 §5, unchanged; a resolved size never raises a limit                  |
+| Condition (B)                | Reached by archives larger than 4 GiB   | Never reached: a nested archive is in memory and at most 64 MiB                      | Offsets in ZIP64 still resolve the same way when a writer puts them there |
+| Condition (A)                | Lists, previews, extracts, clones       | Lists, previews the start; reading or opening it whole is refused by the size limits | Bounded decompression (0058 §5)                                           |
+| Extra fields kept            | Kept in `ZipEntry.extra` for clones     | Not kept: the browser never writes archives                                          |                                                                           |
+
+The two implementations stay separate: `packages/contracts` is shared, but its archive code is byte-level detection
+without archive structure, the server's reader works on `Buffer` and a streamed directory with its own errors, and the
+browser's on `Uint8Array` in a worker that must stay small (0058 §7). The function is twenty lines; the readers are
+kept in step by tests that mirror each other case for case (`apps/api/test/zip64.test.ts`,
+`apps/web/test/archive-local/zip64.test.ts`). A change to this policy changes both.

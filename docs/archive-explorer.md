@@ -108,6 +108,7 @@ see decision 0058 §6 for the transient buffers outside it.
 ## Testing
 
 - `test/archive-local/*.test.ts`: the readers, limits, bombs, cache and client, in Node.
+  `test/archive-local/zip64.test.ts` holds the ZIP64 cases of decision 0061, mirroring the server's.
 - `test/archive-nested.test.tsx`, `test/archive-explorer.test.tsx`: the interface in jsdom, with the real worker
   handler run in the same thread, under StrictMode.
 - `e2e/archive-explorer.browser.test.ts`: the production bundle in Edge, Chrome or Chromium, served with nginx's MIME
