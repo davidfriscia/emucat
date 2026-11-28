@@ -18,6 +18,17 @@ production. The quick reference is in the [README](../README.md#testing-on-windo
 
 `pnpm test:e2e` also runs real QEMU and 86Box when they are installed, and skips only those tests otherwise.
 
+Measured on the Windows workstation for M0.2 (14 cores, 16 GB, Docker Desktop), as a guide to what a run costs:
+
+| Suite                                    | Tests (passed, skipped or ignored)                                                             | Wall time    |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------ |
+| `pnpm test` (all packages and agent)     | contracts 456; deployer 51; web 657; API 1,245 passed, 2 skipped; agent 619 passed, 27 ignored | about 27 min |
+| Agent alone (`cargo test`)               | 619 passed, 27 ignored                                                                         | 1.5–2.5 min  |
+| `pnpm test:e2e`                          | 100 passed, 1 skipped                                                                          | 6–10 min     |
+| `pnpm --filter @emucat/web test:browser` | 28 passed                                                                                      | about 40 s   |
+
+The full counts of every suite are in the M0.2 report (`docs/reports/emucat-m0-2-cross-platform-test-baseline-stabilization-report.md`).
+
 The API tests create uniquely named `emucat_test_<random>` databases with the root password from `.env` and drop them
 when each test ends; they never open the development database. The e2e tests do the same, and use only temporary
 directories and containers named `emucat-e2e-<suite>-<random>` that they remove. `pnpm test:compose` uses its own
@@ -92,6 +103,16 @@ follow the product's navigation (decision 0054): a public VM opens on its public
 General, and Version History, Local copies and restore, Notes and Screenshots are routes of their own, reached from the
 VM's sidebar or opened directly.
 
+**An effect is awaited, not assumed.** What a React component does in an effect (an event it dispatches, a request it
+makes) runs after the render that shows its result is committed, and Testing Library's `findBy…` can return in
+between when the machine is busy. Wait for the effect itself (`await waitFor(() => expect(spy).toHaveBeenCalled())`),
+then assert how often it happened.
+
+**A fixture follows the product's sequence.** A test that calls a step of a larger operation sets the world up the
+way that operation leaves it. For example, `MediaSync::detach_pending` is called just before a VM directory is
+deleted, so a test that calls it deletes the directory too; otherwise the running synchronizer may also find the
+screenshot there.
+
 **Each test cleans up what it made**, including when it fails: browser contexts are closed in `finally`, servers are
 restarted if a test stopped them, and containers are removed in `afterAll`.
 
@@ -154,7 +175,15 @@ agent. It proves what jsdom cannot: the archive worker and PDF.js's worker load 
 nested archives open, preview (canvas, PDF, legacy images) and download with exact bytes, no request leaves the
 origin, no console error is logged, and the page stays responsive while the worker indexes archives of 1 to 64 MiB.
 
-It launches Edge, then Chrome. Elsewhere, name a Chromium binary:
+Each file builds what it serves first, with `runVite` from [`e2e/vite-build.ts`](../apps/web/e2e/vite-build.ts): the
+Vite command line of this workspace's `node_modules`, run by the Node.js running the tests. No shell and no `npx` is
+involved, so it starts the same way on Windows and Linux, nothing is downloaded, arguments keep their boundaries
+(paths with spaces included), and a failed build fails the file. (`npx` is `npx.cmd` on Windows, which cannot be
+started without a shell: the suite used to stop at `spawnSync npx ENOENT`.) `test/e2e-vite-build.test.ts`, part of
+`pnpm test`, checks the launcher on both platforms.
+
+The browser itself is not downloaded either: Playwright's `playwright-core` drives an installed one. No
+`playwright install` is needed or used. It launches Edge, then Chrome. Elsewhere, name a Chromium binary:
 
 ```powershell
 $env:EMUCAT_BROWSER_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
@@ -187,26 +216,50 @@ only General from another build, for before-and-after screenshots.
 The API runs on Linux in production, so the platform-specific assertions are also run there, from a Windows checkout,
 with Docker. Both commands copy the checkout into the container, so that the Windows `node_modules` and `target` are
 never used, and run the tests as an unprivileged user (UID 1000), since root would pass permission checks that a real
-account fails. Run them from the repository root in PowerShell, with `pnpm db:up` done and nothing else using MariaDB:
+account fails. Run them from the repository root in Git Bash (Windows PowerShell 5.1 drops the double quotes inside
+the `bash -c` script, so the container runs something else), with `pnpm db:up` done and nothing else using MariaDB:
 a MariaDB shared with another test run is slowed by every database's migrations, and tests then time out in their
 setup.
 
 The whole API suite, on the development MariaDB's network (`emucat_default`, where it is `emucat-mariadb-1:3306`). The
 root password comes from the copied `.env`, and nothing is printed:
 
-```powershell
-docker run --rm --network emucat_default -v "${PWD}:/src:ro" -e DB_HOST=emucat-mariadb-1 -e DB_PORT=3306 -e CI=true node:22.22.3-bookworm-slim bash -c 'set -e; corepack enable; mkdir /work; tar -C /src --exclude=node_modules --exclude=target --exclude=.git -cf - . | tar -C /work -xf -; chown -R node:node /work; su node -c "export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; cd /work && pnpm install --frozen-lockfile && pnpm build:contracts && cd apps/api && npx vitest run"'
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm --network emucat_default -v "$(pwd -W):/src:ro" -e DB_HOST=emucat-mariadb-1 -e DB_PORT=3306 -e CI=true node:22.22.3-bookworm-slim bash -c 'set -e; corepack enable; mkdir /work; tar -C /src --exclude=node_modules --exclude=target --exclude=.git -cf - . | tar -C /work -xf -; chown -R node:node /work; su node -c "export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; cd /work && pnpm install --frozen-lockfile && pnpm build:contracts && cd apps/api && npx vitest run"'
 ```
 
-The agent's packaging tests, whose `#[cfg(unix)]` module covers symbolic links, odd names and the media area:
+The whole agent suite. Its tests read the shared fixtures of `packages/contracts/fixtures` (`include_str!`), so
+those are copied with `agent/`; `--cpus` keeps the build from starving anything else running:
 
-```powershell
-docker run --rm -v "${PWD}/agent:/src:ro" rust:1-bookworm bash -c 'set -e; useradd -m t; mkdir /work; tar -C /src --exclude=target -cf - . | tar -C /work -xf -; chown -R t /work; su t -c "export PATH=/usr/local/cargo/bin:\$PATH CARGO_HOME=/usr/local/cargo; cd /work && cargo test --test packaging"'
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm --cpus=4 --memory=6g -v "$(pwd -W):/src:ro" rust:1-bookworm bash -c 'set -e; useradd -m -u 1000 t; mkdir /work; tar -C /src --exclude=node_modules --exclude=target --exclude=.git -cf - agent packages/contracts/fixtures | tar -C /work -xf -; chown -R t:t /work; su t -c "export PATH=/usr/local/cargo/bin:\$PATH CARGO_HOME=/usr/local/cargo; cd /work/agent && cargo test --locked --no-fail-fast"'
 ```
 
-Not every agent test applies on Linux: the agent is a Windows program, and stores its credential with DPAPI. On Linux,
-six command-line tests of `tests/ova_import.rs` fail before any import runs, with "no secure credential store is
-implemented for linux yet". That is a limit of the agent, not of the code under test.
+Add `--test packaging` (for example) after `--no-fail-fast` to run one file; `cargo build --examples` first if that
+file starts `fake_vboxmanage` or `fake_emulator`, since only a whole-suite `cargo test` builds the examples.
+
+### Agent tests that do not apply on Linux
+
+The agent is a Windows program. On Linux it builds, and nearly all of its tests run there too, but
+these are ignored off Windows, with the reason in the attribute, so that `cargo test` lists them as `ignored` rather
+than hiding them. Each runs on Windows, and in CI's Windows job:
+
+| Tests                                                                                                                                                                                                                                       | Why they cannot run on Linux                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6 in `tests/ova_import.rs` `command_line` (pairing, credentials, exit codes 4, 5, 6)                                                                                                                                                        | They run the real `emucat-agent import-ova`, which must first read the agent's credential. The agent stores it with DPAPI, on Windows only (decision 0009); elsewhere `platform_store` refuses everything, so these commands cannot be paired. `without_a_credential_store_the_command_says_so_and_exits_4` (Linux only) proves what happens there instead  |
+| `tests/registration.rs`: `a_replaced_directory_is_not_the_one_that_was_archived`, `a_substituted_directory_with_the_same_screenshot_is_refused`; `tests/restore.rs`: `a_directory_that_is_not_this_restores_is_never_touched_after_a_crash` | They delete a directory and create another one with the same name, and expect the agent to see that it is not the same directory. On Linux its identity is (device, inode), and a new directory often gets the inode just freed (13 times in 20 in a container), so the check cannot tell them apart; NTFS file IDs change. Root or not makes no difference |
+
+Everything else passes on Linux, as UID 1000 and as root alike. Run it as an unprivileged user anyway: it is the
+account the agent's permission checks are written for.
+
+**Cargo's build-directory layout.** From Cargo 1.100, test executables are no longer in `target/<profile>/deps` but in
+`target/<profile>/build/emucat-agent/<hash>/out`, while examples stay in `target/<profile>/examples`. Tests that start
+an example find it with `example()` in [`agent/tests/support/mod.rs`](../agent/tests/support/mod.rs), which works with
+either layout; never derive its path from `current_exe()` by a fixed number of `parent()` calls.
+
+**Fakes run concurrently.** The agent starts several `fake_vboxmanage` commands at once, and each appends to the same
+call log. A line must be written with one `write_all` of the whole line: `writeln!` writes its pieces separately, and
+two processes then interleave them into one unreadable line.
 
 ## ZIP64 archives
 
@@ -240,22 +293,73 @@ pnpm --filter @emucat/web exec vitest run test/archive-local/zip64.test.ts test/
 
 ## Troubleshooting
 
-| Symptom                                                 | Cause and remedy                                                                                                                                                                                          |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Database tests need MARIADB_ROOT_PASSWORD`             | No `.env`: run `pnpm env:init`, then `pnpm db:up`                                                                                                                                                         |
-| `Cannot connect to MariaDB for tests`                   | MariaDB is not running: `pnpm db:up`                                                                                                                                                                      |
-| API tests time out (`Test timed out in 30000ms`)        | MariaDB is shared or overloaded: run one suite at a time, and keep the default worker count (see "API test workers"). Each test applies every migration to a database of its own, and that DDL serializes |
-| `Too many connections`                                  | Too many API test workers: lower `EMUCAT_API_TEST_WORKERS` (default 2 on Windows, 4 elsewhere)                                                                                                            |
-| e2e: `Cannot connect to 127.0.0.1:<port>: Disconnected` | An SFTP test image built before `PerSourcePenalties no`: remove `emucat-sftp-test:local` (`docker image rm emucat-sftp-test:local`); the tests build it again                                             |
-| e2e: `Build the agent first`                            | Run the suite with `pnpm test:e2e`, which builds the agent, or `cargo build --manifest-path agent/Cargo.toml` first                                                                                       |
-| e2e: a browser element times out                        | Run again with `EMUCAT_E2E_ARTIFACTS` set, and read the saved page, DOM and console for that test                                                                                                         |
-| `pnpm test:compose` or `test:deploy` fails to start     | Docker Desktop is not running, or Git Bash is not installed                                                                                                                                               |
+| Symptom                                                 | Cause and remedy                                                                                                                                                                                                                             |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Database tests need MARIADB_ROOT_PASSWORD`             | No `.env`: run `pnpm env:init`, then `pnpm db:up`                                                                                                                                                                                            |
+| `Cannot connect to MariaDB for tests`                   | MariaDB is not running: `pnpm db:up`                                                                                                                                                                                                         |
+| API tests time out (`Test timed out in 30000ms`)        | MariaDB is shared or overloaded: run one suite at a time, and keep the default worker count (see "API test workers"). Each test applies every migration to a database of its own, and that DDL serializes                                    |
+| `Too many connections`                                  | Too many API test workers: lower `EMUCAT_API_TEST_WORKERS` (default 2 on Windows, 4 elsewhere)                                                                                                                                               |
+| e2e: `Cannot connect to 127.0.0.1:<port>: Disconnected` | An SFTP test image built before `PerSourcePenalties no`: remove `emucat-sftp-test:local` (`docker image rm emucat-sftp-test:local`); the tests build it again                                                                                |
+| e2e: `Build the agent first`                            | Run the suite with `pnpm test:e2e`, which builds the agent, or `cargo build --manifest-path agent/Cargo.toml` first                                                                                                                          |
+| e2e: a browser element times out                        | Run again with `EMUCAT_E2E_ARTIFACTS` set, and read the saved page, DOM and console for that test                                                                                                                                            |
+| `pnpm test:compose` or `test:deploy` fails to start     | Docker Desktop is not running, or Git Bash is not installed, or `bash` is WSL's (`C:\Windows\system32\bash.exe`, error `failed to connect to the docker API at unix:///var/run/docker.sock`): put `C:\Program Files\Git\bin` first on `PATH` |
 
 Interrupted runs can leave `emucat_test_*` databases behind. They hold no connections and no test reads them again.
+
+## Targeted regression commands
+
+Run from the repository root in PowerShell, with the fnm Node.js on `PATH`:
+
+```powershell
+# The ZIP64 regressions of decision 0061, server and browser
+pnpm --filter @emucat/api exec vitest run test/zip64.test.ts test/archive-explorer.test.ts test/clones.test.ts
+pnpm --filter @emucat/web exec vitest run test/archive-local/zip64.test.ts test/archive-nested.test.tsx
+# The browser launcher and the screenshot announcement
+pnpm --filter @emucat/web exec vitest run test/e2e-vite-build.test.ts test/capture.test.tsx
+# The agent tests made deterministic in M0.2
+cargo test --manifest-path agent/Cargo.toml --lib qmp::
+cargo test --manifest-path agent/Cargo.toml --test media a_spooled_screenshot_the_server_no_longer_accepts_is_given_up
+cargo test --manifest-path agent/Cargo.toml --test virtualbox_management
+# One e2e file (it runs the file's whole scenario)
+cd apps/api; npx vitest run --config e2e/vitest.config.ts e2e/restore.e2e.test.ts -t "public cover"
+```
+
+The full regression, one suite at a time (the API and e2e suites must not share MariaDB):
+
+```powershell
+pnpm lint
+pnpm check
+pnpm test
+pnpm test:e2e
+pnpm --filter @emucat/web test:browser
+pnpm test:sftp
+pnpm test:deploy
+pnpm test:compose
+pnpm build
+```
+
+## Test resources left behind
+
+A complete run leaves nothing of its own: databases, containers (`emucat-e2e-*`, `emucat-smoke-*`), temporary
+directories and browser processes are removed by the tests. What may remain, and is safe to remove by hand once no
+suite is running:
+
+| Resource                                       | Left by                                | Remove with                                                  |
+| ---------------------------------------------- | -------------------------------------- | ------------------------------------------------------------ |
+| `emucat_test_*` databases                      | An interrupted API or e2e run          | `DROP DATABASE` each one, after checking no suite is running |
+| `apps/web/e2e/dist`, `apps/web/e2e/dist-app`   | `test:browser` (ignored by Git)        | Nothing needed; the next run replaces them                   |
+| `emucat-sftp-test:local`, `emucat-deploy-test` | `test:sftp`, `test:e2e`, `test:deploy` | Kept on purpose, as a build cache                            |
+
+Never use `docker system prune` or `docker volume prune` on the workstation: they would also remove the development
+MariaDB volume (`emucat_mariadb-data`) and unrelated containers.
 
 ## Known environment limitations
 
 - The e2e suite runs on Windows only: it drives the Windows agent, with DPAPI and Windows paths.
+- The agent tests listed under "Agent tests that do not apply on Linux" are ignored off Windows.
+- On Linux, building the agent's library warns that `process::same_image` is never used (it serves the Windows
+  launcher only). `cargo clippy --all-targets -- -D warnings`, as CI's Ubuntu job runs it, turns that warning into an
+  error. Left as a follow-up: the fix is in agent source, outside a test-only change.
 - On Windows, a file symbolic link cannot be created without Developer Mode, and Node has no `O_NOFOLLOW`, so the
   notes test that a file link is refused runs on Linux only.
 - File permission bits do not exist on Windows; their exact values are checked on Linux only.
