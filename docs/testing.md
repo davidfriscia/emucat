@@ -208,6 +208,24 @@ Not every agent test applies on Linux: the agent is a Windows program, and store
 six command-line tests of `tests/ova_import.rs` fail before any import runs, with "no secure credential store is
 implemented for linux yet". That is a limit of the agent, not of the code under test.
 
+## ZIP64 archives
+
+`apps/api/test/zip64.test.ts` covers the server's ZIP64 reading and rewriting ([decision 0061](decisions/0061-zip64-duplicate-records.md)),
+including archives beyond 4 GiB and files of 3.75 GiB or more. Those archives are virtual: their zeros are produced
+only when read (`buildZip64Layout` in `test/archive-sources.ts`), so the suite writes no large file. It takes about 17
+seconds, mostly computing the CRC and SHA-256 of 4 GiB of zeros, once per length.
+
+To check a real, large archive through the same code, which the normal suite never does, run on a copy you can read:
+
+```powershell
+pnpm --filter @emucat/api exec tsx test/tools/validate-zip-archive.ts C:\path\to\archive.zip
+```
+
+It prints the resolved central directory, inspects the archive against its own manifest, and hashes every file up to
+64 MiB (`--hash-max <bytes>` changes that; larger files have their first 4 MiB read through the extraction path).
+`--rewrite <target.zip> <new VM name>` also writes a server clone of it and checks that too: the target must not
+exist, and needs as much free space as the archive. The archive itself is only read.
+
 ## Troubleshooting
 
 | Symptom                                                 | Cause and remedy                                                                                                                                                                                          |
