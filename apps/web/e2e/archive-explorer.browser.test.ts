@@ -8,8 +8,7 @@
  * Run with `pnpm --filter @emucat/web test:browser`. The browser is Edge or Chrome, or `EMUCAT_BROWSER_PATH`.
  * Screenshots are written to `EMUCAT_BROWSER_SCREENSHOTS` when set; measurements are printed.
  */
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
@@ -18,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { crc32 } from '../src/archive-local/bytes';
 import { tar, text, zip } from '../test/archive-local/fixtures';
 import { startServer, type HarnessServer, type RecordedRequest } from './server';
+import { runVite } from './vite-build';
 
 const WEB = fileURLToPath(new URL('..', import.meta.url));
 const DIST = join(WEB, 'e2e', 'dist');
@@ -254,10 +254,7 @@ const downloads = (path: string) =>
   );
 
 beforeAll(async () => {
-  execFileSync('npx', ['vite', 'build', '--config', 'e2e/vite.config.ts', '--logLevel', 'warn'], {
-    cwd: WEB,
-    stdio: 'inherit',
-  });
+  runVite(['build', '--config', 'e2e/vite.config.ts', '--logLevel', 'warn']);
   server = await startServer(DIST);
   server.routes.set(`GET ${ARCHIVE}`, () => ({
     vm: { emulatorType: '86box', vmName: 'DOS622', title: 'MS-DOS 6.22' },
@@ -347,7 +344,7 @@ describe('Archive Explorer in a browser', () => {
   it('serves its worker and bundles from this origin as JavaScript', () => {
     const assets = readFileSync(join(DIST, 'index.html'), 'utf8');
     expect(assets).toMatch(/assets\/index-[\w-]+\.js/u);
-    const built = execFileSync('ls', [join(DIST, 'assets')], { encoding: 'utf8' }).split('\n');
+    const built = readdirSync(join(DIST, 'assets'));
     expect(built.some((name) => /^archive\.worker-[\w-]+\.js$/u.test(name))).toBe(true);
     expect(built.some((name) => name.endsWith('.mjs') || name.endsWith('.wasm'))).toBe(false);
   });

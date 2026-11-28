@@ -9,7 +9,6 @@
  * `EMUCAT_BROWSER_CAPTURE_ONLY=1` runs only the capture of General, for a before-and-after comparison against an
  * older build (see the report of decision 0060).
  */
-import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +16,7 @@ import type { RegistrationOperation, VmOperationListResponse } from '@emucat/con
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startServer, type HarnessServer, type RecordedRequest } from './server';
+import { runVite } from './vite-build';
 import {
   adminVm,
   AGENT_ID,
@@ -177,11 +177,7 @@ const noSidewaysScroll = (page: Page) =>
 
 beforeAll(async () => {
   if (!process.env.EMUCAT_BROWSER_DIST) {
-    execFileSync(
-      'npx',
-      ['vite', 'build', '--outDir', 'e2e/dist-app', '--emptyOutDir', '--logLevel', 'warn'],
-      { cwd: WEB, stdio: 'inherit' },
-    );
+    runVite(['build', '--outDir', 'e2e/dist-app', '--emptyOutDir', '--logLevel', 'warn']);
   }
   server = await startServer(DIST, { fallback: 'index.html' });
   answer('GET /ready', () => ({ status: 'ready', checks: { database: 'ok', migrations: 'ok' } }));

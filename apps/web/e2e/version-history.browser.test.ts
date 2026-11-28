@@ -8,13 +8,13 @@
  * Run with `pnpm --filter @emucat/web test:browser`. The browser is Edge or Chrome, or `EMUCAT_BROWSER_PATH`.
  * Screenshots and measurements are written to `EMUCAT_BROWSER_SCREENSHOTS` when set.
  */
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startServer, type HarnessServer, type RecordedRequest } from './server';
+import { runVite } from './vite-build';
 import {
   adminVm,
   AGENT_NAME,
@@ -111,11 +111,7 @@ async function measure(page: Page, label: string) {
 }
 
 beforeAll(async () => {
-  execFileSync(
-    'npx',
-    ['vite', 'build', '--outDir', 'e2e/dist-app', '--emptyOutDir', '--logLevel', 'warn'],
-    { cwd: WEB, stdio: 'inherit' },
-  );
+  runVite(['build', '--outDir', 'e2e/dist-app', '--emptyOutDir', '--logLevel', 'warn']);
   server = await startServer(DIST, { fallback: 'index.html' });
   answer('GET /ready', () => ({ status: 'ready', checks: { database: 'ok', migrations: 'ok' } }));
   answer('GET /auth/session', () => SESSION);
