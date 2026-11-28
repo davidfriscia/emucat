@@ -13,7 +13,15 @@ import { DEFAULT_LOCAL_LIMITS, type LocalArchiveLimits } from '../src/archive-lo
 import type { WorkerRequest, WorkerResponse } from '../src/archive-local/protocol';
 import { serveArchiveRequests } from '../src/archive-local/worker-handler';
 import { ArchiveExplorerDialog } from '../src/components/ArchiveExplorer';
-import { PDF_MINIMAL, PNG_1X1, tar, text, zip } from './archive-local/fixtures';
+import {
+  PDF_MINIMAL,
+  PNG_1X1,
+  tar,
+  text,
+  zip,
+  zip64Data,
+  zip64Layout,
+} from './archive-local/fixtures';
 import { mockApi, type RecordedCall } from './mock-api';
 
 vi.mock('vditor', () => ({ default: { md2html: async () => '<p>md</p>' } }));
@@ -561,5 +569,127 @@ describe('Nested archives in Archive Explorer', () => {
     expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).startsWith('/api/'))).toBe(
       true,
     );
+  });
+});
+
+/**
+ * A nested ZIP64 archive as the agent's zip 7.3 writes one (decision 0061): every central record has a placeholder
+ * ZIP64 record, then the real one. The browser read the placeholder until the browser-local reader followed 0061.
+ */
+const MOUSE_BYTES = Uint8Array.from([0xe9, 0x10, 0x00, 0x4d, 0x5a, 0x00, 0xff, 0x7f]);
+const AGENT64 = zip64Layout(
+  [
+    { name: 'README.TXT', data: text('Agent ZIP64 readme\r\n') },
+    { name: 'docs/', method: 0 },
+    { name: 'docs/setup.png', data: PNG_1X1, method: 0, zip64: { fields: { offset: true } } },
+    { name: 'MOUSE.COM', data: MOUSE_BYTES, zip64: { fields: { offset: true } } },
+    {
+      name: 'drivers.zip',
+      data: zip64Layout([{ name: 'INSTALL.TXT', data: INSTALL }], { end64: true }),
+    },
+  ],
+  { end64: true },
+);
+const CONTRADICTORY64 = zip64Layout([
+  {
+    name: 'README.TXT',
+    data: text('two answers'),
+    method: 0,
+    zip64: { records: [zip64Data(11, 11), zip64Data(12, 11)] },
+  },
+]);
+const ZIP64_ROOT = [
+  entry('86box.cfg', 100),
+  entry('agent64.zip', AGENT64.length),
+  entry('contradictory64.zip', CONTRADICTORY64.length),
+];
+
+function zip64Routes() {
+  return routes({
+    [`GET ${ARCHIVE}/entries`]: {
+      view: 'logical',
+      path: '',
+      q: null,
+      entries: ZIP64_ROOT,
+      total: ZIP64_ROOT.length,
+      nextOffset: null,
+    },
+    [`GET ${ARCHIVE}/entry`]: (call: RecordedCall) => {
+      const path = call.query.get('path') ?? '';
+      return details(path, ZIP64_ROOT.find((item) => item.path === path)?.sizeBytes ?? 0);
+    },
+    [`GET ${ARCHIVE}/entry/download`]: (call: RecordedCall) => {
+      const path = call.query.get('path');
+      const body =
+        path === 'agent64.zip' ? AGENT64 : path === 'contradictory64.zip' ? CONTRADICTORY64 : 'x';
+      return new Response(body as BodyInit, {
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+    },
+  });
+}
+
+describe('Nested ZIP64 archives in Archive Explorer (decision 0061)', () => {
+  it('browses, previews and downloads from a nested ZIP64 archive with the agent’s duplicate records', async () => {
+    const api = mockApi(zip64Routes());
+    const saved: Blob[] = [];
+    vi.mocked(URL.createObjectURL).mockImplementation((blob) => {
+      saved.push(blob as Blob);
+      return 'blob:test/saved';
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    open();
+    await expand('agent64.zip, ZIP archive');
+    const view = await dialog();
+    expect(await view.findByRole('treeitem', { name: 'docs, directory' })).toBeTruthy();
+    const before = api.calls.length;
+
+    let panel = await select('README.TXT');
+    expect((await panel.findByLabelText('Contents of README.TXT')).textContent).toBe(
+      'Agent ZIP64 readme\r\n',
+    );
+    expect(panel.getByText(/matched the CRC-32 its archive records/)).toBeTruthy();
+
+    await expand('docs, directory');
+    panel = await select('setup.png');
+    expect(await panel.findByRole('img', { name: 'Preview of docs/setup.png' })).toBeTruthy();
+
+    panel = await select('MOUSE.COM');
+    expect(await panel.findByLabelText('Hexadecimal bytes')).toBeTruthy();
+    fireEvent.click(panel.getByRole('button', { name: 'Download file' }));
+    expect(
+      await panel.findByText(/Saved from the nested archive, after matching its CRC-32/),
+    ).toBeTruthy();
+    expect([...new Uint8Array(await (saved.at(-1) as Blob).arrayBuffer())]).toEqual([
+      ...MOUSE_BYTES,
+    ]);
+
+    // A ZIP64 archive inside it is opened from the bytes already in the browser.
+    await expand('drivers.zip, ZIP archive');
+    panel = await select('INSTALL.TXT');
+    expect((await panel.findByLabelText('Contents of INSTALL.TXT')).textContent).toBe(
+      'Run INSTALL.EXE from drive A:\r\n',
+    );
+    expect(api.calls.length).toBe(before);
+  });
+
+  it('refuses a nested archive whose ZIP64 records contradict each other, and keeps the rest usable', async () => {
+    mockApi(zip64Routes());
+    open();
+    const view = await dialog();
+    await expand('contradictory64.zip, ZIP archive');
+    await waitFor(() =>
+      expect(
+        view.getAllByRole('alert').some((alert) => /damaged/.test(alert.textContent ?? '')),
+      ).toBe(true),
+    );
+    // The same worker still opens and reads a valid ZIP64 archive afterwards.
+    await expand('agent64.zip, ZIP archive');
+    const panel = await select('README.TXT');
+    expect((await panel.findByLabelText('Contents of README.TXT')).textContent).toBe(
+      'Agent ZIP64 readme\r\n',
+    );
+    expect(workers).toHaveLength(1);
+    expect(workers[0]?.terminated).toBe(false);
   });
 });

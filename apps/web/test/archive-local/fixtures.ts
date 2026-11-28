@@ -203,3 +203,184 @@ export const PPM_2X1 = concat([text('P6\n2 1\n255\n'), [255, 0, 0, 0, 0, 255]]);
 export const PDF_MINIMAL = text(
   '%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n',
 );
+
+/** One extra-field record: its header ID, its length, then its data. */
+export const extraField = (id: number, data: Uint8Array | number[]): Uint8Array =>
+  concat([u16(id), u16(data.length), data]);
+
+const u64Big = (value: number | bigint) => {
+  const big = BigInt(value);
+  return [...u32(Number(big & 0xffffffffn)), ...u32(Number((big >> 32n) & 0xffffffffn))];
+};
+
+/** The data of a ZIP64 extended-information record holding these 64-bit values, in order. */
+export const zip64Data = (...values: Array<number | bigint>): Uint8Array =>
+  concat(values.map(u64Big));
+
+/** The fixed fields of a central record that are 0xFFFFFFFF, each expanded in ZIP64. */
+export interface Zip64Fields {
+  uncompressed: boolean;
+  compressed: boolean;
+  offset: boolean;
+}
+
+export interface Zip64LayoutEntry {
+  name: string;
+  data?: Uint8Array;
+  /** 0 stored, 8 deflated (default). */
+  method?: number;
+  /** Override the recorded CRC-32. */
+  crc?: number;
+  /**
+   * How the central record uses ZIP64 (decision 0061). `fields` says which fixed fields are 0xFFFFFFFF; by default
+   * both sizes, as the agent's zip 7.3 writes them for `large_file`. `records` is `agent` (the placeholder record,
+   * then the real one: the agent's layout), `single` (the real one only), `none` (no ZIP64 record, though the fields
+   * say ZIP64), or the raw data of each ZIP64 record. `false`: no ZIP64 at all.
+   */
+  zip64?:
+    false | { fields?: Partial<Zip64Fields>; records?: 'agent' | 'single' | 'none' | Uint8Array[] };
+  /** The real values written into the real ZIP64 record, instead of the entry's own (a lying record). */
+  real?: Partial<{ uncompressed: number | bigint; compressed: number | bigint }>;
+  /** Raw extra-field records (any IDs) placed before and after the ZIP64 records of the central record. */
+  extraBefore?: Uint8Array;
+  extraAfter?: Uint8Array;
+  /** Raw bytes for the whole central extra field, framing included (to make a broken one). */
+  centralExtra?: Uint8Array;
+}
+
+/**
+ * A ZIP whose central records carry exactly the ZIP64 records asked for, as the API's `buildZip64Layout` does for
+ * the server (decision 0061), but small and in memory. Local headers are written as the agent writes them when an
+ * entry uses ZIP64: sizes 0xFFFFFFFF and one local ZIP64 record with the real sizes. `end64` adds the ZIP64 end
+ * record and locator (with the classic end record full of markers).
+ */
+export function zip64Layout(
+  entries: Zip64LayoutEntry[],
+  options: { end64?: boolean } = {},
+): Uint8Array {
+  const locals: Uint8Array[] = [];
+  const centrals: Uint8Array[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const data = entry.data ?? new Uint8Array(0);
+    const method = entry.method ?? 8;
+    const stored = method === 8 ? deflateSync(data) : data;
+    const name = text(entry.name);
+    const crc = entry.crc ?? crc32(data);
+    const layout = entry.zip64 === false ? null : (entry.zip64 ?? {});
+    const fields: Zip64Fields = {
+      uncompressed: layout?.fields?.uncompressed ?? layout !== null,
+      compressed: layout?.fields?.compressed ?? layout !== null,
+      offset: layout?.fields?.offset ?? false,
+    };
+    const realUncompressed = entry.real?.uncompressed ?? data.length;
+    const realCompressed = entry.real?.compressed ?? stored.length;
+    const real: Array<number | bigint> = [];
+    const placeholder: Array<number | bigint> = [];
+    if (fields.uncompressed) {
+      real.push(realUncompressed);
+      placeholder.push(0xffffffff);
+    }
+    if (fields.compressed) {
+      real.push(realCompressed);
+      placeholder.push(0xffffffff);
+    }
+    if (fields.offset) {
+      real.push(offset);
+      placeholder.push(offset);
+    }
+    const records =
+      layout === null || layout.records === 'none'
+        ? []
+        : layout.records === 'single'
+          ? [zip64Data(...real)]
+          : layout.records === undefined || layout.records === 'agent'
+            ? [zip64Data(...placeholder), zip64Data(...real)]
+            : layout.records;
+    const localZip64 = layout !== null;
+    const localExtra = localZip64
+      ? extraField(1, zip64Data(data.length, stored.length))
+      : new Uint8Array(0);
+    const local = concat([
+      u32(0x04034b50),
+      u16(localZip64 ? 45 : 20),
+      u16(0x0800),
+      u16(method),
+      u16(0x6000),
+      u16(0x5821),
+      u32(crc),
+      u32(localZip64 ? 0xffffffff : stored.length),
+      u32(localZip64 ? 0xffffffff : data.length),
+      u16(name.length),
+      u16(localExtra.length),
+      name,
+      localExtra,
+      stored,
+    ]);
+    const centralExtra =
+      entry.centralExtra ??
+      concat([
+        entry.extraBefore ?? new Uint8Array(0),
+        ...records.map((record) => extraField(1, record)),
+        entry.extraAfter ?? new Uint8Array(0),
+      ]);
+    centrals.push(
+      concat([
+        u32(0x02014b50),
+        u16(20),
+        u16(localZip64 ? 45 : 20),
+        u16(0x0800),
+        u16(method),
+        u16(0x6000),
+        u16(0x5821),
+        u32(crc),
+        u32(fields.compressed ? 0xffffffff : stored.length),
+        u32(fields.uncompressed ? 0xffffffff : data.length),
+        u16(name.length),
+        u16(centralExtra.length),
+        u16(0),
+        u16(0),
+        u16(0),
+        u32(0),
+        u32(fields.offset ? 0xffffffff : offset),
+        name,
+        centralExtra,
+      ]),
+    );
+    locals.push(local);
+    offset += local.length;
+  }
+  const directory = concat(centrals);
+  const parts: (Uint8Array | number[])[] = [...locals, directory];
+  const end64 = options.end64 === true;
+  if (end64) {
+    parts.push(
+      concat([
+        u32(0x06064b50),
+        u64(44),
+        u16(45),
+        u16(45),
+        u32(0),
+        u32(0),
+        u64(entries.length),
+        u64(entries.length),
+        u64(directory.length),
+        u64(offset),
+      ]),
+      concat([u32(0x07064b50), u32(0), u64(offset + directory.length), u32(1)]),
+    );
+  }
+  parts.push(
+    concat([
+      u32(0x06054b50),
+      u16(0),
+      u16(0),
+      u16(end64 ? 0xffff : entries.length),
+      u16(end64 ? 0xffff : entries.length),
+      u32(end64 ? 0xffffffff : directory.length),
+      u32(end64 ? 0xffffffff : offset),
+      u16(0),
+    ]),
+  );
+  return concat(parts);
+}
