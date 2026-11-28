@@ -57,10 +57,10 @@ export interface ZipEntry {
   internalAttributes: number;
   externalAttributes: number;
   localHeaderOffset: number;
-  /** The central extra field, without its ZIP64 record. */
+  /** The central extra field, without its ZIP64 records. */
   extra: Buffer;
   comment: Buffer;
-  /** Whether the central record carried a ZIP64 extra field. */
+  /** Whether the central record carried a ZIP64 extra field (one record or more). */
   zip64: boolean;
 }
 
@@ -119,6 +119,47 @@ function withoutZip64(extra: Buffer): Buffer {
         return Buffer.concat([header, record.data]);
       }),
   );
+}
+
+/**
+ * The real uncompressed size, compressed size and local header offset of a central record: its fixed fields, in
+ * that order, and the data of every ZIP64 extended-information record (0x0001) it carries, in order.
+ *
+ * In each record, a 64-bit value follows for each fixed field that is 0xFFFFFFFF, in the order above (APPNOTE
+ * 4.5.3), so every record must hold one for each such field. A record may hold more, as some writers add the disk
+ * number; that is ignored, as before.
+ *
+ * A central record may carry several ZIP64 records. The agent's zip 7.3 writes two for every entry that needs ZIP64
+ * (decision 0061, F-4): first one whose sizes are the placeholder 0xFFFFFFFF, then one with the real values. So, for
+ * each field, a record giving 0xFFFFFFFF yields to one giving anything else, as the agent's own reader and the zip
+ * crate's do. Two records giving two different values other than 0xFFFFFFFF contradict each other: readers disagree
+ * on which is meant, so the archive is refused. When every record gives 0xFFFFFFFF, that is the value: a real one,
+ * such as a file of 4,294,967,295 bytes, still passes, and a placeholder never resolved is then refused by the checks
+ * that follow (the data's bounds, the manifest's sizes, the size and CRC read back).
+ */
+function resolveZip64(
+  fixed: [number, number, number],
+  records: Buffer[],
+): [number, number, number] {
+  const wanted = fixed.filter((value) => value === MAX_U32).length;
+  if (wanted === 0) return fixed;
+  if (records.length === 0) throw malformed('An entry needs ZIP64 and has no ZIP64 field');
+  for (const data of records) {
+    if (data.length < 8 * wanted) throw malformed('A ZIP64 field is truncated');
+  }
+  let position = 0;
+  return fixed.map((value) => {
+    if (value !== MAX_U32) return value;
+    let resolved = MAX_U32;
+    for (const data of records) {
+      const candidate = u64(data, position);
+      if (candidate === MAX_U32 || candidate === resolved) continue;
+      if (resolved !== MAX_U32) throw malformed('An entry’s ZIP64 records contradict each other');
+      resolved = candidate;
+    }
+    position += 8;
+    return resolved;
+  }) as [number, number, number];
 }
 
 export interface DirectoryLimits {
@@ -210,28 +251,17 @@ export async function readCentralDirectory(
     const rawExtra = directory.subarray(at + 46 + nameLength, at + 46 + nameLength + extraLength);
     const name = new TextDecoder('utf-8', { fatal: true }).decode(rawName);
 
-    let uncompressedSize: number = directory.readUInt32LE(at + 24);
-    let compressedSize: number = directory.readUInt32LE(at + 20);
-    let localHeaderOffset: number = directory.readUInt32LE(at + 42);
-    const zip64Record = extraRecords(rawExtra).find((record) => record.id === EXTRA_ZIP64);
-    if (zip64Record) {
-      let position = 0;
-      const take = () => {
-        if (position + 8 > zip64Record.data.length) throw malformed('A ZIP64 field is truncated');
-        const value = u64(zip64Record.data, position);
-        position += 8;
-        return value;
-      };
-      if (uncompressedSize === MAX_U32) uncompressedSize = take();
-      if (compressedSize === MAX_U32) compressedSize = take();
-      if (localHeaderOffset === MAX_U32) localHeaderOffset = take();
-    } else if (
-      uncompressedSize === MAX_U32 ||
-      compressedSize === MAX_U32 ||
-      localHeaderOffset === MAX_U32
-    ) {
-      throw malformed('An entry needs ZIP64 and has no ZIP64 field');
-    }
+    const zip64Records = extraRecords(rawExtra)
+      .filter((record) => record.id === EXTRA_ZIP64)
+      .map((record) => record.data);
+    const [uncompressedSize, compressedSize, localHeaderOffset] = resolveZip64(
+      [
+        directory.readUInt32LE(at + 24),
+        directory.readUInt32LE(at + 20),
+        directory.readUInt32LE(at + 42),
+      ],
+      zip64Records,
+    );
     if (localHeaderOffset + 30 + compressedSize > directoryOffset) {
       throw malformed('An entry’s data overlaps the central directory');
     }
@@ -252,7 +282,7 @@ export async function readCentralDirectory(
       localHeaderOffset,
       extra: withoutZip64(rawExtra),
       comment: Buffer.from(directory.subarray(end - commentLength, end)),
-      zip64: zip64Record !== undefined,
+      zip64: zip64Records.length > 0,
     });
     at = end;
   }
